@@ -1,0 +1,125 @@
+"""Canonical enums mirrored from docs/CONTRACTS.md and aligned with ExposureEclipse."""
+
+from __future__ import annotations
+
+from enum import Enum
+
+
+class ViewOfRisk(str, Enum):
+    UNADJUSTED = "UNADJUSTED"
+    ADJUSTED = "ADJUSTED"
+
+
+class PerilCode(str, Enum):
+    WS = "WS"
+    EQ = "EQ"
+    CS = "CS"
+    FL = "FL"
+    WF = "WF"
+    FR = "FR"
+    WT = "WT"
+    TR = "TR"
+    CY = "CY"
+    ALL = "ALL"
+
+
+class NodeType(str, Enum):
+    LOSS_SOURCE = "LOSS_SOURCE"
+    PORTFOLIO_ROLLUP = "PORTFOLIO_ROLLUP"
+    INDUSTRY_INDEX_SOURCE = "INDUSTRY_INDEX_SOURCE"
+    REGION_PERIL_FILTER = "REGION_PERIL_FILTER"
+    DATE_WINDOW_FILTER = "DATE_WINDOW_FILTER"
+    LOSS_SIZE_FILTER = "LOSS_SIZE_FILTER"
+    EVENT_ORDER_FILTER = "EVENT_ORDER_FILTER"
+    COMBINATION = "COMBINATION"
+    UPLIFT = "UPLIFT"
+    OCC_XL = "OCC_XL"
+    AGG_XL = "AGG_XL"
+    QUOTA_SHARE = "QUOTA_SHARE"
+    AGG_QUOTA_SHARE = "AGG_QUOTA_SHARE"
+    SURPLUS_SHARE = "SURPLUS_SHARE"
+    ILW_OPTION = "ILW_OPTION"
+    CASCADING_TOWER = "CASCADING_TOWER"
+    PRICING_OUTPUT = "PRICING_OUTPUT"
+    YELT_OUTPUT = "YELT_OUTPUT"
+    EP_OUTPUT = "EP_OUTPUT"
+
+
+class ProgrammeStatus(str, Enum):
+    SUBMISSION = "SUBMISSION"
+    INDICATIVE = "INDICATIVE"
+    QUOTED = "QUOTED"
+    AUTHORIZED = "AUTHORIZED"
+    FIRM_ORDER = "FIRM_ORDER"
+    BOUND = "BOUND"
+    BOUND_FOR_OPS = "BOUND_FOR_OPS"
+    DECLINED = "DECLINED"
+    NTU = "NTU"
+    EXPIRED = "EXPIRED"
+    PLANNED = "PLANNED"
+
+
+class ContractDirection(str, Enum):
+    ASSUMED = "ASSUMED"
+    INTERNAL_CEDED = "INTERNAL_CEDED"
+    EXTERNAL_RETRO = "EXTERNAL_RETRO"
+
+
+class StructureType(str, Enum):
+    OCC_XL = "OCC_XL"
+    AGG_XL = "AGG_XL"
+    QUOTA_SHARE = "QUOTA_SHARE"
+    STOP_LOSS = "STOP_LOSS"
+    CASCADING = "CASCADING"
+    ILW = "ILW"
+    CAT_BOND = "CAT_BOND"
+
+
+class InstrumentType(str, Enum):
+    UNL = "UNL"
+    INDUSTRY_INDEX = "INDUSTRY_INDEX"
+    PARAMETRIC = "PARAMETRIC"
+    HYBRID = "HYBRID"
+
+
+class PlacementType(str, Enum):
+    OPEN_MARKET = "OPEN_MARKET"
+    PRIVATE = "PRIVATE"
+    FACILITY = "FACILITY"
+
+
+class IlwTriggerType(str, Enum):
+    BINARY = "BINARY"
+    PRO_RATA = "PRO_RATA"
+    AGGREGATE = "AGGREGATE"
+    SECOND_EVENT = "SECOND_EVENT"
+
+
+class SimSetFormat(str, Enum):
+    YELT = "YELT"
+    ELT = "ELT"
+    SYNTHETIC = "SYNTHETIC"
+
+
+class LossSourceType(str, Enum):
+    MANUAL = "MANUAL"
+    BORDEREAUX_UPLOAD = "BORDEREAUX_UPLOAD"
+    EXPOSURE_ECLIPSE = "EXPOSURE_ECLIPSE"
+    HISTORICAL_EVENT = "HISTORICAL_EVENT"
+    PROGRAMME_HISTORY = "PROGRAMME_HISTORY"
+    CLAIM = "CLAIM"
+    STOCHASTIC_PICK = "STOCHASTIC_PICK"
+    SCENARIO_INVENTED = "SCENARIO_INVENTED"
+    SCENARIO_PERTURBED = "SCENARIO_PERTURBED"
+
+
+class LinkType(str, Enum):
+    DERIVED_FROM = "DERIVED_FROM"
+    USES_STRUCTURE = "USES_STRUCTURE"
+    USES_LOSSES = "USES_LOSSES"
+    USES_UPLIFT = "USES_UPLIFT"
+    BRANCHED_FROM = "BRANCHED_FROM"
+    BOUND_AS = "BOUND_AS"
+    SUPERSEDES = "SUPERSEDES"
+    HEDGED_BY = "HEDGED_BY"
+    EXPORTED_FROM = "EXPORTED_FROM"

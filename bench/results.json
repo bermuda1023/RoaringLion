@@ -1,0 +1,26 @@
+{
+  "kernel_benchmark": {
+    "num_trials": 100000,
+    "total_events": 300000,
+    "rust_pyo3_single_occ_xl_ms": 3.84,
+    "rust_pyo3_single_agg_xl_ms": 6.68,
+    "python_loop_single_occ_xl_ms": 164.56,
+    "speedup_rust_vs_python": 42.8,
+    "rust_pyo3_500_layers_ms": 663.88,
+    "max_numerical_diff_rust_vs_python": 0.0,
+    "julia_status": "not_installed_on_vm_rust_passed_gate"
+  },
+  "solver_benchmark": {
+    "solver": "HiGHS (highspy)",
+    "num_layers": 100,
+    "num_trials_represented": 100000,
+    "lp_tail_scenarios": 2000,
+    "lp_ms": 84.37,
+    "lp_status": "Optimal",
+    "lp_expected_profit_m": 150.871,
+    "milp_tail_scenarios": 500,
+    "milp_min_line_ms": 34.03,
+    "milp_status": "Optimal",
+    "milp_expected_profit_m": 150.871
+  }
+}
