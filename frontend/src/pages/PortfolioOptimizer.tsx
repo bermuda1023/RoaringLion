@@ -1,31 +1,6 @@
 import { useMutation } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-
-async function postJson<T>(url: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    let message = `HTTP ${res.status}: ${text.slice(0, 300)}`;
-    try {
-      const body = JSON.parse(text) as { detail?: unknown };
-      if (typeof body.detail === 'string') message = body.detail;
-      else if (Array.isArray(body.detail)) {
-        const msgs = body.detail
-          .map((d) => (d && typeof d === 'object' && 'msg' in d ? String((d as { msg: unknown }).msg) : ''))
-          .filter(Boolean);
-        if (msgs.length) message = msgs.join('; ');
-      }
-    } catch {
-      // keep the HTTP fallback message
-    }
-    throw new Error(message);
-  }
-  return res.json() as Promise<T>;
-}
+import { postJson } from '../api/client';
 
 export function PortfolioOptimizer() {
   const [mode, setMode] = useState<'CURRENT' | 'FORWARD_PLANNING'>('FORWARD_PLANNING');

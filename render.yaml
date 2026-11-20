@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: roaringlion-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: ROARING_LION_DATA_DIR
+        value: /tmp/roaring_lion_data

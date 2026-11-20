@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { api } from './api/client';
+import { API_BASE, api } from './api/client';
 import { BreadcrumbBar } from './components/BreadcrumbBar';
 import { RocCdfChart } from './components/RocCdfChart';
 import { AllocationAndBranches } from './pages/AllocationAndBranches';
@@ -112,6 +112,14 @@ export function App() {
       </header>
 
       <main className="main">
+        {programmesQ.isError && (
+          <div className="error-banner">
+            <strong>Backend API unreachable</strong> ({API_BASE || 'same-origin /api'}):{' '}
+            {String((programmesQ.error as Error)?.message ?? 'Network error')}. If this is deployed on Vercel, host the
+            FastAPI + Rust backend via the root <code>Dockerfile</code> (e.g. Render/Railway/Fly.io) and set{' '}
+            <code>VITE_API_BASE_URL</code> in Vercel Project Settings, then redeploy.
+          </div>
+        )}
         {tab === 'cms' && (
           <ContractManager
             onSelectProgramme={(id) => {

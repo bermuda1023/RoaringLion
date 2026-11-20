@@ -1,31 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-
-async function postJson<T>(url: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    let message = `HTTP ${res.status}: ${text.slice(0, 300)}`;
-    try {
-      const body = JSON.parse(text) as { detail?: unknown };
-      if (typeof body.detail === 'string') message = body.detail;
-      else if (Array.isArray(body.detail)) {
-        const msgs = body.detail
-          .map((d) => (d && typeof d === 'object' && 'msg' in d ? String((d as { msg: unknown }).msg) : ''))
-          .filter(Boolean);
-        if (msgs.length) message = msgs.join('; ');
-      }
-    } catch {
-      // keep the HTTP fallback message
-    }
-    throw new Error(message);
-  }
-  return res.json() as Promise<T>;
-}
+import { fetchJson, postJson } from '../api/client';
 
 export function CatModelsAndOps() {
   const qc = useQueryClient();
@@ -34,10 +9,10 @@ export function CatModelsAndOps() {
     'Cedent: Beacon Property Mutual. Layer: 30m xs 85m Florida Windstorm Cat XL, 21.5% ROL, 72 hours clause.',
   );
 
-  const jobsQ = useQuery({ queryKey: ['modelRuns'], queryFn: async () => (await (await fetch('/api/model-runs')).json()) as any[] });
-  const eeQ = useQuery({ queryKey: ['eeProgs'], queryFn: async () => (await (await fetch('/api/integrations/exposure-eclipse/programmes')).json()) as any[] });
-  const invQ = useQuery({ queryKey: ['investors'], queryFn: async () => (await (await fetch('/api/fund-ops/investors')).json()) as any[] });
-  const marksQ = useQuery({ queryKey: ['marks'], queryFn: async () => (await (await fetch('/api/market-marks')).json()) as any[] });
+  const jobsQ = useQuery({ queryKey: ['modelRuns'], queryFn: () => fetchJson<any[]>('/api/model-runs') });
+  const eeQ = useQuery({ queryKey: ['eeProgs'], queryFn: () => fetchJson<any[]>('/api/integrations/exposure-eclipse/programmes') });
+  const invQ = useQuery({ queryKey: ['investors'], queryFn: () => fetchJson<any[]>('/api/fund-ops/investors') });
+  const marksQ = useQuery({ queryKey: ['marks'], queryFn: () => fetchJson<any[]>('/api/market-marks') });
 
   const runModelMut = useMutation({
     mutationFn: () =>

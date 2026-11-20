@@ -94,6 +94,12 @@ export interface StaleManifestInfo {
   staleReasons: string[];
 }
 
+export const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
+
+export function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
 export function readableError(status: number, text: string): string {
   try {
     const body = JSON.parse(text) as { detail?: unknown };
@@ -110,8 +116,8 @@ export function readableError(status: number, text: string): string {
   return `HTTP ${status}: ${text.slice(0, 300)}`;
 }
 
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
+export async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(apiUrl(url), {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   });
@@ -119,6 +125,13 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(readableError(res.status, await res.text()));
   }
   return res.json() as Promise<T>;
+}
+
+export function postJson<T>(url: string, body?: unknown): Promise<T> {
+  return fetchJson<T>(url, {
+    method: 'POST',
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
 }
 
 export const api = {
@@ -136,7 +149,7 @@ export const api = {
     fetchJson<ContractFull>(`/api/contracts/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
   listSimSets: () => fetchJson<SimSetDetail[]>('/api/sim-sets'),
   ingestYeltFile: async (formData: FormData): Promise<SimSetDetail> => {
-    const res = await fetch('/api/sim-sets/ingest/yelt', { method: 'POST', body: formData });
+    const res = await fetch(apiUrl('/api/sim-sets/ingest/yelt'), { method: 'POST', body: formData });
     if (!res.ok) throw new Error(readableError(res.status, await res.text()));
     return res.json() as Promise<SimSetDetail>;
   },

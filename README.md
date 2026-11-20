@@ -34,3 +34,8 @@ cd backend && PYTHONPATH=. ../.venv/bin/pytest -v
 # Re-run kernel & HiGHS solver benchmarks
 .venv/bin/python bench/benchmark_kernel.py
 ```
+
+## Deployment (Vercel + Backend Container)
+
+1. **Backend (`Dockerfile` / `render.yaml`)**: Deploy the repo to any Docker host (Render Blueprint via `render.yaml`, Railway, Fly.io, or an internal server). The multi-stage `Dockerfile` compiles the Rust PyO3 kernel and runs `uvicorn app.main:app` on `$PORT` with health check `/api/health`.
+2. **Frontend (`vercel.json`)**: Connect the repo to Vercel (the root `vercel.json` builds `frontend/` into `frontend/dist` automatically). In Vercel Project Settings → Environment Variables, set `VITE_API_BASE_URL` to your backend URL (for example `https://roaringlion-api.onrender.com`) and redeploy.
