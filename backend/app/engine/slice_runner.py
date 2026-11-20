@@ -1,8 +1,12 @@
-"""Phase 0 First Slice Engine — wraps the compiled Rust kernel (`roaring_lion_engine`).
+"""Phase 0 + Phase 2 Engine — wraps the compiled Rust kernel (`roaring_lion_engine`).
 
 Implements:
 - Per-deal Uplifts (UNADJUSTED vs ADJUSTED)
-- DAG evaluation across both views with content-addressed node caching
+- Full DAG evaluation across both views with content-addressed node caching:
+  LOSS_SOURCE, INDUSTRY_INDEX_SOURCE, REGION_PERIL_FILTER, DATE_WINDOW_FILTER,
+  LOSS_SIZE_FILTER, EVENT_ORDER_FILTER, COMBINATION (+/- weighted), UPLIFT,
+  OCC_XL, AGG_XL, QUOTA_SHARE, AGG_QUOTA_SHARE, SURPLUS_SHARE, ILW_OPTION,
+  CASCADING_TOWER, PRICING_OUTPUT, YELT_OUTPUT, EP_OUTPUT.
 - Portfolio Rollup + ROC/IRR CDF + Risk Appetite Guidelines + Euler Co-TVaR allocation
 - Deterministic loss runner calling the exact same Rust financial-terms code
 """
@@ -11,7 +15,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
+from collections import OrderedDict
 from typing import Any
 
 import numpy as np
@@ -23,11 +27,11 @@ from app.models.domain import (
     CdfPoint,
     DagEvalResponse,
     DeterministicLayerStatement,
-    DeterministicLossRow,
     DeterministicRunRequest,
     DeterministicRunResponse,
     DeterministicStepResult,
     EpPoint,
+    GraphSpec,
     GuidelineCheck,
     LayerAllocationRow,
     LayerStateSnapshot,
@@ -40,6 +44,29 @@ from app.models.enums import NodeType, ViewOfRisk
 from app.services.lineage import LineageRegistry, canonical_hash
 
 DEFAULT_RETURN_PERIODS = [10.0, 20.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0]
+
+# Content-addressed LRU cache for DAG intermediate node outputs:
+# key -> (ev_out, ann, mx, rip, ep_dict)
+_NODE_CACHE: OrderedDict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]] = OrderedDict()
+_MAX_CACHE_ENTRIES = 128
+
+
+def clear_dag_cache() -> None:
+    _NODE_CACHE.clear()
+
+
+def _cache_get(key: str):
+    if key in _NODE_CACHE:
+        _NODE_CACHE.move_to_end(key)
+        return _NODE_CACHE[key]
+    return None
+
+
+def _cache_put(key: str, val) -> None:
+    _NODE_CACHE[key] = val
+    _NODE_CACHE.move_to_end(key)
+    while len(_NODE_CACHE) > _MAX_CACHE_ENTRIES:
+        _NODE_CACHE.popitem(last=False)
 
 
 def _serialize_uplift_rules(uplift_set: UpliftSet) -> str:
@@ -71,29 +98,18 @@ def _ep_stats_from_vector(vec: np.ndarray) -> dict[str, Any]:
     return json.loads(rle.ep_stats(np.ascontiguousarray(vec, dtype=np.float64), DEFAULT_RETURN_PERIODS))
 
 
-def evaluate_programme_dag(
-    programme: ProgrammeDeal,
-    yelt: YeltTable,
-    lineage: LineageRegistry,
-    views: list[ViewOfRisk] | None = None,
-) -> tuple[DagEvalResponse, dict[str, dict[str, np.ndarray]]]:
-    """Evaluate a programme's DAG on UNADJUSTED and ADJUSTED views in one pass via Rust.
+def validate_dag_acyclic(graph: GraphSpec) -> list[str]:
+    """Validate DAG acyclicity and return topological node order."""
+    nodes_by_id = {n.node_id: n for n in graph.nodes}
+    in_degree: dict[str, int] = {n.node_id: 0 for n in graph.nodes}
+    outgoing: dict[str, list[str]] = {n.node_id: [] for n in graph.nodes}
 
-    Returns (DagEvalResponse, node_annual_vectors[view][node_id]).
-    """
-    t0 = time.perf_counter()
-    target_views = views or [ViewOfRisk.UNADJUSTED, ViewOfRisk.ADJUSTED]
-    nodes_by_id = {n.node_id: n for n in programme.graph.nodes}
-    incoming: dict[str, list] = {n.node_id: [] for n in programme.graph.nodes}
-    in_degree: dict[str, int] = {n.node_id: 0 for n in programme.graph.nodes}
-    outgoing: dict[str, list[str]] = {n.node_id: [] for n in programme.graph.nodes}
-
-    for edge in programme.graph.edges:
-        incoming[edge.target].append(edge)
+    for edge in graph.edges:
+        if edge.source not in nodes_by_id or edge.target not in nodes_by_id:
+            raise ValueError(f"Edge {edge.edge_id} references unknown node")
         outgoing[edge.source].append(edge.target)
         in_degree[edge.target] += 1
 
-    # Topological sort
     queue = [nid for nid, deg in in_degree.items() if deg == 0]
     topo: list[str] = []
     while queue:
@@ -105,108 +121,250 @@ def evaluate_programme_dag(
                 queue.append(nxt)
     if len(topo) != len(nodes_by_id):
         raise ValueError("Graph contains a cycle")
+    return topo
+
+
+def evaluate_programme_dag(
+    programme: ProgrammeDeal,
+    yelt: YeltTable,
+    lineage: LineageRegistry,
+    views: list[ViewOfRisk] | None = None,
+    industry_yelt: YeltTable | None = None,
+) -> tuple[DagEvalResponse, dict[str, dict[str, np.ndarray]]]:
+    """Evaluate a programme's DAG on UNADJUSTED and ADJUSTED views via Rust with content-addressed node caching."""
+    t0 = time.perf_counter()
+    target_views = views or [ViewOfRisk.UNADJUSTED, ViewOfRisk.ADJUSTED]
+    nodes_by_id = {n.node_id: n for n in programme.graph.nodes}
+    incoming: dict[str, list] = {n.node_id: [] for n in programme.graph.nodes}
+    for edge in programme.graph.edges:
+        incoming[edge.target].append(edge)
+
+    topo = validate_dag_acyclic(programme.graph)
 
     views_output: dict[str, list[NodeViewMetrics]] = {}
     annual_vectors: dict[str, dict[str, np.ndarray]] = {}
     rip_vectors: dict[str, dict[str, np.ndarray]] = {}
+    cache_hits = 0
+    cache_misses = 0
 
     for view in target_views:
         view_key = view.value
         base_losses = apply_deal_view(yelt, programme.uplift_set, view)
+        view_source_hash = canonical_hash({
+            "sim_set": yelt.content_hash,
+            "view": view_key,
+            "uplift": programme.uplift_set.content_hash if view == ViewOfRisk.ADJUSTED else "UNADJ",
+        })
+
         node_event_streams: dict[str, np.ndarray] = {}
         node_ann: dict[str, np.ndarray] = {}
         node_rip: dict[str, np.ndarray] = {}
+        node_hashes: dict[str, str] = {}
         node_metrics: list[NodeViewMetrics] = []
 
         for nid in topo:
             node = nodes_by_id[nid]
             in_edges = incoming[nid]
+            upstream_sig = [
+                (node_hashes[e.source], e.sign, e.weight)
+                for e in sorted(in_edges, key=lambda x: (x.source, x.edge_id))
+            ]
+            node_key = canonical_hash({
+                "src": view_source_hash if not in_edges else "",
+                "ind": industry_yelt.content_hash if (industry_yelt and node.node_type == NodeType.INDUSTRY_INDEX_SOURCE) else "",
+                "upstream": upstream_sig,
+                "type": node.node_type.value,
+                "params": node.params,
+            })
+            node_hashes[nid] = node_key
 
-            # Combine incoming event streams (respecting edge sign & weight)
-            if in_edges:
-                combined = np.zeros_like(base_losses)
-                for e in in_edges:
-                    combined += (e.sign * e.weight) * node_event_streams[e.source]
-                combined = np.maximum(combined, 0.0)
+            cached = _cache_get(node_key)
+            if cached is not None:
+                ev_out, ann, mx, rip, ep = cached
+                cache_hits += 1
             else:
-                combined = base_losses
-
-            if node.node_type == NodeType.LOSS_SOURCE:
-                ev_out = base_losses
-                # Compute annual & max-occ via zero-deductible unlimited OccXL shortcut or bincount
-                ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
-                rip = np.zeros(yelt.num_trials, dtype=np.float64)
-            elif node.node_type == NodeType.REGION_PERIL_FILTER:
-                allowed = set(node.params.get("regionPerils", []))
-                if not allowed or "ALL" in allowed:
-                    ev_out = combined
+                cache_misses += 1
+                if in_edges:
+                    combined = np.zeros_like(base_losses)
+                    for e in in_edges:
+                        combined += (e.sign * e.weight) * node_event_streams[e.source]
+                    combined = np.maximum(combined, 0.0)
                 else:
-                    allowed_ids = [RP_TO_ID[k] for k in allowed if k in RP_TO_ID]
-                    mask = np.isin(yelt.rp_ids, allowed_ids)
+                    combined = base_losses
+
+                rip = np.zeros(yelt.num_trials, dtype=np.float64)
+
+                if node.node_type == NodeType.LOSS_SOURCE:
+                    ev_out = base_losses
+                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
+                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                elif node.node_type == NodeType.INDUSTRY_INDEX_SOURCE:
+                    ev_out = industry_yelt.losses if industry_yelt is not None else base_losses
+                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
+                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                elif node.node_type == NodeType.REGION_PERIL_FILTER:
+                    allowed = set(node.params.get("regionPerils", []))
+                    if not allowed or "ALL" in allowed:
+                        ev_out = combined
+                    else:
+                        allowed_ids = [RP_TO_ID[k] for k in allowed if k in RP_TO_ID]
+                        mask = np.isin(yelt.rp_ids, allowed_ids)
+                        ev_out = np.where(mask, combined, 0.0)
+                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
+                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                elif node.node_type == NodeType.DATE_WINDOW_FILTER:
+                    start_day = int(node.params.get("startDay", 1))
+                    end_day = int(node.params.get("endDay", 365))
+                    if start_day <= end_day:
+                        mask = (yelt.day_of_year >= start_day) & (yelt.day_of_year <= end_day)
+                    else:
+                        mask = (yelt.day_of_year >= start_day) | (yelt.day_of_year <= end_day)
                     ev_out = np.where(mask, combined, 0.0)
-                ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
-                rip = np.zeros(yelt.num_trials, dtype=np.float64)
-            elif node.node_type == NodeType.COMBINATION:
-                ev_out = combined
-                ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
-                rip = np.zeros(yelt.num_trials, dtype=np.float64)
-            elif node.node_type == NodeType.OCC_XL:
-                p_json = json.dumps({
-                    "occ_limit": float(node.params["occLimit"]),
-                    "occ_attachment": float(node.params["occAttachment"]),
-                    "occ_franchise": float(node.params.get("occFranchise", 0.0)),
-                    "reinstatements": node.params.get("reinstatements", None),
-                    "rip_rate": float(node.params.get("ripRate", 0.0)),
-                    "deposit_premium": float(node.params.get("depositPremium", 0.0)),
-                    "placed_share": float(node.params.get("placedShare", 1.0)),
-                })
-                ev_out, ann, mx, rip = rle.eval_occ_xl_yelt(
-                    yelt.trial_ids,
-                    np.ascontiguousarray(combined, dtype=np.float64),
-                    yelt.num_trials,
-                    p_json,
-                )
-            elif node.node_type == NodeType.AGG_XL:
-                p_json = json.dumps({
-                    "agg_limit": float(node.params["aggLimit"]),
-                    "agg_attachment": float(node.params["aggAttachment"]),
-                    "per_event_franchise": float(node.params.get("perEventFranchise", 0.0)),
-                    "per_event_cap": node.params.get("perEventCap", None),
-                    "placed_share": float(node.params.get("placedShare", 1.0)),
-                })
-                ev_out, ann, mx = rle.eval_agg_xl_yelt(
-                    yelt.trial_ids,
-                    np.ascontiguousarray(combined, dtype=np.float64),
-                    yelt.num_trials,
-                    p_json,
-                )
-                rip = np.zeros(yelt.num_trials, dtype=np.float64)
-            else:
-                # PRICING_OUTPUT / YELT_OUTPUT / EP_OUTPUT pass-through
-                ev_out = combined
-                ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
-                rip = np.zeros(yelt.num_trials, dtype=np.float64)
-                for e in in_edges:
-                    if e.source in node_rip:
-                        rip += (e.sign * e.weight) * node_rip[e.source]
+                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
+                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                elif node.node_type == NodeType.LOSS_SIZE_FILTER:
+                    min_l = float(node.params.get("minLoss", 0.0))
+                    max_l = node.params.get("maxLoss", None)
+                    mask = combined >= min_l
+                    if max_l is not None:
+                        mask &= combined <= float(max_l)
+                    ev_out = np.where(mask, combined, 0.0)
+                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
+                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                elif node.node_type == NodeType.EVENT_ORDER_FILTER:
+                    eo_json = json.dumps({
+                        "min_order": int(node.params.get("minOrder", 2)),
+                        "max_order": node.params.get("maxOrder", None),
+                        "min_loss_threshold": float(node.params.get("minLossThreshold", 0.0)),
+                    })
+                    ev_out = rle.eval_event_order_filter_yelt(
+                        yelt.trial_ids,
+                        np.ascontiguousarray(combined, dtype=np.float64),
+                        yelt.num_trials,
+                        eo_json,
+                    )
+                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
+                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                elif node.node_type == NodeType.UPLIFT:
+                    factor = float(node.params.get("factor", 1.0))
+                    add_load = float(node.params.get("additiveLoad", 0.0))
+                    ev_out = np.where(combined > 0.0, np.maximum(combined * factor + add_load, 0.0), 0.0)
+                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
+                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                elif node.node_type == NodeType.OCC_XL:
+                    p_json = json.dumps({
+                        "occ_limit": float(node.params["occLimit"]),
+                        "occ_attachment": float(node.params["occAttachment"]),
+                        "occ_franchise": float(node.params.get("occFranchise", 0.0)),
+                        "reinstatements": node.params.get("reinstatements", None),
+                        "rip_rate": float(node.params.get("ripRate", 0.0)),
+                        "deposit_premium": float(node.params.get("depositPremium", 0.0)),
+                        "placed_share": float(node.params.get("placedShare", 1.0)),
+                    })
+                    ev_out, ann, mx, rip = rle.eval_occ_xl_yelt(
+                        yelt.trial_ids,
+                        np.ascontiguousarray(combined, dtype=np.float64),
+                        yelt.num_trials,
+                        p_json,
+                    )
+                elif node.node_type == NodeType.AGG_XL:
+                    p_json = json.dumps({
+                        "agg_limit": float(node.params["aggLimit"]),
+                        "agg_attachment": float(node.params["aggAttachment"]),
+                        "per_event_franchise": float(node.params.get("perEventFranchise", 0.0)),
+                        "per_event_cap": node.params.get("perEventCap", None),
+                        "placed_share": float(node.params.get("placedShare", 1.0)),
+                    })
+                    ev_out, ann, mx = rle.eval_agg_xl_yelt(
+                        yelt.trial_ids,
+                        np.ascontiguousarray(combined, dtype=np.float64),
+                        yelt.num_trials,
+                        p_json,
+                    )
+                elif node.node_type in (NodeType.QUOTA_SHARE, NodeType.AGG_QUOTA_SHARE):
+                    p_json = json.dumps({
+                        "cession_share": float(node.params.get("cessionShare", 0.25)),
+                        "event_cap": node.params.get("eventCap", None),
+                        "agg_cap": node.params.get("aggCap", None),
+                        "placed_share": float(node.params.get("placedShare", 1.0)),
+                    })
+                    ev_out, ann, mx = rle.eval_quota_share_yelt(
+                        yelt.trial_ids,
+                        np.ascontiguousarray(combined, dtype=np.float64),
+                        yelt.num_trials,
+                        p_json,
+                    )
+                elif node.node_type == NodeType.SURPLUS_SHARE:
+                    p_json = json.dumps({
+                        "retention_line": float(node.params.get("retentionLine", 25.0)),
+                        "num_lines": float(node.params.get("numLines", 4.0)),
+                        "placed_share": float(node.params.get("placedShare", 1.0)),
+                    })
+                    ev_out, ann, mx = rle.eval_surplus_share_yelt(
+                        yelt.trial_ids,
+                        np.ascontiguousarray(combined, dtype=np.float64),
+                        yelt.num_trials,
+                        p_json,
+                    )
+                elif node.node_type == NodeType.ILW_OPTION:
+                    trig = float(node.params.get("trigger", 40.0))
+                    lim = float(node.params.get("limit", 25.0))
+                    placed = float(node.params.get("placedShare", 1.0))
+                    ev_out = np.where(combined >= trig, lim * placed, 0.0)
+                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                    ann = np.minimum(
+                        np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials),
+                        lim * placed,
+                    )
+                elif node.node_type == NodeType.CASCADING_TOWER:
+                    raw_layers = node.params.get("layers", [])
+                    layers_json = json.dumps([
+                        {
+                            "occ_limit": float(l["occLimit"]),
+                            "occ_attachment": float(l["occAttachment"]),
+                            "occ_franchise": float(l.get("occFranchise", 0.0)),
+                            "reinstatements": l.get("reinstatements", 0.0),
+                            "rip_rate": float(l.get("ripRate", 0.0)),
+                            "deposit_premium": float(l.get("depositPremium", 0.0)),
+                            "placed_share": float(l.get("placedShare", 1.0)),
+                        }
+                        for l in raw_layers
+                    ])
+                    ev_out, ann, mx, rip = rle.eval_cascading_yelt(
+                        yelt.trial_ids,
+                        np.ascontiguousarray(combined, dtype=np.float64),
+                        yelt.num_trials,
+                        layers_json,
+                    )
+                else:
+                    # COMBINATION / PRICING_OUTPUT / YELT_OUTPUT / EP_OUTPUT pass-through
+                    ev_out = combined
+                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
+                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                    for e in in_edges:
+                        if e.source in node_rip:
+                            rip += (e.sign * e.weight) * node_rip[e.source]
+
+                ep = _ep_stats_from_vector(ann)
+                _cache_put(node_key, (ev_out, ann, mx, rip, ep))
 
             node_event_streams[nid] = ev_out
             node_ann[nid] = ann
             node_rip[nid] = rip
 
-            ep = _ep_stats_from_vector(ann)
             max_occ_val = float(np.max(mx)) if len(mx) else 0.0
             exp_rip = float(np.mean(rip))
             prem = float(node.params.get("depositPremium", 0.0)) * float(node.params.get("placedShare", 1.0))
-            lim = float(node.params.get("occLimit", node.params.get("aggLimit", 0.0))) * float(node.params.get("placedShare", 1.0))
+            lim = float(node.params.get("occLimit", node.params.get("aggLimit", node.params.get("limit", 0.0)))) * float(node.params.get("placedShare", 1.0))
             rol = (prem / lim) if lim > 0 and prem > 0 else None
             elr = (ep["el"] / (prem + exp_rip)) if (prem + exp_rip) > 0 else None
 
@@ -273,6 +431,8 @@ def evaluate_programme_dag(
         graph_version=programme.graph.version,
         currency=programme.currency,
         compute_ms=compute_ms,
+        cache_hits=cache_hits,
+        cache_misses=cache_misses,
         views=views_output,
         manifest=manifest,
     )
@@ -299,6 +459,15 @@ def evaluate_portfolio_rollup(
     ]
     input_hashes: dict[str, str] = {"sim_set": yelt.content_hash}
 
+    term_types = (
+        NodeType.OCC_XL,
+        NodeType.AGG_XL,
+        NodeType.QUOTA_SHARE,
+        NodeType.AGG_QUOTA_SHARE,
+        NodeType.SURPLUS_SHARE,
+        NodeType.CASCADING_TOWER,
+    )
+
     for prog in programmes:
         _, vecs = evaluate_programme_dag(prog, yelt, lineage, views=[view])
         ann_map = vecs["annual"][view.value]
@@ -314,11 +483,10 @@ def evaluate_portfolio_rollup(
         )
         input_hashes[prog.programme_id] = prog.graph.content_hash
 
-        # Collect every financial term node (OCC_XL / AGG_XL) as a portfolio layer
         for node in prog.graph.nodes:
-            if node.node_type in (NodeType.OCC_XL, NodeType.AGG_XL):
+            if node.node_type in term_types:
                 placed = float(node.params.get("placedShare", prog.signed_line))
-                lim = float(node.params.get("occLimit", node.params.get("aggLimit", 0.0))) * placed
+                lim = float(node.params.get("occLimit", node.params.get("aggLimit", node.params.get("aggCap", prog.limit)))) * placed
                 prem = float(node.params.get("depositPremium", 0.0)) * placed
                 layer_ann_list.append(ann_map[node.node_id])
                 layer_rip_list.append(rip_map[node.node_id])
@@ -340,12 +508,10 @@ def evaluate_portfolio_rollup(
     gross_premium = sum(r["premium"] for r in layer_rows_meta)
     deployed_collateral = sum(r["limit"] for r in layer_rows_meta)
 
-    # Collateralized fund net return per trial (including T-bill collateral yield 4.5% - 1.5% AMF)
     net_yield_on_capital = total_capital * 0.03
     trial_profit = gross_premium + port_rip + net_yield_on_capital - port_loss
     trial_roc_pct = (trial_profit / total_capital) * 100.0
 
-    # Exact Euler Co-TVaR at 1-in-250 (99.6th percentile) via Rust kernel
     port_var_250, port_tvar_250, co_tvars = rle.euler_cotvar(
         np.ascontiguousarray(layer_matrix, dtype=np.float64), 250.0
     )
@@ -378,7 +544,6 @@ def evaluate_portfolio_rollup(
             )
         )
 
-    # ROC CDF curve (sorted descending from best/no-event at 0% to worst tail at 100%, matching CalcAeolus)
     sorted_roc_desc = np.sort(trial_roc_pct)[::-1]
     n = len(sorted_roc_desc)
     sample_probs = list(np.linspace(0.0, 0.90, 46)) + list(np.linspace(0.91, 0.99, 17)) + [0.992, 0.994, 0.996, 0.998, 0.999, 0.9995, 1.0]
@@ -459,23 +624,19 @@ def evaluate_deterministic_run(
     lineage: LineageRegistry,
 ) -> DeterministicRunResponse:
     """Push any ordered loss list chronologically through a programme's layer structure via Rust."""
-    # Sort chronologically by occurrence_datetime
     ordered_losses = sorted(req.losses, key=lambda r: r.occurrence_datetime)
     raw_amounts = np.array([r.ground_up_loss for r in ordered_losses], dtype=np.float64)
     rp_ids = np.array([RP_TO_ID.get(r.region_peril_key, -999) for r in ordered_losses], dtype=np.int32)
 
-    # Apply deal uplifts if ADJUSTED view requested
     if req.view == ViewOfRisk.ADJUSTED and programme.uplift_set.rules:
         adj_amounts = rle.apply_uplifts_yelt(raw_amounts, rp_ids, _serialize_uplift_rules(programme.uplift_set))
     else:
         adj_amounts = raw_amounts
 
-    # Evaluate each financial term node in the programme graph using the exact Rust trace functions
     layer_statements: list[DeterministicLayerStatement] = []
     total_ceded_all = 0.0
     total_rip_all = 0.0
 
-    # Determine upstream region-peril filter per layer if present
     nodes_by_id = {n.node_id: n for n in programme.graph.nodes}
     incoming_map: dict[str, list[str]] = {n.node_id: [] for n in programme.graph.nodes}
     for e in programme.graph.edges:
@@ -485,7 +646,6 @@ def evaluate_deterministic_run(
         if node.node_type not in (NodeType.OCC_XL, NodeType.AGG_XL):
             continue
 
-        # Apply direct upstream RegionPerilFilter if connected
         subject = adj_amounts.copy()
         for src_id in incoming_map[node.node_id]:
             src = nodes_by_id[src_id]

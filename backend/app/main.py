@@ -15,11 +15,13 @@ from app.engine.slice_runner import (
     evaluate_deterministic_run,
     evaluate_portfolio_rollup,
     evaluate_programme_dag,
+    validate_dag_acyclic,
 )
 from app.models.domain import (
     DagEvalResponse,
     DeterministicRunRequest,
     DeterministicRunResponse,
+    GraphSpec,
     PortfolioRollupResponse,
     ProgrammeDeal,
     RunManifest,
@@ -225,8 +227,109 @@ def evaluate_programme(programme_id: str) -> DagEvalResponse:
         raise HTTPException(status_code=404, detail="Programme not found")
     prog = contract_to_programme_deal(c)
     yelt = SIM_STORE.get_yelt(prog.sim_set_id)
-    resp, _ = evaluate_programme_dag(prog, yelt, LINEAGE)
+    ind_yelt = SIM_STORE.get_yelt(_ind_yelt.sim_set_id)
+    resp, _ = evaluate_programme_dag(prog, yelt, LINEAGE, industry_yelt=ind_yelt)
     return resp
+
+
+@app.put("/api/programmes/{programme_id}/graph", response_model=ProgrammeDeal)
+def update_programme_graph(programme_id: str, graph: GraphSpec) -> ProgrammeDeal:
+    try:
+        validate_dag_acyclic(graph)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    c = CONTRACT_STORE.update_graph(programme_id, graph)
+    if not c:
+        raise HTTPException(status_code=404, detail="Programme not found")
+    _sync_memory_aliases()
+    return contract_to_programme_deal(c)
+
+
+@app.post("/api/programmes/{programme_id}/bind")
+def bind_programme_snapshot(programme_id: str) -> dict:
+    res = CONTRACT_STORE.bind_deal(programme_id, LINEAGE)
+    if not res:
+        raise HTTPException(status_code=404, detail="Programme not found")
+    full, manifest_id = res
+    _sync_memory_aliases()
+    return {"contract": full.model_dump(by_alias=True), "bindManifestId": manifest_id}
+
+
+@app.get("/api/graph-templates")
+def list_graph_templates() -> list[dict]:
+    return [
+        {
+            "templateId": "tpl-occ-xl",
+            "category": "Financial Terms",
+            "label": "Occ XL (50m xs 80m, 1@100%)",
+            "nodeType": "OCC_XL",
+            "params": {"occLimit": 50.0, "occAttachment": 80.0, "occFranchise": 0.0, "reinstatements": 1.0, "ripRate": 1.0, "depositPremium": 10.0, "placedShare": 1.0},
+        },
+        {
+            "templateId": "tpl-agg-xl",
+            "category": "Financial Terms",
+            "label": "Agg XL (35m xs 95m)",
+            "nodeType": "AGG_XL",
+            "params": {"aggLimit": 35.0, "aggAttachment": 95.0, "perEventFranchise": 10.0, "perEventCap": 60.0, "depositPremium": 7.5, "placedShare": 1.0},
+        },
+        {
+            "templateId": "tpl-qs",
+            "category": "Financial Terms",
+            "label": "Quota Share (25% / 40m Agg Cap)",
+            "nodeType": "AGG_QUOTA_SHARE",
+            "params": {"cessionShare": 0.25, "eventCap": 25.0, "aggCap": 40.0, "depositPremium": 8.0, "placedShare": 1.0},
+        },
+        {
+            "templateId": "tpl-surplus",
+            "category": "Financial Terms",
+            "label": "Surplus Share (4 Lines xs 25m)",
+            "nodeType": "SURPLUS_SHARE",
+            "params": {"retentionLine": 25.0, "numLines": 4.0, "depositPremium": 6.5, "placedShare": 1.0},
+        },
+        {
+            "templateId": "tpl-cascading",
+            "category": "Templates",
+            "label": "Cascading Drop-Down (2-Layer)",
+            "nodeType": "CASCADING_TOWER",
+            "params": {
+                "occLimit": 70.0,
+                "depositPremium": 14.0,
+                "placedShare": 1.0,
+                "layers": [
+                    {"occLimit": 30.0, "occAttachment": 50.0, "reinstatements": 0.0, "ripRate": 0.0, "depositPremium": 8.0, "placedShare": 1.0},
+                    {"occLimit": 40.0, "occAttachment": 80.0, "reinstatements": 0.0, "ripRate": 0.0, "depositPremium": 6.0, "placedShare": 1.0},
+                ],
+            },
+        },
+        {
+            "templateId": "tpl-flt-rp",
+            "category": "Filters",
+            "label": "Zone Peril Filter (FL Wind)",
+            "nodeType": "REGION_PERIL_FILTER",
+            "params": {"regionPerils": ["US-FL-WS"]},
+        },
+        {
+            "templateId": "tpl-flt-2nd",
+            "category": "Filters",
+            "label": "Event Order Filter (2nd+ Event)",
+            "nodeType": "EVENT_ORDER_FILTER",
+            "params": {"minOrder": 2, "maxOrder": None, "minLossThreshold": 15.0},
+        },
+        {
+            "templateId": "tpl-combo",
+            "category": "Transforms",
+            "label": "Combination (+/- Inuring)",
+            "nodeType": "COMBINATION",
+            "params": {},
+        },
+        {
+            "templateId": "tpl-out-pricing",
+            "category": "Outputs",
+            "label": "Pricing Output",
+            "nodeType": "PRICING_OUTPUT",
+            "params": {},
+        },
+    ]
 
 
 # ─────────────────────────── Background Industry ILW Engine ───────────────────────────

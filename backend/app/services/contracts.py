@@ -385,6 +385,53 @@ class ContractStore:
             db.refresh(rec)
             return _record_to_full(rec)
 
+    def update_graph(self, programme_id: str, graph: GraphSpec) -> ContractFull | None:
+        with get_session() as db:
+            rec = db.get(ContractRecord, programme_id)
+            if not rec:
+                return None
+            old_graph = GraphSpec(**json.loads(rec.graph_json))
+            graph.version = old_graph.version + 1
+            graph.content_hash = canonical_hash({
+                "nodes": [n.model_dump() for n in graph.nodes],
+                "edges": [e.model_dump() for e in graph.edges],
+            })
+            rec.graph_json = graph.model_dump_json()
+            rec.version += 1
+            rec.content_hash = canonical_hash({"programme_id": rec.programme_id, "version": rec.version, "graph": graph.content_hash})
+            rec.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            db.refresh(rec)
+            return _record_to_full(rec)
+
+    def bind_deal(self, programme_id: str, lineage: LineageRegistry) -> tuple[ContractFull, str] | None:
+        from app.models.domain import BreadcrumbStep
+
+        with get_session() as db:
+            rec = db.get(ContractRecord, programme_id)
+            if not rec:
+                return None
+            rec.status = ProgrammeStatus.BOUND.value
+            rec.version += 1
+            rec.content_hash = canonical_hash({"programme_id": rec.programme_id, "version": rec.version, "status": "BOUND"})
+            rec.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            db.refresh(rec)
+            full = _record_to_full(rec)
+
+        manifest = lineage.record_manifest(
+            run_type="DEAL_BIND",
+            input_hashes={"contract": full.content_hash, "graph": full.graph.content_hash, "uplift": full.uplift_set.content_hash},
+            parameters={"programme_id": programme_id, "signed_line": full.signed_line, "rol": full.rol},
+            output_payload={"status": "BOUND", "version": full.version},
+            breadcrumb=[
+                BreadcrumbStep(entity_type="PROGRAMME", entity_id=full.programme_id, label=f"{full.cedent_name} — {full.programme_name}", version=f"v{full.version}", content_hash=full.content_hash),
+                BreadcrumbStep(entity_type="DAG_GRAPH", entity_id=full.graph.graph_id, label=full.graph.name, version=f"v{full.graph.version}", content_hash=full.graph.content_hash),
+            ],
+        )
+        lineage.add_link(full.programme_id, manifest.manifest_id, LinkType.BOUND_AS)
+        return full, manifest.manifest_id
+
     def promote_ilw(self, req: IlwPriceRequest, lineage: LineageRegistry) -> ContractFull:
         payload = ContractCreate(
             cedent_name="ILW Market Counterparty",

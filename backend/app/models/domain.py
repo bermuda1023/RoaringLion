@@ -149,6 +149,8 @@ class DagEvalResponse(CamelModel):
     graph_version: int
     currency: str
     compute_ms: float
+    cache_hits: int = 0
+    cache_misses: int = 0
     views: dict[str, list[NodeViewMetrics]]
     manifest: RunManifest
 

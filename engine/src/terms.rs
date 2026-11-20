@@ -27,7 +27,26 @@ pub struct AggXlParams {
 pub struct QuotaShareParams {
     pub cession_share: f64,
     pub event_cap: Option<f64>,
+    /// Optional annual aggregate cession cap (enables AggregateQuotaShare)
+    pub agg_cap: Option<f64>,
     pub placed_share: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SurplusShareParams {
+    pub retention_line: f64,
+    pub num_lines: f64,
+    pub placed_share: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventOrderParams {
+    /// 1-indexed inclusive min event order within trial (e.g. 2 for 2nd+ events)
+    pub min_order: usize,
+    /// 1-indexed inclusive max event order within trial (None = unbounded)
+    pub max_order: Option<usize>,
+    /// Minimum event loss required to count toward event order
+    pub min_loss_threshold: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -495,6 +514,275 @@ pub fn apply_uplifts_parallel(losses: &[f64], rp_ids: &[i32], rules: &[UpliftRul
         .collect()
 }
 
+/// Core single-period QuotaShare / AggregateQuotaShare pass.
+#[inline]
+pub fn eval_quota_share_period(
+    losses: &[f64],
+    params: &QuotaShareParams,
+    out_ceded: &mut [f64],
+) -> (f64, f64) {
+    let mut cum_ceded = 0.0_f64;
+    let mut max_occ = 0.0_f64;
+    let agg_cap = params.agg_cap.unwrap_or(f64::INFINITY);
+
+    for (i, &gross) in losses.iter().enumerate() {
+        if gross <= 0.0 {
+            out_ceded[i] = 0.0;
+            continue;
+        }
+        let mut raw = gross * params.cession_share;
+        if let Some(ec) = params.event_cap {
+            raw = raw.min(ec);
+        }
+        let remaining = (agg_cap - cum_ceded).max(0.0);
+        let in_layer = raw.min(remaining);
+        cum_ceded += in_layer;
+        let ceded = in_layer * params.placed_share;
+        out_ceded[i] = ceded;
+        if ceded > max_occ {
+            max_occ = ceded;
+        }
+    }
+    (cum_ceded * params.placed_share, max_occ)
+}
+
+pub fn eval_quota_share_parallel(
+    trial_ids: &[u32],
+    losses: &[f64],
+    num_trials: usize,
+    params: &QuotaShareParams,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let offsets = build_trial_offsets(trial_ids, num_trials);
+    let mut event_ceded = vec![0.0_f64; losses.len()];
+    let mut annual_ceded = vec![0.0_f64; num_trials];
+    let mut max_occ = vec![0.0_f64; num_trials];
+    let chunk_size = (num_trials / (rayon::current_num_threads() * 4).max(1)).max(256);
+
+    let results: Vec<(usize, usize, Vec<f64>, Vec<f64>, Vec<f64>)> = (0..num_trials)
+        .step_by(chunk_size)
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|t_start| {
+            let t_end = (t_start + chunk_size).min(num_trials);
+            let ev_start = offsets[t_start];
+            let ev_end = offsets[t_end];
+            let mut local_ev = vec![0.0_f64; ev_end - ev_start];
+            let mut local_ann = vec![0.0_f64; t_end - t_start];
+            let mut local_max = vec![0.0_f64; t_end - t_start];
+            for t in t_start..t_end {
+                let s = offsets[t];
+                let e = offsets[t + 1];
+                if s < e {
+                    let (ann, mx) = eval_quota_share_period(
+                        &losses[s..e],
+                        params,
+                        &mut local_ev[(s - ev_start)..(e - ev_start)],
+                    );
+                    local_ann[t - t_start] = ann;
+                    local_max[t - t_start] = mx;
+                }
+            }
+            (t_start, ev_start, local_ev, local_ann, local_max)
+        })
+        .collect();
+
+    for (t_start, ev_start, local_ev, local_ann, local_max) in results {
+        if !local_ev.is_empty() {
+            event_ceded[ev_start..(ev_start + local_ev.len())].copy_from_slice(&local_ev);
+        }
+        annual_ceded[t_start..(t_start + local_ann.len())].copy_from_slice(&local_ann);
+        max_occ[t_start..(t_start + local_max.len())].copy_from_slice(&local_max);
+    }
+    (event_ceded, annual_ceded, max_occ)
+}
+
+/// Parallel Surplus Share: cedes excess over retention_line up to (retention_line * num_lines).
+pub fn eval_surplus_share_parallel(
+    trial_ids: &[u32],
+    losses: &[f64],
+    num_trials: usize,
+    params: &SurplusShareParams,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let max_cession = (params.retention_line * params.num_lines).max(0.0);
+    let occ_equiv = OccXlParams {
+        occ_limit: max_cession,
+        occ_attachment: params.retention_line.max(0.0),
+        occ_franchise: 0.0,
+        reinstatements: None,
+        rip_rate: 0.0,
+        deposit_premium: 0.0,
+        placed_share: params.placed_share,
+    };
+    let (ev, ann, mx, _rip) = eval_occ_xl_parallel(trial_ids, losses, num_trials, &occ_equiv);
+    (ev, ann, mx)
+}
+
+/// Parallel Event-Order Filter: keeps only events whose chronological rank within the trial
+/// (among events >= min_loss_threshold) falls in [min_order, max_order].
+pub fn eval_event_order_filter_parallel(
+    trial_ids: &[u32],
+    losses: &[f64],
+    num_trials: usize,
+    params: &EventOrderParams,
+) -> Vec<f64> {
+    let offsets = build_trial_offsets(trial_ids, num_trials);
+    let mut out = vec![0.0_f64; losses.len()];
+    let chunk_size = (num_trials / (rayon::current_num_threads() * 4).max(1)).max(256);
+
+    let results: Vec<(usize, Vec<f64>)> = (0..num_trials)
+        .step_by(chunk_size)
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|t_start| {
+            let t_end = (t_start + chunk_size).min(num_trials);
+            let ev_start = offsets[t_start];
+            let ev_end = offsets[t_end];
+            let mut local_ev = vec![0.0_f64; ev_end - ev_start];
+            for t in t_start..t_end {
+                let s = offsets[t];
+                let e = offsets[t + 1];
+                let mut rank = 0usize;
+                for i in s..e {
+                    let g = losses[i];
+                    if g > 0.0 && g >= params.min_loss_threshold {
+                        rank += 1;
+                        let in_max = params.max_order.map(|m| rank <= m).unwrap_or(true);
+                        if rank >= params.min_order && in_max {
+                            local_ev[i - ev_start] = g;
+                        }
+                    }
+                }
+            }
+            (ev_start, local_ev)
+        })
+        .collect();
+
+    for (ev_start, local_ev) in results {
+        if !local_ev.is_empty() {
+            out[ev_start..(ev_start + local_ev.len())].copy_from_slice(&local_ev);
+        }
+    }
+    out
+}
+
+/// Single-period Cascading / Drop-Down Tower:
+/// As lower layers exhaust their annual limits, upper layers drop down to attach immediately above
+/// the remaining active retention + remaining underlying limit.
+pub fn eval_cascading_period(
+    losses: &[f64],
+    layers: &[OccXlParams],
+    out_total_ceded: &mut [f64],
+) -> (f64, f64, f64) {
+    let m = layers.len();
+    let mut cum_used = vec![0.0_f64; m];
+    let annual_caps: Vec<f64> = layers
+        .iter()
+        .map(|p| match p.reinstatements {
+            Some(k) => (1.0 + k.max(0.0)) * p.occ_limit,
+            None => f64::INFINITY,
+        })
+        .collect();
+    let base_retention = layers.first().map(|l| l.occ_attachment).unwrap_or(0.0);
+    let mut total_ceded = 0.0_f64;
+    let mut max_occ = 0.0_f64;
+    let mut total_rip = 0.0_f64;
+
+    for (ev_idx, &gross) in losses.iter().enumerate() {
+        let mut ev_ceded = 0.0_f64;
+        if gross > base_retention {
+            let mut cursor = base_retention;
+            for l in 0..m {
+                let p = &layers[l];
+                let rem_cap = (annual_caps[l] - cum_used[l]).max(0.0);
+                if rem_cap <= 1e-12 {
+                    continue;
+                }
+                let avail_this_occ = p.occ_limit.min(rem_cap);
+                let in_layer = (gross - cursor).clamp(0.0, avail_this_occ);
+                if in_layer > 0.0 {
+                    let prev_cum = cum_used[l];
+                    cum_used[l] += in_layer;
+                    if p.rip_rate > 0.0 && p.occ_limit > 0.0 {
+                        let r_cap = match p.reinstatements {
+                            Some(k) => k.max(0.0) * p.occ_limit,
+                            None => f64::INFINITY,
+                        };
+                        let newly_r = (cum_used[l].min(r_cap) - prev_cum.min(r_cap)).max(0.0);
+                        total_rip += (newly_r / p.occ_limit) * p.rip_rate * p.deposit_premium * p.placed_share;
+                    }
+                    ev_ceded += in_layer * p.placed_share;
+                    cursor += in_layer;
+                } else {
+                    cursor += avail_this_occ;
+                }
+                if cursor >= gross {
+                    break;
+                }
+            }
+        }
+        out_total_ceded[ev_idx] = ev_ceded;
+        total_ceded += ev_ceded;
+        if ev_ceded > max_occ {
+            max_occ = ev_ceded;
+        }
+    }
+    (total_ceded, max_occ, total_rip)
+}
+
+pub fn eval_cascading_parallel(
+    trial_ids: &[u32],
+    losses: &[f64],
+    num_trials: usize,
+    layers: &[OccXlParams],
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let offsets = build_trial_offsets(trial_ids, num_trials);
+    let mut event_ceded = vec![0.0_f64; losses.len()];
+    let mut annual_ceded = vec![0.0_f64; num_trials];
+    let mut max_occ = vec![0.0_f64; num_trials];
+    let mut annual_rip = vec![0.0_f64; num_trials];
+    let chunk_size = (num_trials / (rayon::current_num_threads() * 4).max(1)).max(256);
+
+    let results: Vec<(usize, usize, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> = (0..num_trials)
+        .step_by(chunk_size)
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|t_start| {
+            let t_end = (t_start + chunk_size).min(num_trials);
+            let ev_start = offsets[t_start];
+            let ev_end = offsets[t_end];
+            let mut local_ev = vec![0.0_f64; ev_end - ev_start];
+            let mut local_ann = vec![0.0_f64; t_end - t_start];
+            let mut local_max = vec![0.0_f64; t_end - t_start];
+            let mut local_rip = vec![0.0_f64; t_end - t_start];
+            for t in t_start..t_end {
+                let s = offsets[t];
+                let e = offsets[t + 1];
+                if s < e {
+                    let (ann, mx, rip) = eval_cascading_period(
+                        &losses[s..e],
+                        layers,
+                        &mut local_ev[(s - ev_start)..(e - ev_start)],
+                    );
+                    local_ann[t - t_start] = ann;
+                    local_max[t - t_start] = mx;
+                    local_rip[t - t_start] = rip;
+                }
+            }
+            (t_start, ev_start, local_ev, local_ann, local_max, local_rip)
+        })
+        .collect();
+
+    for (t_start, ev_start, local_ev, local_ann, local_max, local_rip) in results {
+        if !local_ev.is_empty() {
+            event_ceded[ev_start..(ev_start + local_ev.len())].copy_from_slice(&local_ev);
+        }
+        annual_ceded[t_start..(t_start + local_ann.len())].copy_from_slice(&local_ann);
+        max_occ[t_start..(t_start + local_max.len())].copy_from_slice(&local_max);
+        annual_rip[t_start..(t_start + local_rip.len())].copy_from_slice(&local_rip);
+    }
+    (event_ceded, annual_ceded, max_occ, annual_rip)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,5 +843,60 @@ mod tests {
         let trace_ann: f64 = trace.iter().map(|s| s.ceded_loss).sum();
         assert!((trace_ann - ann).abs() < 1e-9);
         assert!(trace[3].state_after.exhausted);
+    }
+
+    #[test]
+    fn test_agg_quota_share_and_event_order_and_cascading() {
+        // Aggregate Quota Share: 25% share, event cap 15, agg cap 25
+        let qs = QuotaShareParams {
+            cession_share: 0.25,
+            event_cap: Some(15.0),
+            agg_cap: Some(25.0),
+            placed_share: 1.0,
+        };
+        let mut qs_out = vec![0.0; 3];
+        let (qs_ann, _) = eval_quota_share_period(&[80.0, 60.0, 40.0], &qs, &mut qs_out);
+        // 80*0.25=20->cap 15; 60*0.25=15->capped to 10 remaining; 40->0
+        assert!((qs_out[0] - 15.0).abs() < 1e-9);
+        assert!((qs_out[1] - 10.0).abs() < 1e-9);
+        assert!((qs_out[2] - 0.0).abs() < 1e-9);
+        assert!((qs_ann - 25.0).abs() < 1e-9);
+
+        // Event order filter: keep 2nd+ events >= 10
+        let eo = EventOrderParams {
+            min_order: 2,
+            max_order: None,
+            min_loss_threshold: 10.0,
+        };
+        let filtered = eval_event_order_filter_parallel(&[1, 1, 1], &[5.0, 20.0, 30.0], 1, &eo);
+        assert_eq!(filtered, vec![0.0, 0.0, 30.0]);
+
+        // Cascading tower: Layer 1 = 30 xs 50 (0 reinst), Layer 2 = 40 xs 80 (0 reinst)
+        // Event 1 = 80 -> Layer 1 exhausts (30). Event 2 = 70 -> Layer 2 drops down to 50 and pays 20!
+        let layers = vec![
+            OccXlParams {
+                occ_limit: 30.0,
+                occ_attachment: 50.0,
+                occ_franchise: 0.0,
+                reinstatements: Some(0.0),
+                rip_rate: 0.0,
+                deposit_premium: 5.0,
+                placed_share: 1.0,
+            },
+            OccXlParams {
+                occ_limit: 40.0,
+                occ_attachment: 80.0,
+                occ_franchise: 0.0,
+                reinstatements: Some(0.0),
+                rip_rate: 0.0,
+                deposit_premium: 4.0,
+                placed_share: 1.0,
+            },
+        ];
+        let mut casc_out = vec![0.0; 2];
+        let (c_ann, _, _) = eval_cascading_period(&[80.0, 70.0], &layers, &mut casc_out);
+        assert!((casc_out[0] - 30.0).abs() < 1e-9);
+        assert!((casc_out[1] - 20.0).abs() < 1e-9);
+        assert!((c_ann - 50.0).abs() < 1e-9);
     }
 }

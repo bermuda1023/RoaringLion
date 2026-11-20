@@ -8,8 +8,10 @@ mod py_bindings {
 
     use crate::metrics::{compute_ep_stats, compute_euler_cotvar};
     use crate::terms::{
-        apply_uplifts_parallel, eval_agg_xl_parallel, eval_occ_xl_parallel,
-        trace_agg_xl_deterministic, trace_occ_xl_deterministic, AggXlParams, OccXlParams,
+        apply_uplifts_parallel, eval_agg_xl_parallel, eval_cascading_parallel,
+        eval_event_order_filter_parallel, eval_occ_xl_parallel, eval_quota_share_parallel,
+        eval_surplus_share_parallel, trace_agg_xl_deterministic, trace_occ_xl_deterministic,
+        AggXlParams, EventOrderParams, OccXlParams, QuotaShareParams, SurplusShareParams,
         UpliftRule,
     };
 
@@ -125,11 +127,110 @@ mod py_bindings {
         Ok((var, tvar, co.into_pyarray_bound(py)))
     }
 
+    #[pyfunction]
+    fn eval_quota_share_yelt<'py>(
+        py: Python<'py>,
+        trial_ids: PyReadonlyArray1<'py, u32>,
+        losses: PyReadonlyArray1<'py, f64>,
+        num_trials: usize,
+        params_json: &str,
+    ) -> PyResult<(
+        Bound<'py, PyArray1<f64>>,
+        Bound<'py, PyArray1<f64>>,
+        Bound<'py, PyArray1<f64>>,
+    )> {
+        let params: QuotaShareParams = serde_json::from_str(params_json)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let t_slice = trial_ids.as_slice()?;
+        let l_slice = losses.as_slice()?;
+        let (ev, ann, mx) =
+            py.allow_threads(|| eval_quota_share_parallel(t_slice, l_slice, num_trials, &params));
+        Ok((
+            ev.into_pyarray_bound(py),
+            ann.into_pyarray_bound(py),
+            mx.into_pyarray_bound(py),
+        ))
+    }
+
+    #[pyfunction]
+    fn eval_surplus_share_yelt<'py>(
+        py: Python<'py>,
+        trial_ids: PyReadonlyArray1<'py, u32>,
+        losses: PyReadonlyArray1<'py, f64>,
+        num_trials: usize,
+        params_json: &str,
+    ) -> PyResult<(
+        Bound<'py, PyArray1<f64>>,
+        Bound<'py, PyArray1<f64>>,
+        Bound<'py, PyArray1<f64>>,
+    )> {
+        let params: SurplusShareParams = serde_json::from_str(params_json)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let t_slice = trial_ids.as_slice()?;
+        let l_slice = losses.as_slice()?;
+        let (ev, ann, mx) =
+            py.allow_threads(|| eval_surplus_share_parallel(t_slice, l_slice, num_trials, &params));
+        Ok((
+            ev.into_pyarray_bound(py),
+            ann.into_pyarray_bound(py),
+            mx.into_pyarray_bound(py),
+        ))
+    }
+
+    #[pyfunction]
+    fn eval_event_order_filter_yelt<'py>(
+        py: Python<'py>,
+        trial_ids: PyReadonlyArray1<'py, u32>,
+        losses: PyReadonlyArray1<'py, f64>,
+        num_trials: usize,
+        params_json: &str,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let params: EventOrderParams = serde_json::from_str(params_json)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let t_slice = trial_ids.as_slice()?;
+        let l_slice = losses.as_slice()?;
+        let out = py.allow_threads(|| {
+            eval_event_order_filter_parallel(t_slice, l_slice, num_trials, &params)
+        });
+        Ok(out.into_pyarray_bound(py))
+    }
+
+    #[pyfunction]
+    fn eval_cascading_yelt<'py>(
+        py: Python<'py>,
+        trial_ids: PyReadonlyArray1<'py, u32>,
+        losses: PyReadonlyArray1<'py, f64>,
+        num_trials: usize,
+        layers_json: &str,
+    ) -> PyResult<(
+        Bound<'py, PyArray1<f64>>,
+        Bound<'py, PyArray1<f64>>,
+        Bound<'py, PyArray1<f64>>,
+        Bound<'py, PyArray1<f64>>,
+    )> {
+        let layers: Vec<OccXlParams> = serde_json::from_str(layers_json)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let t_slice = trial_ids.as_slice()?;
+        let l_slice = losses.as_slice()?;
+        let (ev, ann, mx, rip) =
+            py.allow_threads(|| eval_cascading_parallel(t_slice, l_slice, num_trials, &layers));
+        Ok((
+            ev.into_pyarray_bound(py),
+            ann.into_pyarray_bound(py),
+            mx.into_pyarray_bound(py),
+            rip.into_pyarray_bound(py),
+        ))
+    }
+
     #[pymodule]
     fn roaring_lion_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(apply_uplifts_yelt, m)?)?;
         m.add_function(wrap_pyfunction!(eval_occ_xl_yelt, m)?)?;
         m.add_function(wrap_pyfunction!(eval_agg_xl_yelt, m)?)?;
+        m.add_function(wrap_pyfunction!(eval_quota_share_yelt, m)?)?;
+        m.add_function(wrap_pyfunction!(eval_surplus_share_yelt, m)?)?;
+        m.add_function(wrap_pyfunction!(eval_event_order_filter_yelt, m)?)?;
+        m.add_function(wrap_pyfunction!(eval_cascading_yelt, m)?)?;
         m.add_function(wrap_pyfunction!(trace_occ_xl, m)?)?;
         m.add_function(wrap_pyfunction!(trace_agg_xl, m)?)?;
         m.add_function(wrap_pyfunction!(ep_stats, m)?)?;
