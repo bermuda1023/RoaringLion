@@ -92,6 +92,17 @@ def test_branch_claim_and_model_run_references_are_checked():
     assert client.post("/api/synthetic/generate", json={"numTrials": 0}).status_code == 422
 
 
+def test_contract_with_unknown_sim_set_is_422():
+    prog = client.get("/api/contracts")[0]
+    payload = {k: v for k, v in prog.items() if k in ("cedentName", "programmeName", "status", "simSetId")}
+    payload["programmeId"] = "prog-rob-badsim"
+    payload["simSetId"] = "nope"
+    assert client.post("/api/contracts", json=payload).status_code == 422
+    # Status-only patch still works (no simSetId in patch)
+    r = client.put("/api/contracts/prog-farmers-us-27", json={"status": "BOUND"})
+    assert r.status_code == 200
+
+
 def test_misc_negative_inputs_are_422():
     assert client.post("/api/fx/convert", json={"amount": -100, "fromCurrency": "EUR", "toCurrency": "USD"}).status_code == 422
     assert client.post("/api/pricing/technical", json={"expectedLossM": -5, "allocatedCapitalM": 10, "limitM": 50}).status_code == 422

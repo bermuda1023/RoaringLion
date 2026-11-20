@@ -78,6 +78,7 @@ class ContractCreate(CamelModel):
 class ContractUpdate(CamelModel):
     status: ProgrammeStatus | None = None
     direction: ContractDirection | None = None
+    sim_set_id: str | None = None
     written_line: float | None = None
     signed_line: float | None = None
     authorized_line: float | None = None

@@ -189,6 +189,10 @@ def list_contracts(
 
 @app.post("/api/contracts", response_model=ContractFull)
 def create_contract(payload: ContractCreate) -> ContractFull:
+    try:
+        SIM_STORE.get_yelt(payload.sim_set_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=422, detail=f"Unknown simSetId: {payload.sim_set_id}") from exc
     full = CONTRACT_STORE.create_contract(payload, LINEAGE)
     _sync_memory_aliases()
     return full
@@ -196,6 +200,11 @@ def create_contract(payload: ContractCreate) -> ContractFull:
 
 @app.put("/api/contracts/{programme_id}", response_model=ContractFull)
 def update_contract(programme_id: str, patch: ContractUpdate) -> ContractFull:
+    if patch.sim_set_id is not None:
+        try:
+            SIM_STORE.get_yelt(patch.sim_set_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=422, detail=f"Unknown simSetId: {patch.sim_set_id}") from exc
     full = CONTRACT_STORE.update_contract(programme_id, patch)
     if not full:
         raise HTTPException(status_code=404, detail="Contract not found")
