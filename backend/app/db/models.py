@@ -108,3 +108,54 @@ class LineageLinkRecord(Base):
     target_id: Mapped[str] = mapped_column(String(80), index=True)
     link_type: Mapped[str] = mapped_column(String(40), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ClaimRecord(Base):
+    __tablename__ = "claims"
+
+    claim_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    claim_no: Mapped[str] = mapped_column(String(80), index=True)
+    programme_id: Mapped[str] = mapped_column(String(80), index=True)
+    event_name: Mapped[str] = mapped_column(String(160))
+    occurrence_datetime: Mapped[str] = mapped_column(String(40))
+    region_peril_key: Mapped[str] = mapped_column(String(40))
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    current_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ClaimVersionRecord(Base):
+    __tablename__ = "claim_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    claim_id: Mapped[str] = mapped_column(String(80), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(30))  # ESTIMATE, CASE_RESERVE, PAID, FINAL
+    ground_up_loss: Mapped[float] = mapped_column(Float)
+    note: Mapped[str] = mapped_column(Text, default="")
+    advised_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class PortfolioBranchRecord(Base):
+    __tablename__ = "portfolio_branches"
+
+    branch_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    parent_portfolio_id: Mapped[str] = mapped_column(String(80), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    overrides_json: Mapped[str] = mapped_column(Text, default="{}")
+    content_hash: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ScenarioRecord(Base):
+    __tablename__ = "scenarios"
+
+    scenario_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    name: Mapped[str] = mapped_column(String(180))
+    provenance_tag: Mapped[str] = mapped_column(String(40), index=True)  # INVENTED, PERTURBED, REVERSE_STRESS
+    source_event_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    losses_json: Mapped[str] = mapped_column(Text, default="[]")
+    content_hash: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

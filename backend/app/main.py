@@ -42,6 +42,7 @@ from app.models.phase1 import (
 from app.services.contracts import ContractStore, contract_to_programme_deal
 from app.services.lineage import LineageRegistry
 from app.services.sim_sets import SimSetStore
+from app.routes_extended import create_extended_router
 
 app = FastAPI(
     title="RoaringLion Catastrophe Reinsurance Platform",
@@ -437,3 +438,14 @@ def get_benchmarks() -> dict:
     if not bench_file.exists():
         return {"status": "not_run"}
     return json.loads(bench_file.read_text())
+
+
+app.include_router(
+    create_extended_router(
+        contract_store=CONTRACT_STORE,
+        sim_store=SIM_STORE,
+        lineage=LINEAGE,
+        base_sim_id=_base_yelt.sim_set_id,
+        ind_sim_id=_ind_yelt.sim_set_id,
+    )
+)
