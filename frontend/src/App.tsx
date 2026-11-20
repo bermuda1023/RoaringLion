@@ -3,13 +3,28 @@ import { useEffect, useState } from 'react';
 import { api } from './api/client';
 import { BreadcrumbBar } from './components/BreadcrumbBar';
 import { RocCdfChart } from './components/RocCdfChart';
+import { AllocationAndBranches } from './pages/AllocationAndBranches';
+import { BurnAndClaims } from './pages/BurnAndClaims';
+import { CatModelsAndOps } from './pages/CatModelsAndOps';
 import { ContractManager } from './pages/ContractManager';
 import { IlwWorkbench } from './pages/IlwWorkbench';
+import { PortfolioOptimizer } from './pages/PortfolioOptimizer';
 import { SimSetCatalog } from './pages/SimSetCatalog';
 import { StructuringStudio } from './pages/StructuringStudio';
 import type { DeterministicLossRow, ViewOfRisk } from './types/contracts';
 
-type TabKey = 'cms' | 'simsets' | 'ilw' | 'dag' | 'portfolio' | 'deterministic' | 'benchmarks';
+type TabKey =
+  | 'cms'
+  | 'simsets'
+  | 'ilw'
+  | 'dag'
+  | 'deterministic'
+  | 'burnclaims'
+  | 'portfolio'
+  | 'allocation'
+  | 'optimizer'
+  | 'modelsops'
+  | 'benchmarks';
 
 const DEFAULT_LOSSES: DeterministicLossRow[] = [
   {
@@ -79,30 +94,20 @@ export function App() {
       <header className="topbar">
         <div className="brand">
           <span>ROARING LION</span>
-          <span className="badge">Phase 2 · Interactive DAG Studio · Rust Kernel</span>
+          <span className="badge">Full Platform · Rust Kernel + HiGHS Optimizer</span>
         </div>
-        <nav className="tabs">
-          <button className={`tab ${tab === 'cms' ? 'active' : ''}`} onClick={() => setTab('cms')}>
-            CMS Ledger
-          </button>
-          <button className={`tab ${tab === 'simsets' ? 'active' : ''}`} onClick={() => setTab('simsets')}>
-            Sim Sets & ELT
-          </button>
-          <button className={`tab ${tab === 'ilw' ? 'active' : ''}`} onClick={() => setTab('ilw')}>
-            Instant ILWs
-          </button>
-          <button className={`tab ${tab === 'dag' ? 'active' : ''}`} onClick={() => setTab('dag')}>
-            Structuring DAG
-          </button>
-          <button className={`tab ${tab === 'portfolio' ? 'active' : ''}`} onClick={() => setTab('portfolio')}>
-            Portfolio & IRR
-          </button>
-          <button className={`tab ${tab === 'deterministic' ? 'active' : ''}`} onClick={() => setTab('deterministic')}>
-            Deterministic
-          </button>
-          <button className={`tab ${tab === 'benchmarks' ? 'active' : ''}`} onClick={() => setTab('benchmarks')}>
-            Lineage & Bench
-          </button>
+        <nav className="tabs" style={{ flexWrap: 'wrap' }}>
+          <button className={`tab ${tab === 'cms' ? 'active' : ''}`} onClick={() => setTab('cms')}>CMS</button>
+          <button className={`tab ${tab === 'simsets' ? 'active' : ''}`} onClick={() => setTab('simsets')}>SimSets</button>
+          <button className={`tab ${tab === 'ilw' ? 'active' : ''}`} onClick={() => setTab('ilw')}>ILWs</button>
+          <button className={`tab ${tab === 'dag' ? 'active' : ''}`} onClick={() => setTab('dag')}>DAG Studio</button>
+          <button className={`tab ${tab === 'deterministic' ? 'active' : ''}`} onClick={() => setTab('deterministic')}>Deterministic</button>
+          <button className={`tab ${tab === 'burnclaims' ? 'active' : ''}`} onClick={() => setTab('burnclaims')}>Burn & Claims</button>
+          <button className={`tab ${tab === 'portfolio' ? 'active' : ''}`} onClick={() => setTab('portfolio')}>Portfolio IRR</button>
+          <button className={`tab ${tab === 'allocation' ? 'active' : ''}`} onClick={() => setTab('allocation')}>Retro & Forge</button>
+          <button className={`tab ${tab === 'optimizer' ? 'active' : ''}`} onClick={() => setTab('optimizer')}>Optimizer</button>
+          <button className={`tab ${tab === 'modelsops' ? 'active' : ''}`} onClick={() => setTab('modelsops')}>Models & Ops</button>
+          <button className={`tab ${tab === 'benchmarks' ? 'active' : ''}`} onClick={() => setTab('benchmarks')}>Lineage</button>
         </nav>
       </header>
 
@@ -119,6 +124,14 @@ export function App() {
         {tab === 'simsets' && <SimSetCatalog />}
 
         {tab === 'ilw' && <IlwWorkbench />}
+
+        {tab === 'burnclaims' && selectedProg && <BurnAndClaims programme={selectedProg} />}
+
+        {tab === 'allocation' && <AllocationAndBranches />}
+
+        {tab === 'optimizer' && <PortfolioOptimizer />}
+
+        {tab === 'modelsops' && <CatModelsAndOps />}
 
         {tab === 'dag' && selectedProg && programmesQ.data && (
           <StructuringStudio
