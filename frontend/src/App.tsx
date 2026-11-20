@@ -4,9 +4,12 @@ import { api } from './api/client';
 import { BreadcrumbBar } from './components/BreadcrumbBar';
 import { DagCanvas } from './components/DagCanvas';
 import { RocCdfChart } from './components/RocCdfChart';
+import { ContractManager } from './pages/ContractManager';
+import { IlwWorkbench } from './pages/IlwWorkbench';
+import { SimSetCatalog } from './pages/SimSetCatalog';
 import type { DeterministicLossRow, ViewOfRisk } from './types/contracts';
 
-type TabKey = 'dag' | 'portfolio' | 'deterministic' | 'benchmarks';
+type TabKey = 'cms' | 'simsets' | 'ilw' | 'dag' | 'portfolio' | 'deterministic' | 'benchmarks';
 
 const DEFAULT_LOSSES: DeterministicLossRow[] = [
   {
@@ -34,7 +37,7 @@ const DEFAULT_LOSSES: DeterministicLossRow[] = [
 
 export function App() {
   const qc = useQueryClient();
-  const [tab, setTab] = useState<TabKey>('dag');
+  const [tab, setTab] = useState<TabKey>('cms');
   const [selectedProgId, setSelectedProgId] = useState<string>('prog-farmers-us-27');
   const [portfolioView, setPortfolioView] = useState<ViewOfRisk>('ADJUSTED');
   const [totalCapital, setTotalCapital] = useState<number>(160);
@@ -48,12 +51,13 @@ export function App() {
   const dagEvalQ = useQuery({
     queryKey: ['dagEval', selectedProg?.programmeId, selectedProg?.upliftSet.version],
     queryFn: () => api.evaluateProgramme(selectedProg!.programmeId),
-    enabled: Boolean(selectedProg),
+    enabled: Boolean(selectedProg) && tab === 'dag',
   });
 
   const portfolioQ = useQuery({
     queryKey: ['portfolio', portfolioView, totalCapital, selectedProg?.upliftSet.version],
     queryFn: () => api.getPortfolioRollup(portfolioView, totalCapital),
+    enabled: tab === 'portfolio',
   });
 
   const detMut = useMutation({
@@ -82,14 +86,18 @@ export function App() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['programmes'] });
+      qc.invalidateQueries({ queryKey: ['contracts'] });
       qc.invalidateQueries({ queryKey: ['dagEval'] });
       qc.invalidateQueries({ queryKey: ['portfolio'] });
+      qc.invalidateQueries({ queryKey: ['staleness'] });
     },
   });
 
-  const benchmarksQ = useQuery({ queryKey: ['benchmarks'], queryFn: api.getBenchmarks });
-  const manifestsQ = useQuery({ queryKey: ['manifests', tab], queryFn: api.listManifests });
+  const benchmarksQ = useQuery({ queryKey: ['benchmarks'], queryFn: api.getBenchmarks, enabled: tab === 'benchmarks' });
+  const manifestsQ = useQuery({ queryKey: ['manifests', tab], queryFn: api.listManifests, enabled: tab === 'benchmarks' });
+  const stalenessQ = useQuery({ queryKey: ['staleness', tab], queryFn: api.checkStaleness, enabled: tab === 'benchmarks' });
 
+  const staleMap = Object.fromEntries((stalenessQ.data ?? []).map((s) => [s.manifestId, s]));
   const unadjNodes = dagEvalQ.data?.views?.UNADJUSTED ?? [];
   const adjNodes = dagEvalQ.data?.views?.ADJUSTED ?? [];
 
@@ -98,25 +106,47 @@ export function App() {
       <header className="topbar">
         <div className="brand">
           <span>ROARING LION</span>
-          <span className="badge">Phase 0 First Slice · Rust Kernel · 100k Trials</span>
+          <span className="badge">Phase 1 · CMS + Parquet SimSets + ILWs · Rust Kernel</span>
         </div>
         <nav className="tabs">
+          <button className={`tab ${tab === 'cms' ? 'active' : ''}`} onClick={() => setTab('cms')}>
+            CMS Ledger
+          </button>
+          <button className={`tab ${tab === 'simsets' ? 'active' : ''}`} onClick={() => setTab('simsets')}>
+            Sim Sets & ELT
+          </button>
+          <button className={`tab ${tab === 'ilw' ? 'active' : ''}`} onClick={() => setTab('ilw')}>
+            Instant ILWs
+          </button>
           <button className={`tab ${tab === 'dag' ? 'active' : ''}`} onClick={() => setTab('dag')}>
-            1. Structuring DAG & Uplifts
+            Structuring DAG
           </button>
           <button className={`tab ${tab === 'portfolio' ? 'active' : ''}`} onClick={() => setTab('portfolio')}>
-            2. Portfolio IRR & Co-TVaR
+            Portfolio & IRR
           </button>
           <button className={`tab ${tab === 'deterministic' ? 'active' : ''}`} onClick={() => setTab('deterministic')}>
-            3. Deterministic Runner
+            Deterministic
           </button>
           <button className={`tab ${tab === 'benchmarks' ? 'active' : ''}`} onClick={() => setTab('benchmarks')}>
-            4. Benchmarks & Breadcrumbs
+            Lineage & Bench
           </button>
         </nav>
       </header>
 
       <main className="main">
+        {tab === 'cms' && (
+          <ContractManager
+            onSelectProgramme={(id) => {
+              setSelectedProgId(id);
+              setTab('dag');
+            }}
+          />
+        )}
+
+        {tab === 'simsets' && <SimSetCatalog />}
+
+        {tab === 'ilw' && <IlwWorkbench />}
+
         {tab === 'dag' && selectedProg && (
           <>
             <div className="card">
@@ -443,30 +473,41 @@ export function App() {
             </div>
             <div className="card">
               <div className="card-title">
-                <span>Recorded Run Manifests & Breadcrumb Audit Ledger ({manifestsQ.data?.length ?? 0})</span>
+                <span>Recorded Run Manifests & Breadcrumb Staleness Audit ({manifestsQ.data?.length ?? 0})</span>
               </div>
               <table>
                 <thead>
                   <tr>
                     <th>Manifest ID</th>
                     <th>Run Type</th>
-                    <th>Engine</th>
+                    <th>Freshness</th>
                     <th>Output Hash</th>
                     <th>Breadcrumb Chain</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {manifestsQ.data?.map((m) => (
-                    <tr key={m.manifestId}>
-                      <td style={{ fontFamily: 'monospace', color: '#5eead4' }}>{m.manifestId}</td>
-                      <td>{m.runType}</td>
-                      <td>{m.engineVersion}</td>
-                      <td style={{ fontFamily: 'monospace' }}>#{m.outputHash}</td>
-                      <td style={{ fontSize: 11, color: '#94a3b8' }}>
-                        {m.breadcrumb.map((b) => `${b.entityType}:${b.entityId}`).join(' › ')}
-                      </td>
-                    </tr>
-                  ))}
+                  {manifestsQ.data?.map((m) => {
+                    const st = staleMap[m.manifestId];
+                    return (
+                      <tr key={m.manifestId}>
+                        <td style={{ fontFamily: 'monospace', color: '#5eead4' }}>{m.manifestId}</td>
+                        <td>{m.runType}</td>
+                        <td>
+                          {st?.isStale ? (
+                            <span className="fail" title={st.staleReasons.join('; ')}>
+                              STALE
+                            </span>
+                          ) : (
+                            <span className="pass">FRESH</span>
+                          )}
+                        </td>
+                        <td style={{ fontFamily: 'monospace' }}>#{m.outputHash}</td>
+                        <td style={{ fontSize: 11, color: '#94a3b8' }}>
+                          {m.breadcrumb.map((b) => `${b.entityType}:${b.entityId}`).join(' › ')}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

@@ -9,6 +9,91 @@ import type {
   ViewOfRisk,
 } from '../types/contracts';
 
+export interface ContractFull extends ProgrammeDeal {
+  chainId: string;
+  direction: string;
+  structure: string;
+  instrument: string;
+  placement: string;
+  inceptionDate?: string | null;
+  expiryDate?: string | null;
+  hoursClause: number;
+  authorizedLine: number;
+  attachment: number;
+  technicalRol?: number | null;
+  brokeragePct: number;
+  frontingFeePct: number;
+  customTags: string[];
+  version: number;
+  contentHash: string;
+}
+
+export interface SimSetDetail {
+  simSetId: string;
+  name: string;
+  sourceFormat: string;
+  eventCatalogId: string;
+  numTrials: number;
+  totalEvents: number;
+  currency: string;
+  regionPerils: string[];
+  contentHash: string;
+  parquetPath: string;
+  isIndustryCatalog: boolean;
+  expectedAnnualLoss?: number | null;
+  manifest?: RunManifest | null;
+}
+
+export interface IlwPriceRequest {
+  name: string;
+  industrySimSetId: string;
+  regionPerils: string[];
+  triggerType: 'BINARY' | 'PRO_RATA' | 'AGGREGATE' | 'SECOND_EVENT';
+  triggerBn: number;
+  exhaustionBn?: number | null;
+  limitM: number;
+  rol: number;
+  direction: 'ASSUMED' | 'EXTERNAL_RETRO' | 'INTERNAL_CEDED';
+  currency: string;
+  portfolioView: ViewOfRisk;
+}
+
+export interface IlwPriceResponse {
+  name: string;
+  industrySimSetId: string;
+  eventCatalogId: string;
+  regionPerils: string[];
+  triggerType: string;
+  triggerBn: number;
+  exhaustionBn?: number | null;
+  limitM: number;
+  premiumM: number;
+  rol: number;
+  direction: string;
+  currency: string;
+  computeMs: number;
+  attachProbPct: number;
+  exhaustProbPct: number;
+  expectedLossM: number;
+  sdM: number;
+  elrPct: number;
+  indemnityIndexCorrelation: number;
+  grossPortfolioTvar250M: number;
+  netPortfolioTvar250M: number;
+  tvar250ReductionM: number;
+  hedgeEffectivenessPct: number;
+  basisRiskResidualM: number;
+  costPerDollarTvarSaved?: number | null;
+  manifest: RunManifest;
+}
+
+export interface StaleManifestInfo {
+  manifestId: string;
+  runType: string;
+  isStale: boolean;
+  staleReasons: string[];
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
@@ -22,6 +107,29 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   listProgrammes: () => fetchJson<ProgrammeDeal[]>('/api/programmes'),
+  listContracts: (params?: { status?: string; search?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set('status', params.status);
+    if (params?.search) qs.set('search', params.search);
+    const q = qs.toString();
+    return fetchJson<ContractFull[]>(`/api/contracts${q ? `?${q}` : ''}`);
+  },
+  createContract: (payload: Record<string, unknown>) =>
+    fetchJson<ContractFull>('/api/contracts', { method: 'POST', body: JSON.stringify(payload) }),
+  updateContract: (id: string, patch: Record<string, unknown>) =>
+    fetchJson<ContractFull>(`/api/contracts/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  listSimSets: () => fetchJson<SimSetDetail[]>('/api/sim-sets'),
+  ingestYeltFile: async (formData: FormData): Promise<SimSetDetail> => {
+    const res = await fetch('/api/sim-sets/ingest/yelt', { method: 'POST', body: formData });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    return res.json() as Promise<SimSetDetail>;
+  },
+  ingestElt: (payload: Record<string, unknown>) =>
+    fetchJson<SimSetDetail>('/api/sim-sets/ingest/elt', { method: 'POST', body: JSON.stringify(payload) }),
+  priceIlw: (payload: IlwPriceRequest) =>
+    fetchJson<IlwPriceResponse>('/api/ilw/price', { method: 'POST', body: JSON.stringify(payload) }),
+  promoteIlw: (payload: IlwPriceRequest) =>
+    fetchJson<ContractFull>('/api/ilw/promote', { method: 'POST', body: JSON.stringify(payload) }),
   evaluateProgramme: (id: string) =>
     fetchJson<DagEvalResponse>(`/api/programmes/${id}/evaluate`, { method: 'POST' }),
   updateUplifts: (id: string, rules: UpliftRule[]) =>
@@ -44,5 +152,6 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   listManifests: () => fetchJson<RunManifest[]>('/api/lineage/manifests'),
+  checkStaleness: () => fetchJson<StaleManifestInfo[]>('/api/lineage/staleness'),
   getBenchmarks: () => fetchJson<Record<string, unknown>>('/api/benchmarks'),
 };
