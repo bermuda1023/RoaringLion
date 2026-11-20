@@ -35,6 +35,9 @@ class NodeType(str, Enum):
     OCC_XL = "OCC_XL"
     AGG_XL = "AGG_XL"
     QUOTA_SHARE = "QUOTA_SHARE"
+    AGG_QUOTA_SHARE = "AGG_QUOTA_SHARE"
+    SURPLUS_SHARE = "SURPLUS_SHARE"
+    ILW_OPTION = "ILW_OPTION"
     PRICING_OUTPUT = "PRICING_OUTPUT"
     YELT_OUTPUT = "YELT_OUTPUT"
     EP_OUTPUT = "EP_OUTPUT"
@@ -52,6 +55,48 @@ class ProgrammeStatus(str, Enum):
     NTU = "NTU"
     EXPIRED = "EXPIRED"
     PLANNED = "PLANNED"
+
+
+class ContractDirection(str, Enum):
+    ASSUMED = "ASSUMED"
+    INTERNAL_CEDED = "INTERNAL_CEDED"
+    EXTERNAL_RETRO = "EXTERNAL_RETRO"
+
+
+class StructureType(str, Enum):
+    OCC_XL = "OCC_XL"
+    AGG_XL = "AGG_XL"
+    QUOTA_SHARE = "QUOTA_SHARE"
+    STOP_LOSS = "STOP_LOSS"
+    CASCADING = "CASCADING"
+    ILW = "ILW"
+    CAT_BOND = "CAT_BOND"
+
+
+class InstrumentType(str, Enum):
+    UNL = "UNL"
+    INDUSTRY_INDEX = "INDUSTRY_INDEX"
+    PARAMETRIC = "PARAMETRIC"
+    HYBRID = "HYBRID"
+
+
+class PlacementType(str, Enum):
+    OPEN_MARKET = "OPEN_MARKET"
+    PRIVATE = "PRIVATE"
+    FACILITY = "FACILITY"
+
+
+class IlwTriggerType(str, Enum):
+    BINARY = "BINARY"
+    PRO_RATA = "PRO_RATA"
+    AGGREGATE = "AGGREGATE"
+    SECOND_EVENT = "SECOND_EVENT"
+
+
+class SimSetFormat(str, Enum):
+    YELT = "YELT"
+    ELT = "ELT"
+    SYNTHETIC = "SYNTHETIC"
 
 
 class LossSourceType(str, Enum):
