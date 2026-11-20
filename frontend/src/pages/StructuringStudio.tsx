@@ -228,7 +228,11 @@ export function StructuringStudio({
             {dirty && <span style={{ color: '#f59e0b', marginLeft: 6 }}>(Unsaved edits)</span>}
           </span>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <select value={selectedProg.programmeId} onChange={(e) => onSelectProgramme(e.target.value)}>
+            <select
+              value={selectedProg.programmeId}
+              onChange={(e) => onSelectProgramme(e.target.value)}
+              style={{ maxWidth: '100%' }}
+            >
               {programmes.map((p) => (
                 <option key={p.programmeId} value={p.programmeId}>
                   {p.cedentName} — {p.programmeName} ({p.renewalPeriod})
@@ -277,9 +281,9 @@ export function StructuringStudio({
           </div>
         )}
 
-        <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr 220px', gap: 12 }}>
+        <div className="studio-layout">
           {/* Left Inspector */}
-          <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 10 }}>
+          <div className="studio-panel" style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 10 }}>
             <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: '#93c5fd' }}>
               Node / Edge Properties
             </div>
@@ -406,7 +410,7 @@ export function StructuringStudio({
           </div>
 
           {/* Center React Flow Canvas */}
-          <div style={{ height: 400, background: '#0a0f18', borderRadius: 6, border: '1px solid #26324a' }}>
+          <div className="studio-canvas">
             <ReactFlow
               nodes={rfNodes}
               edges={rfEdges}

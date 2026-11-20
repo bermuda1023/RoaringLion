@@ -96,7 +96,7 @@ export function App() {
           <span>ROARING LION</span>
           <span className="badge">Full Platform · Rust Kernel + HiGHS Optimizer</span>
         </div>
-        <nav className="tabs" style={{ flexWrap: 'wrap' }}>
+        <nav className="tabs" aria-label="Primary navigation">
           <button className={`tab ${tab === 'cms' ? 'active' : ''}`} onClick={() => setTab('cms')}>CMS</button>
           <button className={`tab ${tab === 'simsets' ? 'active' : ''}`} onClick={() => setTab('simsets')}>SimSets</button>
           <button className={`tab ${tab === 'ilw' ? 'active' : ''}`} onClick={() => setTab('ilw')}>ILWs</button>
@@ -154,7 +154,7 @@ export function App() {
             <div className="card">
               <div className="card-title">
                 <span>{portfolioQ.data.portfolioName}</span>
-                <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                   <select value={portfolioView} onChange={(e) => setPortfolioView(e.target.value as ViewOfRisk)}>
                     <option value="ADJUSTED">ADJUSTED View</option>
                     <option value="UNADJUSTED">UNADJUSTED View</option>
@@ -282,7 +282,7 @@ export function App() {
             <div className="card">
               <div className="card-title">
                 <span>Deterministic Loss List (Same Rust Financial-Terms Code as Stochastic Engine)</span>
-                <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                   <select value={detView} onChange={(e) => setDetView(e.target.value as ViewOfRisk)}>
                     <option value="UNADJUSTED">UNADJUSTED</option>
                     <option value="ADJUSTED">ADJUSTED</option>

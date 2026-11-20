@@ -8,6 +8,7 @@ export function RocCdfChart({ data }: { data: PortfolioRollupResponse }) {
   useEffect(() => {
     if (!ref.current) return;
     const chart = echarts.init(ref.current);
+    const isNarrow = ref.current.clientWidth < 520;
     const markLines = data.guidelines.map((g) => ({
       yAxis: g.thresholdRocPct,
       name: `${g.label}: ${g.thresholdRocPct}%`,
@@ -17,9 +18,9 @@ export function RocCdfChart({ data }: { data: PortfolioRollupResponse }) {
         width: 1.2,
       },
       label: {
-        formatter: `${g.label} (${g.thresholdRocPct}%)`,
+        formatter: isNarrow ? `${g.thresholdRocPct}%` : `${g.label} (${g.thresholdRocPct}%)`,
         color: g.passed ? '#86efac' : '#fca5a5',
-        fontSize: 10,
+        fontSize: isNarrow ? 9 : 10,
       },
     }));
 
@@ -27,6 +28,7 @@ export function RocCdfChart({ data }: { data: PortfolioRollupResponse }) {
       backgroundColor: 'transparent',
       tooltip: {
         trigger: 'axis',
+        confine: true,
         formatter: (params: unknown) => {
           const arr = params as { data: [number, number] }[];
           const pt = arr?.[0]?.data;
@@ -34,7 +36,7 @@ export function RocCdfChart({ data }: { data: PortfolioRollupResponse }) {
           return `Cumulative Prob: <b>${pt[0].toFixed(2)}%</b><br/>Return on Capital: <b>${pt[1].toFixed(2)}%</b>`;
         },
       },
-      grid: { left: 55, right: 30, top: 24, bottom: 45 },
+      grid: { left: isNarrow ? 50 : 55, right: isNarrow ? 34 : 30, top: 28, bottom: 45 },
       xAxis: {
         type: 'value',
         min: 0,
@@ -47,7 +49,7 @@ export function RocCdfChart({ data }: { data: PortfolioRollupResponse }) {
       },
       yAxis: {
         type: 'value',
-        name: 'Return on Capital (%)',
+        name: isNarrow ? 'ROC (%)' : 'Return on Capital (%)',
         axisLabel: { color: '#94a3b8', formatter: '{value}%' },
         splitLine: { lineStyle: { color: '#1e293b' } },
       },
@@ -66,11 +68,14 @@ export function RocCdfChart({ data }: { data: PortfolioRollupResponse }) {
 
     const onResize = () => chart.resize();
     window.addEventListener('resize', onResize);
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onResize) : null;
+    ro?.observe(ref.current);
     return () => {
+      ro?.disconnect();
       window.removeEventListener('resize', onResize);
       chart.dispose();
     };
   }, [data]);
 
-  return <div ref={ref} style={{ width: '100%', height: 340 }} />;
+  return <div ref={ref} className="chart-box" />;
 }
