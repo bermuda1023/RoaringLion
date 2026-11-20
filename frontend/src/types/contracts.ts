@@ -121,6 +121,8 @@ export interface DagEvalResponse {
   graphVersion: number;
   currency: string;
   computeMs: number;
+  cacheHits?: number;
+  cacheMisses?: number;
   views: Record<string, NodeViewMetrics[]>;
   manifest: RunManifest;
 }

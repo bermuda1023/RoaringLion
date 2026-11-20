@@ -132,6 +132,25 @@ export const api = {
     fetchJson<ContractFull>('/api/ilw/promote', { method: 'POST', body: JSON.stringify(payload) }),
   evaluateProgramme: (id: string) =>
     fetchJson<DagEvalResponse>(`/api/programmes/${id}/evaluate`, { method: 'POST' }),
+  updateGraph: (id: string, graph: unknown) =>
+    fetchJson<ProgrammeDeal>(`/api/programmes/${id}/graph`, {
+      method: 'PUT',
+      body: JSON.stringify(graph),
+    }),
+  bindProgramme: (id: string) =>
+    fetchJson<{ contract: ContractFull; bindManifestId: string }>(`/api/programmes/${id}/bind`, {
+      method: 'POST',
+    }),
+  listGraphTemplates: () =>
+    fetchJson<
+      {
+        templateId: string;
+        category: string;
+        label: string;
+        nodeType: string;
+        params: Record<string, unknown>;
+      }[]
+    >('/api/graph-templates'),
   updateUplifts: (id: string, rules: UpliftRule[]) =>
     fetchJson<ProgrammeDeal>(`/api/programmes/${id}/uplifts`, {
       method: 'PUT',

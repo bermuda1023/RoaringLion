@@ -1,12 +1,12 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { api } from './api/client';
 import { BreadcrumbBar } from './components/BreadcrumbBar';
-import { DagCanvas } from './components/DagCanvas';
 import { RocCdfChart } from './components/RocCdfChart';
 import { ContractManager } from './pages/ContractManager';
 import { IlwWorkbench } from './pages/IlwWorkbench';
 import { SimSetCatalog } from './pages/SimSetCatalog';
+import { StructuringStudio } from './pages/StructuringStudio';
 import type { DeterministicLossRow, ViewOfRisk } from './types/contracts';
 
 type TabKey = 'cms' | 'simsets' | 'ilw' | 'dag' | 'portfolio' | 'deterministic' | 'benchmarks';
@@ -36,23 +36,15 @@ const DEFAULT_LOSSES: DeterministicLossRow[] = [
 ];
 
 export function App() {
-  const qc = useQueryClient();
-  const [tab, setTab] = useState<TabKey>('cms');
+  const [tab, setTab] = useState<TabKey>('dag');
   const [selectedProgId, setSelectedProgId] = useState<string>('prog-farmers-us-27');
   const [portfolioView, setPortfolioView] = useState<ViewOfRisk>('ADJUSTED');
   const [totalCapital, setTotalCapital] = useState<number>(160);
-  const [flUplift, setFlUplift] = useState<number>(1.1);
   const [detView, setDetView] = useState<ViewOfRisk>('UNADJUSTED');
   const [losses, setLosses] = useState<DeterministicLossRow[]>(DEFAULT_LOSSES);
 
   const programmesQ = useQuery({ queryKey: ['programmes'], queryFn: api.listProgrammes });
   const selectedProg = programmesQ.data?.find((p) => p.programmeId === selectedProgId) ?? programmesQ.data?.[0];
-
-  const dagEvalQ = useQuery({
-    queryKey: ['dagEval', selectedProg?.programmeId, selectedProg?.upliftSet.version],
-    queryFn: () => api.evaluateProgramme(selectedProg!.programmeId),
-    enabled: Boolean(selectedProg) && tab === 'dag',
-  });
 
   const portfolioQ = useQuery({
     queryKey: ['portfolio', portfolioView, totalCapital, selectedProg?.upliftSet.version],
@@ -76,37 +68,18 @@ export function App() {
     }
   }, [tab]);
 
-  const upliftMut = useMutation({
-    mutationFn: async () => {
-      if (!selectedProg) return;
-      const updatedRules = selectedProg.upliftSet.rules.map((r, i) =>
-        i === 0 ? { ...r, flatSeverityFactor: flUplift } : r,
-      );
-      await api.updateUplifts(selectedProg.programmeId, updatedRules);
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['programmes'] });
-      qc.invalidateQueries({ queryKey: ['contracts'] });
-      qc.invalidateQueries({ queryKey: ['dagEval'] });
-      qc.invalidateQueries({ queryKey: ['portfolio'] });
-      qc.invalidateQueries({ queryKey: ['staleness'] });
-    },
-  });
-
   const benchmarksQ = useQuery({ queryKey: ['benchmarks'], queryFn: api.getBenchmarks, enabled: tab === 'benchmarks' });
   const manifestsQ = useQuery({ queryKey: ['manifests', tab], queryFn: api.listManifests, enabled: tab === 'benchmarks' });
   const stalenessQ = useQuery({ queryKey: ['staleness', tab], queryFn: api.checkStaleness, enabled: tab === 'benchmarks' });
 
   const staleMap = Object.fromEntries((stalenessQ.data ?? []).map((s) => [s.manifestId, s]));
-  const unadjNodes = dagEvalQ.data?.views?.UNADJUSTED ?? [];
-  const adjNodes = dagEvalQ.data?.views?.ADJUSTED ?? [];
 
   return (
     <div>
       <header className="topbar">
         <div className="brand">
           <span>ROARING LION</span>
-          <span className="badge">Phase 1 · CMS + Parquet SimSets + ILWs · Rust Kernel</span>
+          <span className="badge">Phase 2 · Interactive DAG Studio · Rust Kernel</span>
         </div>
         <nav className="tabs">
           <button className={`tab ${tab === 'cms' ? 'active' : ''}`} onClick={() => setTab('cms')}>
@@ -147,86 +120,12 @@ export function App() {
 
         {tab === 'ilw' && <IlwWorkbench />}
 
-        {tab === 'dag' && selectedProg && (
-          <>
-            <div className="card">
-              <div className="card-title">
-                <span>Programme & Per-Deal Uplift Controls (Unadjusted vs Adjusted)</span>
-                <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-                  <select value={selectedProg.programmeId} onChange={(e) => setSelectedProgId(e.target.value)}>
-                    {programmesQ.data?.map((p) => (
-                      <option key={p.programmeId} value={p.programmeId}>
-                        {p.cedentName} — {p.programmeName} ({p.renewalPeriod})
-                      </option>
-                    ))}
-                  </select>
-                  <label style={{ color: '#94a3b8', fontSize: 12 }}>
-                    Primary Peril Uplift ×
-                    <input
-                      type="number"
-                      step="0.02"
-                      value={flUplift}
-                      onChange={(e) => setFlUplift(Number(e.target.value))}
-                      style={{ width: 70, marginLeft: 6 }}
-                    />
-                  </label>
-                  <button className="btn" onClick={() => upliftMut.mutate()}>
-                    Apply Uplift & Re-Price
-                  </button>
-                </div>
-              </div>
-              <DagCanvas graph={selectedProg.graph} unadjMetrics={unadjNodes} adjMetrics={adjNodes} />
-              <div style={{ marginTop: 10 }}>
-                <BreadcrumbBar manifest={dagEvalQ.data?.manifest ?? null} />
-              </div>
-            </div>
-
-            <div className="card">
-              <div className="card-title">
-                <span>Review Stats — Unadjusted vs Adjusted ({selectedProg.currency} $M)</span>
-                <span style={{ color: '#94a3b8', fontSize: 11 }}>
-                  Rust Kernel Evaluate: {dagEvalQ.data?.computeMs ?? '—'} ms across 100,000 trials (both views)
-                </span>
-              </div>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Node</th>
-                    <th>Type</th>
-                    <th className="num">Unadj EL</th>
-                    <th className="num">Adj EL</th>
-                    <th className="num">Uplift Δ</th>
-                    <th className="num">Adj SD</th>
-                    <th className="num">Adj Exp RIP</th>
-                    <th className="num">Adj Max Year</th>
-                    <th className="num">Adj ELR</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {unadjNodes.map((u, idx) => {
-                    const a = adjNodes[idx];
-                    const deltaPct = u.el > 0 ? ((a.el - u.el) / u.el) * 100 : 0;
-                    return (
-                      <tr key={u.nodeId}>
-                        <td>{u.nodeLabel}</td>
-                        <td style={{ color: '#94a3b8' }}>{u.nodeType}</td>
-                        <td className="num">${u.el.toFixed(3)}m</td>
-                        <td className="num" style={{ fontWeight: 600 }}>${a.el.toFixed(3)}m</td>
-                        <td className="num" style={{ color: deltaPct > 0 ? '#f59e0b' : '#94a3b8' }}>
-                          {deltaPct >= 0 ? '+' : ''}
-                          {deltaPct.toFixed(1)}%
-                        </td>
-                        <td className="num">${a.sd.toFixed(3)}m</td>
-                        <td className="num">${a.expectedRip.toFixed(3)}m</td>
-                        <td className="num">${a.maxYear.toFixed(2)}m</td>
-                        <td className="num">{a.elr != null ? `${(a.elr * 100).toFixed(1)}%` : '—'}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </>
+        {tab === 'dag' && selectedProg && programmesQ.data && (
+          <StructuringStudio
+            programmes={programmesQ.data}
+            selectedProg={selectedProg}
+            onSelectProgramme={setSelectedProgId}
+          />
         )}
 
         {tab === 'portfolio' && portfolioQ.data && (
