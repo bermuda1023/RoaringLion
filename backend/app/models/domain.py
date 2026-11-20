@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from pydantic import Field, field_validator
+
 from .common import CamelModel
 from .enums import LinkType, LossSourceType, NodeType, PerilCode, ProgrammeStatus, ViewOfRisk
 
@@ -37,15 +39,15 @@ class RunManifest(CamelModel):
 
 
 class CurvePoint(CamelModel):
-    loss_threshold: float
-    factor: float
+    loss_threshold: float = Field(ge=0, le=1_000_000, allow_inf_nan=False)
+    factor: float = Field(ge=0, le=20, allow_inf_nan=False)
 
 
 class UpliftRule(CamelModel):
     region_peril_key: str = "ALL"
-    flat_severity_factor: float = 1.0
+    flat_severity_factor: float = Field(default=1.0, ge=0, le=20, allow_inf_nan=False)
     curve_points: list[CurvePoint] = []
-    additive_load: float = 0.0
+    additive_load: float = Field(default=0.0, ge=-1_000_000, le=1_000_000, allow_inf_nan=False)
     min_loss: float | None = None
     max_loss: float | None = None
     note: str | None = None
@@ -82,8 +84,15 @@ class GraphEdgeSpec(CamelModel):
     edge_id: str
     source: str
     target: str
-    sign: int = 1  # +1 solid additive, -1 dashed subtractive/inuring
-    weight: float = 1.0
+    sign: int = Field(default=1, ge=-1, le=1)  # +1 solid additive, -1 dashed subtractive/inuring
+    weight: float = Field(default=1.0, ge=0, le=100, allow_inf_nan=False)
+
+    @field_validator("sign")
+    @classmethod
+    def _sign_not_zero(cls, v: int) -> int:
+        if v == 0:
+            raise ValueError("edge sign must be +1 or -1")
+        return v
 
 
 class GraphSpec(CamelModel):
@@ -215,7 +224,8 @@ class DeterministicLossRow(CamelModel):
     event_name: str
     occurrence_datetime: str
     region_peril_key: str
-    ground_up_loss: float
+    # $M units: cap at $1tn ground-up for a single occurrence.
+    ground_up_loss: float = Field(ge=0, le=1_000_000, allow_inf_nan=False)
     currency: str = "USD"
     source_type: LossSourceType = LossSourceType.MANUAL
     source_ref: str | None = None
@@ -224,8 +234,8 @@ class DeterministicLossRow(CamelModel):
 class DeterministicRunRequest(CamelModel):
     programme_id: str
     view: ViewOfRisk = ViewOfRisk.UNADJUSTED
-    hours_clause: int = 72
-    losses: list[DeterministicLossRow]
+    hours_clause: int = Field(default=72, ge=0, le=8760)
+    losses: list[DeterministicLossRow] = Field(max_length=10_000)
 
 
 class LayerStateSnapshot(CamelModel):

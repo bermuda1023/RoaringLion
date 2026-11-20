@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
+from pydantic import Field, model_validator
+
 from app.engine.slice_runner import evaluate_deterministic_run
 from app.models.common import CamelModel
 from app.models.domain import BreadcrumbStep, DeterministicLossRow, DeterministicRunRequest, ProgrammeDeal, RunManifest
@@ -67,25 +69,31 @@ def group_by_hours_clause(losses: list[DeterministicLossRow], hours_clause: int)
 
 
 class HistoricalLossInput(CamelModel):
-    year: int
+    year: int = Field(ge=1900, le=2100)
     event_name: str
     occurrence_datetime: str
     region_peril_key: str
-    ground_up_loss: float
-    ldf: float = 1.0  # Loss development factor (IBNR/development)
+    ground_up_loss: float = Field(ge=0, le=1_000_000, allow_inf_nan=False)
+    ldf: float = Field(default=1.0, ge=0, le=10, allow_inf_nan=False)  # Loss development factor (IBNR/development)
 
 
 class BurnCostRequest(CamelModel):
     programme_id: str
-    start_year: int = 1990
-    end_year: int = 2025
-    annual_severity_trend: float = 0.035  # 3.5% annual inflation/trend to current year
-    exposure_growth_factor: float = 1.0
-    on_level_factor: float = 1.0
-    hours_clause: int = 72
-    credibility_weight_burn: float = 0.30  # Weight on burn vs modelled EL
-    modelled_el: float | None = None
+    start_year: int = Field(default=1990, ge=1900, le=2100)
+    end_year: int = Field(default=2025, ge=1900, le=2100)
+    annual_severity_trend: float = Field(default=0.035, ge=-0.5, le=1, allow_inf_nan=False)
+    exposure_growth_factor: float = Field(default=1.0, gt=0, le=100, allow_inf_nan=False)
+    on_level_factor: float = Field(default=1.0, gt=0, le=100, allow_inf_nan=False)
+    hours_clause: int = Field(default=72, ge=0, le=8760)
+    credibility_weight_burn: float = Field(default=0.30, ge=0, le=1, allow_inf_nan=False)  # Weight on burn vs modelled EL
+    modelled_el: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     custom_own_history: list[HistoricalLossInput] | None = None
+
+    @model_validator(mode="after")
+    def _check_years(self):
+        if self.end_year < self.start_year:
+            raise ValueError("endYear must be >= startYear")
+        return self
 
 
 class YearlyBurnRow(CamelModel):

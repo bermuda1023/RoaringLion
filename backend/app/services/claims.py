@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Literal
+
+from pydantic import Field
 
 from app.db.database import get_session
 from app.db.models import ClaimRecord, ClaimVersionRecord
@@ -21,15 +24,15 @@ class ClaimCreate(CamelModel):
     event_name: str
     occurrence_datetime: str
     region_peril_key: str
-    ground_up_loss: float
-    status: str = "ESTIMATE"  # ESTIMATE | CASE_RESERVE | PAID | FINAL
+    ground_up_loss: float = Field(ge=0, le=1_000_000, allow_inf_nan=False)
+    status: Literal["ESTIMATE", "CASE_RESERVE", "PAID", "FINAL", "OPEN"] = "ESTIMATE"
     currency: str = "USD"
     note: str = ""
 
 
 class ClaimRevision(CamelModel):
-    ground_up_loss: float
-    status: str  # ESTIMATE | CASE_RESERVE | PAID | FINAL
+    ground_up_loss: float = Field(ge=0, le=1_000_000, allow_inf_nan=False)
+    status: Literal["ESTIMATE", "CASE_RESERVE", "PAID", "FINAL", "OPEN"]
     note: str = ""
 
 

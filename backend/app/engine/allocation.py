@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import Field
 
 import numpy as np
 import roaring_lion_engine as rle
@@ -21,20 +23,20 @@ from app.services.lineage import LineageRegistry, canonical_hash
 
 class RetroAllocationRequest(CamelModel):
     view: ViewOfRisk = ViewOfRisk.ADJUSTED
-    total_capital: float = 160.0
-    allocation_method: str = "TAIL_RELIEF_COTVAR"  # TAIL_RELIEF_COTVAR | EXPECTED_RECOVERY | HYBRID_RECOVERY_TAIL
-    hybrid_tail_weight: float = 0.70
+    total_capital: float = Field(default=160.0, gt=0, le=1_000_000, allow_inf_nan=False)
+    allocation_method: Literal["TAIL_RELIEF_COTVAR", "EXPECTED_RECOVERY", "HYBRID_RECOVERY_TAIL"] = "TAIL_RELIEF_COTVAR"
+    hybrid_tail_weight: float = Field(default=0.70, ge=0, le=1, allow_inf_nan=False)
     # Optional retro ILW hedge overlay
     retro_ilw_region_perils: list[str] = ["US-FL-WS"]
-    retro_ilw_trigger_bn: float = 40.0
-    retro_ilw_limit_m: float = 25.0
-    retro_ilw_rol: float = 0.20
+    retro_ilw_trigger_bn: float = Field(default=40.0, ge=0, allow_inf_nan=False)
+    retro_ilw_limit_m: float = Field(default=25.0, ge=0, le=1_000_000, allow_inf_nan=False)
+    retro_ilw_rol: float = Field(default=0.20, ge=0, le=5, allow_inf_nan=False)
     # Collateralized fund fee & holdback waterfall assumptions
-    amf_pct: float = 0.015
-    perf_fee_pct: float = 0.15
-    perf_hurdle_pct: float = 0.08
-    collateral_yield_pct: float = 0.045
-    holdback_buffer_ratio: float = 0.25  # Fraction of tail loss trapped for 12m past expiry
+    amf_pct: float = Field(default=0.015, ge=0, le=1, allow_inf_nan=False)
+    perf_fee_pct: float = Field(default=0.15, ge=0, le=1, allow_inf_nan=False)
+    perf_hurdle_pct: float = Field(default=0.08, ge=0, le=1, allow_inf_nan=False)
+    collateral_yield_pct: float = Field(default=0.045, ge=0, le=1, allow_inf_nan=False)
+    holdback_buffer_ratio: float = Field(default=0.25, ge=0, le=1, allow_inf_nan=False)  # Fraction of tail loss trapped
 
 
 class GrossNetLayerRow(CamelModel):

@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from pydantic import Field, model_validator
+
 from app.db.database import get_session
 from app.db.models import ScenarioRecord
 from app.engine.burn_cost import HISTORICAL_BENCHMARK_EVENTS, group_by_hours_clause
@@ -20,11 +22,17 @@ from app.services.lineage import LineageRegistry, canonical_hash
 
 class BacktestMatrixRequest(CamelModel):
     branch_id: str | None = None
-    start_year: int = 1990
-    end_year: int = 2025
-    total_capital: float = 160.0
-    annual_trend: float = 0.03
+    start_year: int = Field(default=1990, ge=1900, le=2100)
+    end_year: int = Field(default=2025, ge=1900, le=2100)
+    total_capital: float = Field(default=160.0, gt=0, le=1_000_000, allow_inf_nan=False)
+    annual_trend: float = Field(default=0.03, ge=-0.5, le=1, allow_inf_nan=False)
     as_is_trended: bool = True
+
+    @model_validator(mode="after")
+    def _check_years(self):
+        if self.end_year < self.start_year:
+            raise ValueError("endYear must be >= startYear")
+        return self
 
 
 class BacktestYearCell(CamelModel):
@@ -163,11 +171,11 @@ class ScenarioOut(CamelModel):
 
 class ReverseStressRequest(CamelModel):
     name: str = "Reverse Stress: Fund Breakeven Breach"
-    target_roc_pct: float = 0.0
-    total_capital: float = 160.0
+    target_roc_pct: float = Field(default=0.0, ge=-100, le=100, allow_inf_nan=False)
+    total_capital: float = Field(default=160.0, gt=0, le=1_000_000, allow_inf_nan=False)
     seed_region_peril: str = "US-FL-WS"
     seed_event_name: str = "Synthetic Miami Cat 5"
-    base_ground_up_m: float = 100.0
+    base_ground_up_m: float = Field(default=100.0, gt=0, le=1_000_000, allow_inf_nan=False)
 
 
 class ReverseStressResponse(CamelModel):

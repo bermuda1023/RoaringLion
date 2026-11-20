@@ -8,6 +8,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from pydantic import model_validator
+
 from app.db.database import get_session
 from app.db.models import PortfolioBranchRecord
 from app.engine.sim_generator import YeltTable
@@ -22,9 +24,19 @@ class BranchCreate(CamelModel):
     name: str
     parent_portfolio_id: str = "fund-keystone-j27"
     description: str = ""
-    # Map programmeId -> new signedLine multiplier (e.g. 0.5 = cut line in half, 1.5 = upsize 50%)
+    # Map programmeId -> new absolute signed-line share (0.5 = take a 50% line)
     signed_line_overrides: dict[str, float] = {}
     excluded_programme_ids: list[str] = []
+
+    @model_validator(mode="after")
+    def _check_overrides(self):
+        for pid, share in self.signed_line_overrides.items():
+            if not (share == share and 0.0 <= share <= 1.5):  # NaN fails share==share
+                raise ValueError(f"signed line override for {pid} must be between 0 and 1.5")
+        overlap = set(self.signed_line_overrides) & set(self.excluded_programme_ids)
+        if overlap:
+            raise ValueError(f"programmes cannot be both overridden and excluded: {sorted(overlap)}")
+        return self
 
 
 class BranchOut(CamelModel):

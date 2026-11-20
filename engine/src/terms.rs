@@ -165,7 +165,7 @@ pub fn eval_occ_xl_period(
             out_ceded[i] = 0.0;
             continue;
         }
-        let raw_layer = (gross - params.occ_attachment).clamp(0.0, params.occ_limit);
+        let raw_layer = (gross - params.occ_attachment).clamp(0.0, params.occ_limit.max(0.0));
         let remaining = (annual_cap - cum_layer_loss).max(0.0);
         let in_layer = raw_layer.min(remaining);
         cum_layer_loss += in_layer;
@@ -220,7 +220,7 @@ pub fn eval_agg_xl_period(
             None => gross,
         };
         cum_subject += capped;
-        let target_layer = (cum_subject - params.agg_attachment).clamp(0.0, params.agg_limit);
+        let target_layer = (cum_subject - params.agg_attachment).clamp(0.0, params.agg_limit.max(0.0));
         let in_layer = (target_layer - cum_layer).max(0.0);
         cum_layer += in_layer;
 
@@ -270,7 +270,7 @@ pub fn trace_occ_xl_deterministic(losses: &[f64], params: &OccXlParams) -> Vec<S
         let mut in_layer = 0.0;
         let mut rip_due = 0.0;
         if gross > 0.0 && gross >= params.occ_franchise {
-            let raw_layer = (gross - params.occ_attachment).clamp(0.0, params.occ_limit);
+            let raw_layer = (gross - params.occ_attachment).clamp(0.0, params.occ_limit.max(0.0));
             let remaining = (annual_cap - cum_layer_loss).max(0.0);
             in_layer = raw_layer.min(remaining);
             let prev_cum = cum_layer_loss;
@@ -341,7 +341,7 @@ pub fn trace_agg_xl_deterministic(losses: &[f64], params: &AggXlParams) -> Vec<S
                 None => gross,
             };
             cum_subject += capped;
-            let target_layer = (cum_subject - params.agg_attachment).clamp(0.0, params.agg_limit);
+            let target_layer = (cum_subject - params.agg_attachment).clamp(0.0, params.agg_limit.max(0.0));
             in_layer = (target_layer - cum_layer).max(0.0);
             cum_layer += in_layer;
         }
@@ -697,7 +697,7 @@ pub fn eval_cascading_period(
                 if rem_cap <= 1e-12 {
                     continue;
                 }
-                let avail_this_occ = p.occ_limit.min(rem_cap);
+                let avail_this_occ = p.occ_limit.max(0.0).min(rem_cap);
                 let in_layer = (gross - cursor).clamp(0.0, avail_this_occ);
                 if in_layer > 0.0 {
                     let prev_cum = cum_used[l];

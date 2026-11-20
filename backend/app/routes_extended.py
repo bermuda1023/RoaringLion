@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.adapters.cat_models import CatModelOrchestrator, ModelRunJob, ModelRunRequest
 from app.adapters.exposure_eclipse import BoundDealSyncEvent, ExposureEclipseClient, ExposureProgrammeRef
@@ -55,7 +55,7 @@ class SlipTextPayload(BaseModel):
 
 
 class FxConvertPayload(BaseModel):
-    amount: float
+    amount: float = Field(ge=0, le=1e15, allow_inf_nan=False)
     fromCurrency: str
     toCurrency: str
     profileId: str = "FX-2027-PLAN"
@@ -121,6 +121,11 @@ def create_extended_router(
     @router.post("/api/claims", response_model=ClaimOut)
     def create_claim(payload: ClaimCreate) -> ClaimOut:
         check_permission("underwriter", "create", "claim")
+        if not contract_store.get_contract(payload.programme_id):
+            raise HTTPException(status_code=404, detail="Programme not found")
+        existing = claims_svc.list_claims(programme_id=payload.programme_id)
+        if any(c.claim_no == payload.claim_no for c in existing):
+            raise HTTPException(status_code=409, detail=f"Claim {payload.claim_no} already exists for this programme; revise it instead")
         return claims_svc.create_claim(payload)
 
     @router.post("/api/claims/{claim_id}/revise", response_model=ClaimOut)
@@ -131,7 +136,7 @@ def create_extended_router(
         return out
 
     @router.post("/api/claims/evaluate/{programme_id}", response_model=DeterministicRunResponse)
-    def evaluate_programme_claims(programme_id: str, hours_clause: int = 72) -> DeterministicRunResponse:
+    def evaluate_programme_claims(programme_id: str, hours_clause: int = Query(default=72, ge=0, le=8760)) -> DeterministicRunResponse:
         c = contract_store.get_contract(programme_id)
         if not c:
             raise HTTPException(status_code=404, detail="Programme not found")
@@ -157,13 +162,17 @@ def create_extended_router(
 
     @router.post("/api/branches", response_model=BranchOut)
     def create_branch(payload: BranchCreate) -> BranchOut:
+        known = {c.programme_id for c in contract_store.list_contracts()}
+        unknown = (set(payload.signed_line_overrides) | set(payload.excluded_programme_ids)) - known
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"Unknown programme(s) in branch: {sorted(unknown)}")
         return branch_svc.create_branch(payload, lineage)
 
     @router.post("/api/branches/{branch_id}/diff", response_model=BranchDiffResponse)
     def diff_branch(
         branch_id: str,
         view: ViewOfRisk = Query(default=ViewOfRisk.ADJUSTED),
-        total_capital: float = Query(default=160.0, alias="totalCapital"),
+        total_capital: float = Query(default=160.0, alias="totalCapital", gt=0),
     ) -> BranchDiffResponse:
         br = branch_svc.get_branch(branch_id)
         if not br:
@@ -180,6 +189,8 @@ def create_extended_router(
     @router.post("/api/backtest/matrix", response_model=BacktestMatrixResponse)
     def run_backtest_matrix(req: BacktestMatrixRequest) -> BacktestMatrixResponse:
         br = branch_svc.get_branch(req.branch_id) if req.branch_id else None
+        if req.branch_id and br is None:
+            raise HTTPException(status_code=404, detail="Branch not found")
         return run_all_direction_backtest(
             req=req,
             baseline_programmes=_bound_deals(),
@@ -212,7 +223,7 @@ def create_extended_router(
         )
 
     @router.post("/api/optimizer/frontier", response_model=list[FrontierPoint])
-    def run_frontier(req: OptimizerRequest, num_points: int = 6) -> list[FrontierPoint]:
+    def run_frontier(req: OptimizerRequest, num_points: int = Query(default=6, ge=2, le=12)) -> list[FrontierPoint]:
         return compute_efficient_frontier(
             req=req,
             programmes=_all_non_ilw_deals(),
@@ -226,6 +237,8 @@ def create_extended_router(
 
     @router.post("/api/model-runs", response_model=ModelRunJob)
     def trigger_model_run(req: ModelRunRequest) -> ModelRunJob:
+        if not contract_store.get_contract(req.programme_id):
+            raise HTTPException(status_code=404, detail="Programme not found")
         try:
             return cat_orch.submit_run(req, sim_store, lineage)
         except ValueError as exc:
@@ -270,7 +283,10 @@ def create_extended_router(
         region_peril: str = Query(default="US-FL-WS", alias="regionPeril"),
         as_of_day: int = Query(default=270, alias="asOfDay", ge=1, le=365),
     ) -> SeasonalEarningResponse:
-        return compute_seasonal_earning(sim_store.get_yelt(base_sim_id), region_peril, as_of_day)
+        try:
+            return compute_seasonal_earning(sim_store.get_yelt(base_sim_id), region_peril, as_of_day)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @router.get("/api/fx/tables", response_model=list[FxRateTable])
     def list_fx_tables() -> list[FxRateTable]:
@@ -288,10 +304,15 @@ def create_extended_router(
         c = contract_store.get_contract(payload.programmeId)
         if not c:
             raise HTTPException(status_code=404, detail="Programme not found")
+        try:
+            old_yelt = sim_store.get_yelt(payload.oldSimSetId)
+            new_yelt = sim_store.get_yelt(payload.newSimSetId)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         return compare_model_versions(
             contract_to_programme_deal(c),
-            sim_store.get_yelt(payload.oldSimSetId),
-            sim_store.get_yelt(payload.newSimSetId),
+            old_yelt,
+            new_yelt,
             view=payload.view,
         )
 
@@ -315,6 +336,8 @@ def create_extended_router(
 
     @router.post("/api/intake/parse-slip", response_model=SlipIntakeDraft)
     def parse_slip(payload: SlipTextPayload) -> SlipIntakeDraft:
+        if not payload.rawText.strip():
+            raise HTTPException(status_code=422, detail="Slip text is empty")
         return ops_store.parse_slip_text(payload.rawText)
 
     @router.get("/api/alerts")

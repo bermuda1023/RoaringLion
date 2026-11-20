@@ -94,13 +94,29 @@ export interface StaleManifestInfo {
   staleReasons: string[];
 }
 
+export function readableError(status: number, text: string): string {
+  try {
+    const body = JSON.parse(text) as { detail?: unknown };
+    if (typeof body.detail === 'string') return body.detail;
+    if (Array.isArray(body.detail)) {
+      const msgs = body.detail
+        .map((d) => (d && typeof d === 'object' && 'msg' in d ? String((d as { msg: unknown }).msg) : ''))
+        .filter(Boolean);
+      if (msgs.length) return msgs.join('; ');
+    }
+  } catch {
+    // fall through to raw text
+  }
+  return `HTTP ${status}: ${text.slice(0, 300)}`;
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   });
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    throw new Error(readableError(res.status, await res.text()));
   }
   return res.json() as Promise<T>;
 }
@@ -121,7 +137,7 @@ export const api = {
   listSimSets: () => fetchJson<SimSetDetail[]>('/api/sim-sets'),
   ingestYeltFile: async (formData: FormData): Promise<SimSetDetail> => {
     const res = await fetch('/api/sim-sets/ingest/yelt', { method: 'POST', body: formData });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(readableError(res.status, await res.text()));
     return res.json() as Promise<SimSetDetail>;
   },
   ingestElt: (payload: Record<string, unknown>) =>

@@ -132,6 +132,10 @@ async def ingest_yelt_upload(
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="Empty file upload")
+    if len(raw) > 200_000_000:
+        raise HTTPException(status_code=413, detail="Upload exceeds 200 MB limit")
+    if not 1 <= num_trials <= 1_000_000:
+        raise HTTPException(status_code=422, detail="numTrials must be between 1 and 1,000,000")
     detail = SIM_STORE.ingest_yelt_bytes(
         raw_bytes=raw,
         filename=file.filename or "upload.csv",
@@ -229,7 +233,10 @@ def evaluate_programme(programme_id: str) -> DagEvalResponse:
     prog = contract_to_programme_deal(c)
     yelt = SIM_STORE.get_yelt(prog.sim_set_id)
     ind_yelt = SIM_STORE.get_yelt(_ind_yelt.sim_set_id)
-    resp, _ = evaluate_programme_dag(prog, yelt, LINEAGE, industry_yelt=ind_yelt)
+    try:
+        resp, _ = evaluate_programme_dag(prog, yelt, LINEAGE, industry_yelt=ind_yelt)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return resp
 
 
@@ -408,7 +415,10 @@ def run_deterministic(req: DeterministicRunRequest) -> DeterministicRunResponse:
     c = CONTRACT_STORE.get_contract(req.programme_id)
     if not c:
         raise HTTPException(status_code=404, detail="Programme not found")
-    return evaluate_deterministic_run(req, contract_to_programme_deal(c), LINEAGE)
+    try:
+        return evaluate_deterministic_run(req, contract_to_programme_deal(c), LINEAGE)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/lineage/manifests", response_model=list[RunManifest])

@@ -6,6 +6,8 @@ import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 
+from pydantic import Field
+
 from app.engine.sim_generator import generate_synthetic_sim_set
 from app.models.common import CamelModel
 from app.models.domain import BreadcrumbStep
@@ -19,7 +21,7 @@ class ModelRunRequest(CamelModel):
     programme_id: str
     edm_database_name: str = "EDM_FARMERS_2027"
     model_version: str = "v23"
-    num_trials: int = 50_000
+    num_trials: int = Field(default=50_000, ge=100, le=200_000)
     currency: str = "USD"
 
 

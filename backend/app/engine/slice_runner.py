@@ -98,8 +98,137 @@ def _ep_stats_from_vector(vec: np.ndarray) -> dict[str, Any]:
     return json.loads(rle.ep_stats(np.ascontiguousarray(vec, dtype=np.float64), DEFAULT_RETURN_PERIODS))
 
 
+def _check_finite_numbers(value: Any, path: str) -> None:
+    if isinstance(value, bool):
+        return
+    if isinstance(value, (int, float)):
+        if not np.isfinite(float(value)):
+            raise ValueError(f"{path} must be a finite number")
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            _check_finite_numbers(v, f"{path}.{k}")
+    elif isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            _check_finite_numbers(v, f"{path}[{i}]")
+
+
+def _num(node: Any, key: str, default: float | None = None) -> float:
+    raw = node.params.get(key, default)
+    if raw is None:
+        raise ValueError(f"Node {node.node_id} ({node.node_type.value}) requires numeric param '{key}'")
+    try:
+        val = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Node {node.node_id} param '{key}' must be numeric") from exc
+    if not np.isfinite(val):
+        raise ValueError(f"Node {node.node_id} param '{key}' must be finite")
+    return val
+
+
+def _validate_node_params(node: Any) -> None:
+    _check_finite_numbers(node.params, f"Node {node.node_id} params")
+    t = node.node_type
+    placed_keys = ("placedShare",)
+    if t == NodeType.OCC_XL:
+        if _num(node, "occLimit") <= 0:
+            raise ValueError(f"Node {node.node_id} occLimit must be > 0")
+        if _num(node, "occAttachment") < 0:
+            raise ValueError(f"Node {node.node_id} occAttachment must be >= 0")
+        if _num(node, "occFranchise", 0.0) < 0:
+            raise ValueError(f"Node {node.node_id} occFranchise must be >= 0")
+        if _num(node, "depositPremium", 0.0) < 0:
+            raise ValueError(f"Node {node.node_id} depositPremium must be >= 0")
+        rip = _num(node, "ripRate", 0.0)
+        if not 0.0 <= rip <= 5.0:
+            raise ValueError(f"Node {node.node_id} ripRate must be between 0 and 5")
+        reinst = node.params.get("reinstatements")
+        if reinst is not None and float(reinst) < 0:
+            raise ValueError(f"Node {node.node_id} reinstatements must be >= 0")
+    elif t == NodeType.AGG_XL:
+        if _num(node, "aggLimit") <= 0:
+            raise ValueError(f"Node {node.node_id} aggLimit must be > 0")
+        if _num(node, "aggAttachment") < 0:
+            raise ValueError(f"Node {node.node_id} aggAttachment must be >= 0")
+        if _num(node, "perEventFranchise", 0.0) < 0:
+            raise ValueError(f"Node {node.node_id} perEventFranchise must be >= 0")
+        cap = node.params.get("perEventCap")
+        if cap is not None and float(cap) <= 0:
+            raise ValueError(f"Node {node.node_id} perEventCap must be > 0")
+    elif t in (NodeType.QUOTA_SHARE, NodeType.AGG_QUOTA_SHARE):
+        cession = _num(node, "cessionShare", 0.25)
+        if not 0.0 <= cession <= 1.0:
+            raise ValueError(f"Node {node.node_id} cessionShare must be between 0 and 1")
+        for key in ("eventCap", "aggCap"):
+            v = node.params.get(key)
+            if v is not None and float(v) <= 0:
+                raise ValueError(f"Node {node.node_id} {key} must be > 0")
+    elif t == NodeType.SURPLUS_SHARE:
+        if _num(node, "retentionLine", 25.0) <= 0:
+            raise ValueError(f"Node {node.node_id} retentionLine must be > 0")
+        lines = _num(node, "numLines", 4.0)
+        if not 0.0 < lines <= 100.0:
+            raise ValueError(f"Node {node.node_id} numLines must be between 0 and 100")
+    elif t == NodeType.ILW_OPTION:
+        if _num(node, "trigger", 40.0) < 0:
+            raise ValueError(f"Node {node.node_id} trigger must be >= 0")
+        if _num(node, "limit", 25.0) <= 0:
+            raise ValueError(f"Node {node.node_id} limit must be > 0")
+    elif t == NodeType.CASCADING_TOWER:
+        layers = node.params.get("layers") or []
+        if not layers:
+            raise ValueError(f"Node {node.node_id} cascading tower needs at least one layer")
+        for i, layer in enumerate(layers):
+            if float(layer.get("occLimit", 0) or 0) <= 0:
+                raise ValueError(f"Node {node.node_id} layer {i} occLimit must be > 0")
+            if float(layer.get("occAttachment", 0) or 0) < 0:
+                raise ValueError(f"Node {node.node_id} layer {i} occAttachment must be >= 0")
+            if float(layer.get("depositPremium", 0) or 0) < 0:
+                raise ValueError(f"Node {node.node_id} layer {i} depositPremium must be >= 0")
+    elif t == NodeType.EVENT_ORDER_FILTER:
+        min_order = _num(node, "minOrder", 2.0)
+        if min_order < 1:
+            raise ValueError(f"Node {node.node_id} minOrder must be >= 1")
+        max_order = node.params.get("maxOrder")
+        if max_order is not None and float(max_order) < min_order:
+            raise ValueError(f"Node {node.node_id} maxOrder must be >= minOrder")
+        if _num(node, "minLossThreshold", 0.0) < 0:
+            raise ValueError(f"Node {node.node_id} minLossThreshold must be >= 0")
+    elif t == NodeType.DATE_WINDOW_FILTER:
+        for key in ("startDay", "endDay"):
+            v = _num(node, key, 1.0 if key == "startDay" else 365.0)
+            if not 1 <= v <= 365:
+                raise ValueError(f"Node {node.node_id} {key} must be between 1 and 365")
+    elif t == NodeType.LOSS_SIZE_FILTER:
+        min_l = _num(node, "minLoss", 0.0)
+        if min_l < 0:
+            raise ValueError(f"Node {node.node_id} minLoss must be >= 0")
+        max_l = node.params.get("maxLoss")
+        if max_l is not None and float(max_l) < min_l:
+            raise ValueError(f"Node {node.node_id} maxLoss must be >= minLoss")
+    elif t == NodeType.REGION_PERIL_FILTER:
+        for key in node.params.get("regionPerils", []) or []:
+            if key != "ALL" and key not in RP_TO_ID:
+                raise ValueError(f"Node {node.node_id} references unknown region-peril '{key}'")
+    elif t == NodeType.UPLIFT:
+        if _num(node, "factor", 1.0) < 0:
+            raise ValueError(f"Node {node.node_id} uplift factor must be >= 0")
+    for key in placed_keys:
+        if key in node.params:
+            share = float(node.params[key])
+            if not 0.0 <= share <= 1.5:
+                raise ValueError(f"Node {node.node_id} placedShare must be between 0 and 1.5")
+
+
 def validate_dag_acyclic(graph: GraphSpec) -> list[str]:
-    """Validate DAG acyclicity and return topological node order."""
+    """Validate DAG structure, term parameters, acyclicity; return topological order."""
+    node_ids = [n.node_id for n in graph.nodes]
+    if len(node_ids) != len(set(node_ids)):
+        raise ValueError("Graph contains duplicate node ids")
+    edge_ids = [e.edge_id for e in graph.edges]
+    if len(edge_ids) != len(set(edge_ids)):
+        raise ValueError("Graph contains duplicate edge ids")
+    for node in graph.nodes:
+        _validate_node_params(node)
     nodes_by_id = {n.node_id: n for n in graph.nodes}
     in_degree: dict[str, int] = {n.node_id: 0 for n in graph.nodes}
     outgoing: dict[str, list[str]] = {n.node_id: [] for n in graph.nodes}
@@ -626,6 +755,7 @@ def evaluate_deterministic_run(
     lineage: LineageRegistry,
 ) -> DeterministicRunResponse:
     """Push any ordered loss list chronologically through a programme's layer structure via Rust."""
+    validate_dag_acyclic(programme.graph)
     ordered_losses = sorted(req.losses, key=lambda r: r.occurrence_datetime)
     raw_amounts = np.array([r.ground_up_loss for r in ordered_losses], dtype=np.float64)
     rp_ids = np.array([RP_TO_ID.get(r.region_peril_key, -999) for r in ordered_losses], dtype=np.int32)

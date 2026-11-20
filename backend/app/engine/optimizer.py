@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import Field, model_validator
 
 import highspy
 import numpy as np
@@ -21,27 +23,35 @@ from app.services.lineage import LineageRegistry, canonical_hash
 
 class RegionPerilCap(CamelModel):
     region_peril_key: str
-    max_limit_m: float
+    max_limit_m: float = Field(gt=0, le=1_000_000, allow_inf_nan=False)
 
 
 class OptimizerRequest(CamelModel):
-    mode: str = "CURRENT"  # CURRENT | FORWARD_PLANNING
+    mode: Literal["CURRENT", "FORWARD_PLANNING"] = "CURRENT"
     view: ViewOfRisk = ViewOfRisk.ADJUSTED
-    total_capital: float = 160.0
-    max_deployed_collateral: float = 160.0
-    min_deployed_collateral: float = 0.0
-    max_tvar_100_m: float = 110.0
-    max_tvar_250_m: float = 135.0
-    max_single_cedent_limit_m: float | None = None
+    total_capital: float = Field(default=160.0, gt=0, le=1_000_000, allow_inf_nan=False)
+    max_deployed_collateral: float = Field(default=160.0, ge=0, le=1_000_000, allow_inf_nan=False)
+    min_deployed_collateral: float = Field(default=0.0, ge=0, le=1_000_000, allow_inf_nan=False)
+    max_tvar_100_m: float = Field(default=110.0, gt=0, le=1_000_000, allow_inf_nan=False)
+    max_tvar_250_m: float = Field(default=135.0, gt=0, le=1_000_000, allow_inf_nan=False)
+    max_single_cedent_limit_m: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
     region_peril_caps: list[RegionPerilCap] = []
-    min_line_size_share: float = 0.0  # > 0 activates MILP semi-continuous binary constraints (w=0 OR w>=min)
-    max_line_size_share: float = 1.5
+    min_line_size_share: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False)  # > 0 activates MILP
+    max_line_size_share: float = Field(default=1.5, gt=0, le=3, allow_inf_nan=False)
     lock_bound_deals: bool = False
     include_retro_ilw_candidate: bool = True
-    retro_ilw_limit_m: float = 25.0
-    retro_ilw_rol: float = 0.20
-    retro_ilw_trigger_bn: float = 40.0
-    max_retro_spend_pct_gross_prem: float = 0.25
+    retro_ilw_limit_m: float = Field(default=25.0, ge=0, le=1_000_000, allow_inf_nan=False)
+    retro_ilw_rol: float = Field(default=0.20, ge=0, le=5, allow_inf_nan=False)
+    retro_ilw_trigger_bn: float = Field(default=40.0, ge=0, allow_inf_nan=False)
+    max_retro_spend_pct_gross_prem: float = Field(default=0.25, ge=0, le=1, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _check_ranges(self):
+        if self.min_deployed_collateral > self.max_deployed_collateral:
+            raise ValueError("minDeployedCollateral must be <= maxDeployedCollateral")
+        if self.min_line_size_share > self.max_line_size_share:
+            raise ValueError("minLineSizeShare must be <= maxLineSizeShare")
+        return self
 
 
 class OptimizedDealRow(CamelModel):

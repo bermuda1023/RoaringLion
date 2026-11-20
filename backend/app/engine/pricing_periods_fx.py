@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from pydantic import Field
+
 from app.engine.sim_generator import RP_TO_ID, YeltTable
 from app.engine.slice_runner import evaluate_programme_dag
 from app.models.common import CamelModel
@@ -13,16 +15,16 @@ from app.services.lineage import LineageRegistry
 
 
 class TechnicalPricingRequest(CamelModel):
-    expected_loss_m: float
-    allocated_capital_m: float
-    limit_m: float
-    expected_rip_m: float = 0.0
-    target_return_on_capital: float = 0.14
-    brokerage_pct: float = 0.10
-    fronting_and_tax_pct: float = 0.03
-    operating_expense_pct: float = 0.02
-    margin_pct: float = 0.03
-    quoted_rol_pct: float | None = None
+    expected_loss_m: float = Field(ge=0, le=1_000_000, allow_inf_nan=False)
+    allocated_capital_m: float = Field(ge=0, le=1_000_000, allow_inf_nan=False)
+    limit_m: float = Field(gt=0, le=1_000_000, allow_inf_nan=False)
+    expected_rip_m: float = Field(default=0.0, ge=0, le=1_000_000, allow_inf_nan=False)
+    target_return_on_capital: float = Field(default=0.14, ge=0, le=2, allow_inf_nan=False)
+    brokerage_pct: float = Field(default=0.10, ge=0, le=0.9, allow_inf_nan=False)
+    fronting_and_tax_pct: float = Field(default=0.03, ge=0, le=0.9, allow_inf_nan=False)
+    operating_expense_pct: float = Field(default=0.02, ge=0, le=0.9, allow_inf_nan=False)
+    margin_pct: float = Field(default=0.03, ge=0, le=0.9, allow_inf_nan=False)
+    quoted_rol_pct: float | None = Field(default=None, ge=0, le=500, allow_inf_nan=False)
 
 
 class TechnicalPricingResponse(CamelModel):
@@ -71,9 +73,10 @@ def compute_seasonal_earning(yelt: YeltTable, region_peril_key: str, as_of_day: 
     """Compute seasonal risk-earned % directly from simulation-set day_of_year loss distribution."""
     if region_peril_key == "ALL":
         mask = np.ones(len(yelt.losses), dtype=bool)
+    elif region_peril_key not in RP_TO_ID:
+        raise ValueError(f"Unknown region-peril: {region_peril_key}")
     else:
-        rp_id = RP_TO_ID.get(region_peril_key, 0)
-        mask = yelt.rp_ids == rp_id
+        mask = yelt.rp_ids == RP_TO_ID[region_peril_key]
 
     days = yelt.day_of_year[mask]
     losses = yelt.losses[mask]

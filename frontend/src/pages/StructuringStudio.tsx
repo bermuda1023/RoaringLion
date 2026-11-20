@@ -54,7 +54,8 @@ export function StructuringStudio({
   const [draftGraph, setDraftGraph] = useState<GraphSpec>(selectedProg.graph);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const [flUplift, setFlUplift] = useState<number>(selectedProg.upliftSet.rules[0]?.flatSeverityFactor ?? 1.1);
+  // Raw string while editing so typing '-' does not collapse to NaN and flip sign.
+  const [flUplift, setFlUplift] = useState<number | string>(selectedProg.upliftSet.rules[0]?.flatSeverityFactor ?? 1.1);
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
@@ -73,7 +74,22 @@ export function StructuringStudio({
   });
 
   const saveGraphMut = useMutation({
-    mutationFn: () => api.updateGraph(selectedProg.programmeId, draftGraph),
+    mutationFn: () => {
+      // Params edited through the inspector may hold numeric strings; restore numbers.
+      const clean: GraphSpec = {
+        ...draftGraph,
+        nodes: draftGraph.nodes.map((n) => ({
+          ...n,
+          params: Object.fromEntries(
+            Object.entries(n.params).map(([k, v]) => [
+              k,
+              typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)) ? Number(v) : v,
+            ]),
+          ),
+        })),
+      };
+      return api.updateGraph(selectedProg.programmeId, clean);
+    },
     onSuccess: () => {
       setDirty(false);
       qc.invalidateQueries({ queryKey: ['programmes'] });
@@ -86,10 +102,11 @@ export function StructuringStudio({
 
   const upliftMut = useMutation({
     mutationFn: async () => {
+      const factor = typeof flUplift === 'string' ? Number(flUplift) : flUplift;
       const baseRules = selectedProg.upliftSet.rules.length
         ? selectedProg.upliftSet.rules
-        : [{ regionPerilKey: 'ALL', flatSeverityFactor: flUplift, curvePoints: [], additiveLoad: 0 }];
-      const updated = baseRules.map((r, i) => (i === 0 ? { ...r, flatSeverityFactor: flUplift } : r));
+        : [{ regionPerilKey: 'ALL', flatSeverityFactor: factor, curvePoints: [], additiveLoad: 0 }];
+      const updated = baseRules.map((r, i) => (i === 0 ? { ...r, flatSeverityFactor: factor } : r));
       await api.updateUplifts(selectedProg.programmeId, updated);
     },
     onSuccess: () => {
@@ -224,7 +241,10 @@ export function StructuringStudio({
                 type="number"
                 step="0.02"
                 value={flUplift}
-                onChange={(e) => setFlUplift(Number(e.target.value))}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  setFlUplift(raw === '' || raw === '-' ? raw : Number(raw));
+                }}
                 style={{ width: 64, marginLeft: 4 }}
               />
             </label>
@@ -244,6 +264,18 @@ export function StructuringStudio({
             </button>
           </div>
         </div>
+
+        {(saveGraphMut.error || upliftMut.error || bindMut.error || dagEvalQ.error) && (
+          <div className="error-banner">
+            {String(
+              (saveGraphMut.error as Error | null)?.message ??
+                (upliftMut.error as Error | null)?.message ??
+                (bindMut.error as Error | null)?.message ??
+                (dagEvalQ.error as Error | null)?.message ??
+                'Request failed',
+            )}
+          </div>
+        )}
 
         <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr 220px', gap: 12 }}>
           {/* Left Inspector */}
@@ -274,20 +306,35 @@ export function StructuringStudio({
                 </label>
                 {Object.entries(selectedNode.params)
                   .filter(([, v]) => typeof v === 'number' || typeof v === 'string')
-                  .map(([k, v]) => (
+                  .map(([k, v]) => {
+                    // A param that started numeric (or is a numeric intermediate
+                    // like '' / '-50') stays a number input even while its raw
+                    // editing value is held as a string.
+                    const isNumeric =
+                      typeof v === 'number' || v === '' || v === '-' || (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)) && /^-?\d*\.?\d*$/.test(v.trim()));
+                    return (
                     <label key={k} style={{ fontSize: 11, color: '#94a3b8' }}>
                       {k}
                       <input
-                        type={typeof v === 'number' ? 'number' : 'text'}
+                        type={isNumeric ? 'number' : 'text'}
                         step="any"
                         value={String(v)}
-                        onChange={(e) =>
-                          updateSelectedNodeParam(k, typeof v === 'number' ? Number(e.target.value) : e.target.value)
-                        }
+                        onChange={(e) => {
+                          if (!isNumeric) {
+                            updateSelectedNodeParam(k, e.target.value);
+                            return;
+                          }
+                          // Keep intermediate keystrokes ('', '-') as raw text so
+                          // clearing a field or typing a negative stays editable;
+                          // the API validates the final value on save.
+                          const raw = e.target.value;
+                          updateSelectedNodeParam(k, raw === '' || raw === '-' ? raw : Number(raw));
+                        }}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                  ))}
+                    );
+                  })}
                 <button
                   className="btn"
                   style={{ background: '#7f1d1d', marginTop: 6 }}

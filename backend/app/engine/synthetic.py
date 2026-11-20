@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
 import numpy as np
+from pydantic import Field, model_validator
 
 from app.engine.sim_generator import RP_TO_ID, YeltTable
 from app.models.common import CamelModel
@@ -18,19 +20,27 @@ class SyntheticLossRequest(CamelModel):
     name: str = "AUS_WF Synthetic Loss Set"
     region_peril_key: str = "US-FL-WS"
     event_catalog_id: str = "SYNTH_CAT_V1"
-    num_trials: int = 50_000
+    num_trials: int = Field(default=50_000, ge=100, le=200_000)
     currency: str = "USD"
-    frequency_dist: str = "POISSON"  # POISSON | NEG_BIN
-    mean_frequency: float = 2.5
-    dispersion_k: float = 2.0  # for NEG_BIN
-    severity_dist: str = "LOGNORMAL"  # LOGNORMAL | NORMAL | PARETO
-    param_mu: float = 15.0  # mean for Normal/LogNormal, scale xm for Pareto
-    param_sigma: float = 22.0  # sd for Normal/LogNormal, alpha for Pareto
-    min_loss: float | None = 0.5
-    max_loss: float | None = 250.0
+    frequency_dist: Literal["POISSON", "NEG_BIN"] = "POISSON"
+    mean_frequency: float = Field(default=2.5, ge=0, le=1000, allow_inf_nan=False)
+    dispersion_k: float = Field(default=2.0, gt=0, le=1000, allow_inf_nan=False)  # for NEG_BIN
+    severity_dist: Literal["LOGNORMAL", "NORMAL", "PARETO"] = "LOGNORMAL"
+    param_mu: float = Field(default=15.0, ge=0, le=1_000_000, allow_inf_nan=False)
+    param_sigma: float = Field(default=22.0, gt=0, le=1_000_000, allow_inf_nan=False)
+    min_loss: float | None = Field(default=0.5, ge=0, allow_inf_nan=False)
+    max_loss: float | None = Field(default=250.0, gt=0, allow_inf_nan=False)
     # 12 monthly weights summing to ~100%
     monthly_shares: list[float] = [8.33] * 12
     seed: int = 2027
+
+    @model_validator(mode="after")
+    def _check_loss_bounds(self):
+        if self.min_loss is not None and self.max_loss is not None and self.max_loss < self.min_loss:
+            raise ValueError("maxLoss must be >= minLoss")
+        if len(self.monthly_shares) != 12:
+            raise ValueError("monthlyShares must contain exactly 12 values")
+        return self
 
 
 def generate_synthetic_freq_sev(
