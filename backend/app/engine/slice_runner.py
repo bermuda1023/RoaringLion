@@ -366,7 +366,9 @@ def evaluate_programme_dag(
             prem = float(node.params.get("depositPremium", 0.0)) * float(node.params.get("placedShare", 1.0))
             lim = float(node.params.get("occLimit", node.params.get("aggLimit", node.params.get("limit", 0.0)))) * float(node.params.get("placedShare", 1.0))
             rol = (prem / lim) if lim > 0 and prem > 0 else None
-            elr = (ep["el"] / (prem + exp_rip)) if (prem + exp_rip) > 0 else None
+            # Loss ratio needs this node's own premium. Pass-through outputs inherit RIP
+            # from upstream terms; dividing EL by that RIP alone invents a ratio.
+            elr = (ep["el"] / (prem + exp_rip)) if prem > 0 else None
 
             node_metrics.append(
                 NodeViewMetrics(
