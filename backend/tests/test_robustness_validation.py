@@ -93,7 +93,7 @@ def test_branch_claim_and_model_run_references_are_checked():
 
 
 def test_contract_with_unknown_sim_set_is_422():
-    prog = client.get("/api/contracts")[0]
+    prog = client.get("/api/contracts").json()[0]
     payload = {k: v for k, v in prog.items() if k in ("cedentName", "programmeName", "status", "simSetId")}
     payload["programmeId"] = "prog-rob-badsim"
     payload["simSetId"] = "nope"
