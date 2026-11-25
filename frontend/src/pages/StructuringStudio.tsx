@@ -43,8 +43,8 @@ function evaluatesLikeSaved(draft: GraphSpec, saved: GraphSpec, nodeId: string, 
 }
 
 function nodeAccent(nodeType: string): string {
-  if (nodeType === 'LOSS_SOURCE' || nodeType === 'INDUSTRY_INDEX_SOURCE') return '#4c9dff';
-  if (nodeType.includes('FILTER') || nodeType === 'COMBINATION' || nodeType === 'UPLIFT') return '#8b95a8';
+  if (nodeType === 'LOSS_SOURCE' || nodeType === 'INDUSTRY_INDEX_SOURCE') return '#8a9bb0';
+  if (nodeType.includes('FILTER') || nodeType === 'COMBINATION' || nodeType === 'UPLIFT') return '#9a9082';
   if (
     nodeType === 'OCC_XL' ||
     nodeType === 'AGG_XL' ||
@@ -54,8 +54,8 @@ function nodeAccent(nodeType: string): string {
     nodeType === 'CASCADING_TOWER' ||
     nodeType === 'ILW_OPTION'
   )
-    return '#f2b544';
-  return '#3cc9b0';
+    return '#e8a84a';
+  return '#7a9e8e';
 }
 
 function nodeStyle(nodeType: string, selected: boolean): React.CSSProperties {
@@ -69,7 +69,7 @@ function nodeStyle(nodeType: string, selected: boolean): React.CSSProperties {
     background: 'var(--surface-2)',
     border: `1px solid ${selected ? 'var(--accent)' : 'var(--border-strong)'}`,
     borderLeft: `3px solid ${accent}`,
-    boxShadow: selected ? '0 0 0 3px rgba(76, 157, 255, 0.22)' : '0 6px 16px rgba(0, 0, 0, 0.35)',
+    boxShadow: selected ? '0 0 0 3px rgba(232, 168, 74, 0.22)' : '0 8px 18px rgba(0, 0, 0, 0.32)',
     minWidth: 185,
     textAlign: 'left',
   };

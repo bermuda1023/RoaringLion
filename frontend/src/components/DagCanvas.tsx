@@ -5,14 +5,14 @@ import type { GraphSpec, NodeViewMetrics } from '../types/contracts';
 function nodeStyle(nodeType: string): React.CSSProperties {
   const accent =
     nodeType === 'LOSS_SOURCE'
-      ? '#4c9dff'
+      ? '#8a9bb0'
       : nodeType === 'REGION_PERIL_FILTER' || nodeType === 'COMBINATION'
-        ? '#8b95a8'
+        ? '#9a9082'
         : nodeType === 'OCC_XL' || nodeType === 'AGG_XL'
-          ? '#f2b544'
-          : '#3cc9b0';
+          ? '#e8a84a'
+          : '#7a9e8e';
   return {
-    borderRadius: 8,
+    borderRadius: 10,
     padding: '8px 12px',
     fontSize: 12,
     fontWeight: 500,
@@ -20,7 +20,7 @@ function nodeStyle(nodeType: string): React.CSSProperties {
     background: 'var(--surface-2)',
     border: '1px solid var(--border-strong)',
     borderLeft: `3px solid ${accent}`,
-    boxShadow: '0 6px 16px rgba(0, 0, 0, 0.35)',
+    boxShadow: '0 8px 18px rgba(0, 0, 0, 0.32)',
     minWidth: 195,
     textAlign: 'left',
   };
