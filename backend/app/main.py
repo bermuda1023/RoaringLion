@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.database import init_engine
 from app.engine.ilw import evaluate_ilw_trial_payouts, price_ilw_with_portfolio_hedge
+from app.engine.pricing_link import extract_rollup_layers
 from app.engine.slice_runner import (
     evaluate_deterministic_run,
     evaluate_portfolio_rollup,
@@ -86,18 +87,23 @@ def _sync_memory_aliases() -> None:
 
 
 def _compute_bound_gross_loss_vector(view: ViewOfRisk) -> np.ndarray:
+    all_contracts = CONTRACT_STORE.list_contracts()
+    all_deals = {c.programme_id: contract_to_programme_deal(c) for c in all_contracts}
     bound = [
-        c for c in CONTRACT_STORE.list_contracts(status=ProgrammeStatus.BOUND)
-        if c.direction == ContractDirection.ASSUMED and c.structure != StructureType.ILW
+        all_deals[c.programme_id]
+        for c in all_contracts
+        if c.status == ProgrammeStatus.BOUND and c.direction == ContractDirection.ASSUMED and c.structure != StructureType.ILW
     ]
     yelt = SIM_STORE.get_yelt(_base_yelt.sim_set_id)
-    total = np.zeros(yelt.num_trials, dtype=np.float64)
-    for c in bound:
-        prog = contract_to_programme_deal(c)
+    ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
+    rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
+    for prog in bound:
         _, vecs = evaluate_programme_dag(prog, yelt, LineageRegistry(persist=False), views=[view])
-        for node in prog.graph.nodes:
-            if node.node_type.value in ("OCC_XL", "AGG_XL"):
-                total += vecs["annual"][view.value][node.node_id]
+        ann_by_prog[prog.programme_id] = vecs["annual"][view.value]
+        rip_by_prog[prog.programme_id] = vecs["rip"][view.value]
+    total = np.zeros(yelt.num_trials, dtype=np.float64)
+    for entry in extract_rollup_layers(bound, ann_by_prog, rip_by_prog, all_programmes=all_deals):
+        total += entry.loss_vec
     return total
 
 
@@ -228,7 +234,7 @@ def get_contract_layers(programme_id: str) -> list[ContractLayer]:
     c = CONTRACT_STORE.get_contract(programme_id)
     if not c:
         raise HTTPException(status_code=404, detail="Contract not found")
-    return contract_layers(c)
+    return contract_layers(c, all_contracts=CONTRACT_STORE.list_contracts())
 
 
 @app.put("/api/contracts/{programme_id}/layers", response_model=list[ContractLayer])
@@ -685,10 +691,12 @@ def get_portfolio_rollup(
     view: ViewOfRisk = Query(default=ViewOfRisk.ADJUSTED),
     total_capital: float = Query(default=160.0, alias="totalCapital", gt=0),
 ) -> PortfolioRollupResponse:
+    all_contracts = CONTRACT_STORE.list_contracts()
+    all_deals = {c.programme_id: contract_to_programme_deal(c) for c in all_contracts}
     bound = [
-        contract_to_programme_deal(c)
-        for c in CONTRACT_STORE.list_contracts(status=ProgrammeStatus.BOUND)
-        if c.structure != StructureType.ILW
+        all_deals[c.programme_id]
+        for c in all_contracts
+        if c.status == ProgrammeStatus.BOUND and c.structure != StructureType.ILW
     ]
     yelt = SIM_STORE.get_yelt(_base_yelt.sim_set_id)
     return evaluate_portfolio_rollup(
@@ -699,6 +707,7 @@ def get_portfolio_rollup(
         view=view,
         total_capital=total_capital,
         lineage=LINEAGE,
+        all_programmes=all_deals,
     )
 
 
@@ -707,6 +716,7 @@ def rollup_cms_slice(req: SliceRollupRequest) -> PortfolioRollupResponse:
     selected = [c for c in CONTRACT_STORE.select_slice(req) if c.structure != StructureType.ILW]
     if not selected:
         raise HTTPException(status_code=400, detail="No matching non-ILW contracts in slice")
+    all_deals = {c.programme_id: contract_to_programme_deal(c) for c in CONTRACT_STORE.list_contracts()}
     yelt = SIM_STORE.get_yelt(_base_yelt.sim_set_id)
     return evaluate_portfolio_rollup(
         portfolio_id="slice-rollup",
@@ -716,6 +726,7 @@ def rollup_cms_slice(req: SliceRollupRequest) -> PortfolioRollupResponse:
         view=req.view,
         total_capital=req.total_capital,
         lineage=LINEAGE,
+        all_programmes=all_deals,
     )
 
 

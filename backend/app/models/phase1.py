@@ -138,6 +138,10 @@ class ContractLayer(CamelModel):
     name: str = ""
     terms: str | None = None
     auto_label: bool = True
+    linked_pricing_node_id: str | None = None
+    linked_pricing_label: str | None = None
+    linked_feeder_node_id: str | None = None
+    linked_feeder_label: str | None = None
 
 
 class ContractLayerUpdate(CamelModel):

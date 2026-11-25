@@ -11,6 +11,7 @@ import roaring_lion_engine as rle
 from pydantic import Field, model_validator
 
 from app.engine.ilw import evaluate_ilw_trial_payouts
+from app.engine.pricing_link import extract_rollup_layers
 from app.engine.sim_generator import YeltTable
 from app.engine.slice_runner import evaluate_programme_dag
 from app.models.common import CamelModel
@@ -238,47 +239,64 @@ def _build_vectors(
     items: list[dict[str, Any]] = []
     vecs: list[np.ndarray] = []
 
-    for p in programmes:
-        if req.mode == "CURRENT" and p.status not in (ProgrammeStatus.BOUND, ProgrammeStatus.QUOTED, ProgrammeStatus.FIRM_ORDER):
-            continue
+    active_progs = [
+        p
+        for p in programmes
+        if not (
+            req.mode == "CURRENT"
+            and p.status not in (ProgrammeStatus.BOUND, ProgrammeStatus.QUOTED, ProgrammeStatus.FIRM_ORDER)
+        )
+    ]
+    ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
+    rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
+    for p in active_progs:
         _, out = evaluate_programme_dag(p, yelt, LineageRegistry(persist=False), views=[req.view])
+        ann_by_prog[p.programme_id] = out["annual"][req.view.value]
+        rip_by_prog[p.programme_id] = out["rip"][req.view.value]
 
-        if req.granularity == "LAYER":
-            for n in p.graph.nodes:
-                if n.node_type not in TERM_NODE_TYPES:
-                    continue
-                placed = float(n.params.get("placedShare", p.signed_line))
-                scale = 1.0 / max(placed, 1e-6)
-                loss_1x = out["annual"][req.view.value][n.node_id] * scale
-                rip_1x = float(np.mean(out["rip"][req.view.value][n.node_id] * scale))
-                lim_1x = float(n.params.get("occLimit", n.params.get("aggLimit", n.params.get("aggCap", p.limit))))
-                prem_1x = float(n.params.get("depositPremium", 0.0))
-                el_1x = float(np.mean(loss_1x))
-                lkey = f"{p.programme_id}::{n.node_id}"
-                items.append({
-                    "layer_key": lkey,
-                    "programme_id": p.programme_id,
-                    "layer_id": n.node_id,
-                    "cedent_name": p.cedent_name,
-                    "programme_name": p.programme_name,
-                    "layer_name": n.label,
-                    "direction": "ASSUMED",
-                    "status": p.status.value,
-                    "current_share": placed,
-                    "limit_1x": lim_1x,
-                    "prem_1x": prem_1x,
-                    "el_1x": el_1x,
-                    "profit_1x": prem_1x + rip_1x - el_1x,
-                    "region_perils": p.region_perils,
-                })
-                vecs.append(loss_1x)
-        else:
+    rollup_entries = extract_rollup_layers(
+        active_progs,
+        ann_by_prog,
+        rip_by_prog,
+        all_programmes={p.programme_id: p for p in programmes},
+    )
+
+    if req.granularity == "LAYER":
+        for entry in rollup_entries:
+            loss_1x = entry.loss_vec_1x
+            rip_1x = float(np.mean(entry.rip_vec_1x))
+            el_1x = float(np.mean(loss_1x))
+            lkey = f"{entry.programme_id}::{entry.layer_id}"
+            items.append({
+                "layer_key": lkey,
+                "programme_id": entry.programme_id,
+                "layer_id": entry.layer_id,
+                "cedent_name": entry.cedent_name,
+                "programme_name": entry.programme_name,
+                "layer_name": entry.layer_name,
+                "direction": "ASSUMED",
+                "status": entry.status,
+                "current_share": entry.signed_line,
+                "limit_1x": entry.limit_1x,
+                "prem_1x": entry.prem_1x,
+                "el_1x": el_1x,
+                "profit_1x": entry.prem_1x + rip_1x - el_1x,
+                "region_perils": entry.region_perils,
+            })
+            vecs.append(loss_1x)
+    else:
+        by_prog: dict[str, list] = {}
+        for entry in rollup_entries:
+            by_prog.setdefault(entry.programme_id, []).append(entry)
+        for p in active_progs:
+            p_entries = by_prog.get(p.programme_id, [])
+            if not p_entries:
+                continue
             ann_total = np.zeros(yelt.num_trials, dtype=np.float64)
             rip_total = np.zeros(yelt.num_trials, dtype=np.float64)
-            for n in p.graph.nodes:
-                if n.node_type in TERM_NODE_TYPES:
-                    ann_total += out["annual"][req.view.value][n.node_id]
-                    rip_total += out["rip"][req.view.value][n.node_id]
+            for entry in p_entries:
+                ann_total += entry.loss_vec
+                rip_total += entry.rip_vec
             scale = 1.0 / max(p.signed_line, 1e-6)
             loss_1x = ann_total * scale
             rip_1x = float(np.mean(rip_total * scale))

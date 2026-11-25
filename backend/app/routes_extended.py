@@ -161,12 +161,14 @@ def create_extended_router(
 
     @router.post("/api/allocation/gross-net", response_model=RetroAllocationResponse)
     def run_gross_net_allocation(req: RetroAllocationRequest) -> RetroAllocationResponse:
+        all_deals = {c.programme_id: contract_to_programme_deal(c) for c in contract_store.list_contracts()}
         return compute_gross_net_retro_allocation(
             req=req,
             programmes=_bound_deals(),
             yelt=sim_store.get_yelt(base_sim_id),
             ind_yelt=sim_store.get_yelt(ind_sim_id),
             lineage=lineage,
+            all_programmes=all_deals,
         )
 
     # ── Phase 3b: Portfolio Branching, All-Direction Backtest Matrix & Scenario Forge ──

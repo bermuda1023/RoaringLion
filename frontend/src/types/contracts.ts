@@ -124,6 +124,10 @@ export interface PricingEconomics {
   layerNodeId: string;
   layerCode?: string;
   layerLabel: string;
+  feederNodeId?: string | null;
+  feederLayerCode?: string;
+  feederLabel?: string;
+  rollsUp?: boolean;
   limit?: number | null;
   attachment?: number | null;
   premium: number;

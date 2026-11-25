@@ -5,7 +5,7 @@
 export const LABEL_SEP = ' — ';
 export const LABEL_META_KEYS = ['autoLabel', 'labelName'];
 export const LAYER_META_KEYS = ['layerCode'];
-export const OUTPUT_LINK_KEYS = ['view', 'contractId', 'layerNodeId', 'linkedLabel'];
+export const OUTPUT_LINK_KEYS = ['view', 'contractId', 'layerNodeId', 'linkedLabel', 'unlinked'];
 export const LAYER_NODE_TYPES = [
   'OCC_XL',
   'AGG_XL',

@@ -136,12 +136,13 @@ def _layer_node(spec: ContractLayerSpec, node_id: str, written: float, signed: f
     )
 
 
-def _pricing_node(layer_id: str, layer_name: str, position: dict) -> GraphNodeSpec:
+def _pricing_node(programme_id: str, layer_id: str, layer_name: str, position: dict) -> GraphNodeSpec:
+    params: dict = {"contractId": programme_id, "layerNodeId": layer_id} if programme_id else {}
     return GraphNodeSpec(
         node_id=f"px-{layer_id}",
         node_type=NodeType.PRICING_OUTPUT,
         label=f"Pricing · {layer_name}",
-        params={},
+        params=params,
         position=position,
     )
 
@@ -196,7 +197,7 @@ def _default_graph_for_contract(c: ContractCreate, prog_id: str) -> GraphSpec:
         y = 20 + i * 140
         layer = _layer_node(spec, lyr_id, c.written_line, c.signed_line, {"x": 600, "y": y})
         nodes.append(layer)
-        nodes.append(_pricing_node(lyr_id, layer.params["labelName"], {"x": 920, "y": y}))
+        nodes.append(_pricing_node(prog_id, lyr_id, layer.params["labelName"], {"x": 920, "y": y}))
         edges += [
             GraphEdgeSpec(edge_id=f"e-in-{lyr_id}", source=flt_id, target=lyr_id, sign=1, weight=1.0),
             GraphEdgeSpec(edge_id=f"e-px-{lyr_id}", source=lyr_id, target=f"px-{lyr_id}", sign=1, weight=1.0),
@@ -226,7 +227,14 @@ def _default_graph_for_contract(c: ContractCreate, prog_id: str) -> GraphSpec:
     return graph
 
 
-def add_layer_to_graph(graph: GraphSpec, spec: ContractLayerSpec, written: float, signed: float) -> str:
+def add_layer_to_graph(
+    graph: GraphSpec,
+    spec: ContractLayerSpec,
+    written: float,
+    signed: float,
+    *,
+    programme_id: str = "",
+) -> str:
     """Add a layer wired like its siblings (same inputs), with its own Pricing Output. A YELT fed by
     every existing layer is the programme total, so the new layer joins it too."""
     ensure_layer_codes(graph, strict=False)
@@ -255,7 +263,7 @@ def add_layer_to_graph(graph: GraphSpec, spec: ContractLayerSpec, written: float
     name = spec.name if (spec.name or "").strip() else _ordinal_name(len(layers) + 1, spec.layer_type)
     layer = _layer_node(spec.model_copy(update={"name": name, "layer_code": code}), lyr_id, written, signed, {"x": x, "y": y})
     graph.nodes.append(layer)
-    graph.nodes.append(_pricing_node(lyr_id, layer.params["labelName"], {"x": x + 320, "y": y}))
+    graph.nodes.append(_pricing_node(programme_id, lyr_id, layer.params["labelName"], {"x": x + 320, "y": y}))
     for src, sign, weight in inputs:
         graph.edges.append(GraphEdgeSpec(edge_id=f"e-{uuid.uuid4().hex[:8]}", source=src, target=lyr_id, sign=sign, weight=weight))
     graph.edges.append(GraphEdgeSpec(edge_id=f"e-px-{lyr_id}", source=lyr_id, target=f"px-{lyr_id}", sign=1, weight=1.0))
@@ -269,7 +277,7 @@ def add_layer_to_graph(graph: GraphSpec, spec: ContractLayerSpec, written: float
     return lyr_id
 
 
-def remove_layer_from_graph(graph: GraphSpec, node_id: str) -> None:
+def remove_layer_from_graph(graph: GraphSpec, node_id: str, *, programme_id: str = "") -> None:
     """Remove a layer and any output nodes left with nothing feeding them."""
     node = next((n for n in graph.nodes if n.node_id == node_id), None)
     if node is None or node.node_type not in _LAYER_TYPES:
@@ -283,6 +291,12 @@ def remove_layer_from_graph(graph: GraphSpec, node_id: str) -> None:
     orphans = {n.node_id for n in graph.nodes if n.node_id in fed and n.node_type in _OUTPUT_TYPES and n.node_id not in still_fed}
     graph.nodes = [n for n in graph.nodes if n.node_id not in orphans]
     graph.edges = [e for e in graph.edges if e.source not in orphans and e.target not in orphans]
+    for n in graph.nodes:
+        if n.node_type == NodeType.PRICING_OUTPUT and n.params.get("layerNodeId") == node_id:
+            if not programme_id or n.params.get("contractId") == programme_id:
+                p = {k: v for k, v in n.params.items() if k not in ("contractId", "layerNodeId", "linkedLabel")}
+                p["unlinked"] = True
+                n.params = p
 
 
 def _record_to_full(r: ContractRecord) -> ContractFull:
@@ -385,6 +399,8 @@ def graph_layers(
     default_authorized: float = 1.0,
     default_brokerage: float = 0.10,
     default_technical_rol: float | None = None,
+    programme_id: str | None = None,
+    pricing_link_map: dict[str, tuple[str, str, str | None, str | None]] | None = None,
 ) -> list[ContractLayer]:
     """Financial-terms nodes of a programme graph presented as contract layers (limits at 100%).
     Each layer carries its own price, lines, brokerage and technical rate; contract values are defaults."""
@@ -405,6 +421,20 @@ def graph_layers(
         code = _next_layer_code(used_codes)
         used_codes.add(code.lower())
         assigned_codes[node.node_id] = code
+
+    link_by_layer: dict[str, tuple[str, str, str | None, str | None]] = dict(pricing_link_map or {})
+    if programme_id:
+        nodes_by_id = {n.node_id: n for n in graph.nodes}
+        for px in graph.nodes:
+            if px.node_type != NodeType.PRICING_OUTPUT:
+                continue
+            cid = str(px.params.get("contractId") or "").strip()
+            lid = str(px.params.get("layerNodeId") or "").strip()
+            if cid == programme_id and lid and lid not in link_by_layer:
+                in_srcs = [nodes_by_id[e.source] for e in graph.edges if e.target == px.node_id and e.source in nodes_by_id]
+                feeder_id = in_srcs[0].node_id if in_srcs else None
+                feeder_label = " + ".join(s.label for s in in_srcs) if in_srcs else None
+                link_by_layer[lid] = (px.node_id, px.label, feeder_id, feeder_label)
 
     for node in graph.nodes:
         if node.node_type not in _LAYER_TYPES:
@@ -436,6 +466,7 @@ def graph_layers(
         tech = _opt_float(p.get("technicalRol", default_technical_rol))
         rol = premium / limit if limit else None
         our_premium = premium * signed
+        link_info = link_by_layer.get(node.node_id)
         out.append(
             ContractLayer(
                 node_id=node.node_id,
@@ -461,12 +492,30 @@ def graph_layers(
                 name=label_name(p, node.label),
                 terms=node_terms(node.node_type, p),
                 auto_label=p.get("autoLabel") is not False,
+                linked_pricing_node_id=link_info[0] if link_info else None,
+                linked_pricing_label=link_info[1] if link_info else None,
+                linked_feeder_node_id=link_info[2] if link_info else None,
+                linked_feeder_label=link_info[3] if link_info else None,
             )
         )
     return out
 
 
-def contract_layers(c: ContractFull) -> list[ContractLayer]:
+def contract_layers(c: ContractFull, *, all_contracts: list[ContractFull] | None = None) -> list[ContractLayer]:
+    link_map: dict[str, tuple[str, str, str | None, str | None]] = {}
+    if all_contracts:
+        for other in all_contracts:
+            nodes_by_id = {n.node_id: n for n in other.graph.nodes}
+            for px in other.graph.nodes:
+                if px.node_type != NodeType.PRICING_OUTPUT:
+                    continue
+                cid = str(px.params.get("contractId") or "").strip()
+                lid = str(px.params.get("layerNodeId") or "").strip()
+                if cid == c.programme_id and lid and lid not in link_map:
+                    in_srcs = [nodes_by_id[e.source] for e in other.graph.edges if e.target == px.node_id and e.source in nodes_by_id]
+                    feeder_id = in_srcs[0].node_id if in_srcs else None
+                    feeder_label = " + ".join(s.label for s in in_srcs) if in_srcs else None
+                    link_map[lid] = (px.node_id, px.label, feeder_id, feeder_label)
     return graph_layers(
         c.graph,
         c.written_line,
@@ -474,7 +523,82 @@ def contract_layers(c: ContractFull) -> list[ContractLayer]:
         default_authorized=c.authorized_line,
         default_brokerage=c.brokerage_pct,
         default_technical_rol=c.technical_rol,
+        programme_id=c.programme_id,
+        pricing_link_map=link_map,
     )
+
+
+def validate_pricing_links_one_to_one(
+    programme_id: str,
+    graph: GraphSpec,
+    all_contracts: list[ContractFull],
+) -> None:
+    """Enforce strict 1:1 mapping between Pricing Output nodes and CMS contract layers across all contracts."""
+    contracts_by_id: dict[str, ContractFull] = {c.programme_id: c for c in all_contracts}
+    if programme_id in contracts_by_id:
+        contracts_by_id[programme_id] = contracts_by_id[programme_id].model_copy(update={"graph": graph})
+
+    # Collect (target_contract_id, target_layer_node_id) already linked by OTHER saved contracts
+    other_claims: dict[tuple[str, str], tuple[str, str]] = {}
+    for other in all_contracts:
+        if other.programme_id == programme_id:
+            continue
+        owner_code = other.profile.unique_code or other.programme_id
+        for px in other.graph.nodes:
+            if px.node_type != NodeType.PRICING_OUTPUT:
+                continue
+            cid = str(px.params.get("contractId") or "").strip()
+            if not cid:
+                continue
+            target = contracts_by_id.get(cid)
+            if target is None:
+                continue
+            t_layers = contract_layers(target)
+            if not t_layers:
+                continue
+            wanted = str(px.params.get("layerNodeId") or "").strip()
+            t_layer = next((l for l in t_layers if l.node_id == wanted), t_layers[0])
+            other_claims[(cid, t_layer.node_id)] = (owner_code, px.label)
+
+    seen_in_graph: dict[tuple[str, str], str] = {}
+    for px in graph.nodes:
+        if px.node_type != NodeType.PRICING_OUTPUT:
+            continue
+        cid = str(px.params.get("contractId") or "").strip()
+        if not cid:
+            continue
+        target = contracts_by_id.get(cid)
+        if target is None:
+            raise ValueError(f"Pricing Output '{px.label}' links to unknown contract '{cid}'")
+        t_layers = contract_layers(target)
+        if not t_layers:
+            raise ValueError(f"Contract '{target.profile.unique_code or cid}' has no CMS layers to link")
+        wanted = str(px.params.get("layerNodeId") or "").strip()
+        if wanted:
+            t_layer = next((l for l in t_layers if l.node_id == wanted), None)
+            if t_layer is None:
+                raise ValueError(
+                    f"Pricing Output '{px.label}' links to unknown layer '{wanted}' on contract '{target.profile.unique_code or cid}'"
+                )
+        else:
+            t_layer = t_layers[0]
+            px.params = {**px.params, "layerNodeId": t_layer.node_id}
+
+        key = (cid, t_layer.node_id)
+        layer_desc = f"{t_layer.layer_code} ({t_layer.name or t_layer.label})" if t_layer.layer_code else (t_layer.name or t_layer.label)
+        target_code = target.profile.unique_code or cid
+        if key in seen_in_graph:
+            raise ValueError(
+                f"CMS layer {layer_desc} on {target_code} is already linked to Pricing Output '{seen_in_graph[key]}'. "
+                "Pricing Outputs must be 1:1 with contract layers."
+            )
+        if key in other_claims:
+            owner_code, owner_label = other_claims[key]
+            raise ValueError(
+                f"CMS layer {layer_desc} on {target_code} is already linked to '{owner_label}' on {owner_code}. "
+                "Unlink it there first — Pricing Outputs must be 1:1 with contract layers."
+            )
+        seen_in_graph[key] = px.label
 
 
 def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) -> GraphSpec:
@@ -549,8 +673,10 @@ def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) ->
 
 def _roll_up_layers(rec: ContractRecord, graph: GraphSpec) -> None:
     """Programme totals follow the layers: summed 100% limit/premium, limit-weighted lines and technical
-    rate, premium-weighted brokerage."""
-    layers = [
+    rate, premium-weighted brokerage. When the graph has explicit Pricing Output -> CMS links for this
+    programme, only those linked CMS layers roll up into contract totals (unlinked exploratory canvas
+    layers stay out of the booked totals)."""
+    all_layers = [
         l for l in graph_layers(
             graph,
             rec.written_line,
@@ -558,9 +684,18 @@ def _roll_up_layers(rec: ContractRecord, graph: GraphSpec) -> None:
             default_authorized=rec.authorized_line,
             default_brokerage=rec.brokerage_pct,
             default_technical_rol=rec.technical_rol,
+            programme_id=rec.programme_id,
         )
         if l.limit
     ]
+    linked_ids = {
+        str(n.params.get("layerNodeId") or "").strip()
+        for n in graph.nodes
+        if n.node_type == NodeType.PRICING_OUTPUT
+        and str(n.params.get("contractId") or "").strip() == rec.programme_id
+        and str(n.params.get("layerNodeId") or "").strip()
+    }
+    layers = [l for l in all_layers if l.node_id in linked_ids] if linked_ids else all_layers
     total_limit = sum(l.limit or 0.0 for l in layers)
     if total_limit <= 0:
         return
@@ -824,6 +959,7 @@ class ContractStore:
         graph = payload.graph or _default_graph_for_contract(payload, prog_id)
         if payload.graph is not None:
             ensure_layer_codes(graph, strict=True)
+            validate_pricing_links_one_to_one(prog_id, graph, self.list_contracts())
         chash = canonical_hash({
             "programme_id": prog_id,
             "limit": payload.limit,
@@ -942,14 +1078,14 @@ class ContractStore:
 
     def add_layer(self, programme_id: str, spec: ContractLayerSpec) -> ContractFull | None:
         def edit(graph: GraphSpec, rec: ContractRecord) -> GraphSpec:
-            add_layer_to_graph(graph, spec, rec.written_line, rec.signed_line)
+            add_layer_to_graph(graph, spec, rec.written_line, rec.signed_line, programme_id=programme_id)
             return graph
 
         return self._edit_layers(programme_id, edit)
 
     def remove_layer(self, programme_id: str, node_id: str) -> ContractFull | None:
         def edit(graph: GraphSpec, rec: ContractRecord) -> GraphSpec:
-            remove_layer_from_graph(graph, node_id)
+            remove_layer_from_graph(graph, node_id, programme_id=programme_id)
             return graph
 
         return self._edit_layers(programme_id, edit)
@@ -984,8 +1120,10 @@ class ContractStore:
             rec = db.get(ContractRecord, programme_id)
             if not rec:
                 return None
+            all_contracts = [_record_to_full(r) for r in db.query(ContractRecord).all()]
             old_graph = GraphSpec(**json.loads(rec.graph_json))
             ensure_layer_codes(graph, strict=True)
+            validate_pricing_links_one_to_one(programme_id, graph, all_contracts)
             relabel_graph(graph)
             graph.version = old_graph.version + 1
             graph.content_hash = canonical_hash({
@@ -1240,6 +1378,14 @@ class ContractStore:
 
             src_graph = GraphSpec(**json.loads(src.graph_json))
             ensure_layer_codes(src_graph, strict=False)
+            for node in src_graph.nodes:
+                if node.node_type == NodeType.PRICING_OUTPUT and node.params.get("contractId") == src.programme_id:
+                    updated_params = {**node.params, "contractId": new_id}
+                    if isinstance(updated_params.get("linkedLabel"), str) and src_prof.unique_code:
+                        updated_params["linkedLabel"] = updated_params["linkedLabel"].replace(
+                            src_prof.unique_code, new_prof.unique_code
+                        )
+                    node.params = updated_params
             src_graph.graph_id = f"grp-{new_id}"
             src_graph.version = 1
             src_graph.content_hash = canonical_hash({

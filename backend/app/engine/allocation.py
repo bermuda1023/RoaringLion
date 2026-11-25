@@ -12,6 +12,7 @@ import numpy as np
 import roaring_lion_engine as rle
 
 from app.engine.ilw import evaluate_ilw_trial_payouts
+from app.engine.pricing_link import extract_rollup_layers
 from app.engine.sim_generator import YeltTable
 from app.engine.slice_runner import evaluate_programme_dag
 from app.models.common import CamelModel
@@ -94,6 +95,7 @@ def compute_gross_net_retro_allocation(
     yelt: YeltTable,
     ind_yelt: YeltTable,
     lineage: LineageRegistry,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
 ) -> RetroAllocationResponse:
     """Compute full Gross vs Net-of-Retro layer economics, Euler Co-TVaR relief, and fund IRR waterfall."""
     t0 = time.perf_counter()
@@ -101,22 +103,23 @@ def compute_gross_net_retro_allocation(
     layer_vecs: list[np.ndarray] = []
     rip_vecs: list[np.ndarray] = []
 
-    term_types = (NodeType.OCC_XL, NodeType.AGG_XL, NodeType.QUOTA_SHARE, NodeType.AGG_QUOTA_SHARE, NodeType.SURPLUS_SHARE, NodeType.CASCADING_TOWER)
+    ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
+    rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
     for prog in programmes:
         _, vecs = evaluate_programme_dag(prog, yelt, LineageRegistry(persist=False), views=[req.view])
-        for node in prog.graph.nodes:
-            if node.node_type in term_types:
-                placed = float(node.params.get("placedShare", prog.signed_line))
-                prem = float(node.params.get("depositPremium", 0.0)) * placed
-                layer_vecs.append(vecs["annual"][req.view.value][node.node_id])
-                rip_vecs.append(vecs["rip"][req.view.value][node.node_id])
-                layer_meta.append({
-                    "programme_id": prog.programme_id,
-                    "layer_id": node.node_id,
-                    "layer_name": node.label,
-                    "cedent_name": prog.cedent_name,
-                    "premium": prem,
-                })
+        ann_by_prog[prog.programme_id] = vecs["annual"][req.view.value]
+        rip_by_prog[prog.programme_id] = vecs["rip"][req.view.value]
+
+    for entry in extract_rollup_layers(programmes, ann_by_prog, rip_by_prog, all_programmes=all_programmes):
+        layer_vecs.append(entry.loss_vec)
+        rip_vecs.append(entry.rip_vec)
+        layer_meta.append({
+            "programme_id": entry.programme_id,
+            "layer_id": entry.layer_id,
+            "layer_name": entry.layer_name,
+            "cedent_name": entry.cedent_name,
+            "premium": entry.premium,
+        })
 
     mat = np.vstack(layer_vecs) if layer_vecs else np.zeros((0, yelt.num_trials))
     rip_mat = np.vstack(rip_vecs) if rip_vecs else np.zeros((0, yelt.num_trials))

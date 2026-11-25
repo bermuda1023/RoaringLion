@@ -28,6 +28,10 @@ export interface ContractLayer {
   name: string;
   terms: string | null;
   autoLabel: boolean;
+  linkedPricingNodeId?: string | null;
+  linkedPricingLabel?: string | null;
+  linkedFeederNodeId?: string | null;
+  linkedFeederLabel?: string | null;
 }
 
 type Field =
@@ -466,6 +470,21 @@ export function ContractLayersEditor({
                       {layer.autoLabel && l.terms && (
                         <div className="layer-label-preview" title="Full label (updates automatically from the terms)">
                           {composeLabel(text(layer, 'label'), l.terms)}
+                        </div>
+                      )}
+                      {layer.linkedPricingLabel && (
+                        <div
+                          className="layer-link-preview"
+                          title={
+                            layer.linkedFeederLabel
+                              ? `1:1 linked Pricing Output: ${layer.linkedPricingLabel} · Feeder: ${layer.linkedFeederLabel}`
+                              : `1:1 linked Pricing Output: ${layer.linkedPricingLabel}`
+                          }
+                        >
+                          1:1 → {layer.linkedPricingLabel}
+                          {layer.linkedFeederNodeId && layer.linkedFeederNodeId !== layer.nodeId && layer.linkedFeederLabel
+                            ? ` (feeder: ${layer.linkedFeederLabel})`
+                            : ''}
                         </div>
                       )}
                     </td>

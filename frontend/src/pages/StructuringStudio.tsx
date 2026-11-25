@@ -71,6 +71,7 @@ function nodeAccent(nodeType: string): string {
 
 function nodeStyle(nodeType: string, selected: boolean): React.CSSProperties {
   const accent = nodeAccent(nodeType);
+  const edgeColor = selected ? 'var(--accent)' : 'var(--border-strong)';
   return {
     borderRadius: 8,
     padding: '8px 12px',
@@ -78,7 +79,9 @@ function nodeStyle(nodeType: string, selected: boolean): React.CSSProperties {
     fontWeight: 500,
     color: 'var(--text)',
     background: 'var(--surface-2)',
-    border: `1px solid ${selected ? 'var(--accent)' : 'var(--border-strong)'}`,
+    borderTop: `1px solid ${edgeColor}`,
+    borderRight: `1px solid ${edgeColor}`,
+    borderBottom: `1px solid ${edgeColor}`,
     borderLeft: `3px solid ${accent}`,
     boxShadow: selected ? '0 0 0 3px rgba(232, 168, 74, 0.22)' : '0 8px 18px rgba(0, 0, 0, 0.32)',
     minWidth: 185,
@@ -198,6 +201,22 @@ export function StructuringStudio({
       LAYER_NODE_TYPES.includes(n.nodeType) && typeof n.params.layerCode === 'string' && n.params.layerCode.trim()
         ? n.params.layerCode.trim()
         : null;
+    let pricingBadge: { text: string; linked: boolean } | null = null;
+    if (n.nodeType === 'PRICING_OUTPUT') {
+      const cid = typeof n.params.contractId === 'string' ? n.params.contractId.trim() : '';
+      if (cid) {
+        const lid = typeof n.params.layerNodeId === 'string' ? n.params.layerNodeId.trim() : '';
+        const targetGraph =
+          cid === selectedProg.programmeId ? draftGraph : programmes.find((p) => p.programmeId === cid)?.graph;
+        const targetLayer = targetGraph?.nodes.find(
+          (ln) => LAYER_NODE_TYPES.includes(ln.nodeType) && (!lid || ln.nodeId === lid),
+        );
+        const lc = typeof targetLayer?.params.layerCode === 'string' ? targetLayer.params.layerCode.trim() : '';
+        pricingBadge = { text: lc ? `CMS · ${lc}` : 'CMS · Linked', linked: true };
+      } else {
+        pricingBadge = { text: 'Canvas only', linked: false };
+      }
+    }
     return {
       id: n.nodeId,
       type: isSource ? 'input' : isOutput ? 'output' : 'default',
@@ -210,6 +229,11 @@ export function StructuringStudio({
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
               {layerCode && <span className="layer-code-pill">{layerCode}</span>}
+              {pricingBadge && (
+                <span className={`canvas-link-pill ${pricingBadge.linked ? 'linked' : 'unlinked'}`}>
+                  {pricingBadge.text}
+                </span>
+              )}
               <span>{n.label}</span>
             </div>
             {u && a && (
@@ -276,6 +300,9 @@ export function StructuringStudio({
       if (tpl.layerNodeId && !draftGraph.nodes.some((n) => n.nodeId === tpl.layerNodeId)) {
         nodeId = tpl.layerNodeId;
       }
+    }
+    if (tpl.nodeType === 'PRICING_OUTPUT' && !params.contractId) {
+      params.unlinked = true;
     }
     const newNode: GraphNodeSpec = {
       nodeId,
@@ -513,6 +540,8 @@ export function StructuringStudio({
                 {selectedNode.nodeType === 'PRICING_OUTPUT' && (
                   <PricingOutputPanel
                     node={selectedNode}
+                    programmeId={selectedProg.programmeId}
+                    draftGraph={draftGraph}
                     saved={evaluatesLikeSaved(draftGraph, selectedProg.graph, selectedNode.nodeId, [])}
                     adj={adjById[selectedNode.nodeId]}
                     unadj={unadjById[selectedNode.nodeId]}
