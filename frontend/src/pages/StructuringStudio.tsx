@@ -9,7 +9,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { api } from '../api/client';
+import { api, apiUrl } from '../api/client';
 import { BreadcrumbBar } from '../components/BreadcrumbBar';
 import type { GraphEdgeSpec, GraphNodeSpec, GraphSpec, ProgrammeDeal } from '../types/contracts';
 
@@ -266,6 +266,15 @@ export function StructuringStudio({
             >
               {bindMut.isSuccess ? 'Bound Snapshot Locked' : 'Bind Deal Snapshot'}
             </button>
+            <a
+              className="btn btn-ghost"
+              style={{ textDecoration: 'none' }}
+              href={apiUrl(`/api/exports/programme-tearsheet/${selectedProg.programmeId}`)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Deal Tear-Sheet
+            </a>
           </div>
         </div>
 

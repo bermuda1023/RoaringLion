@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.adapters.cat_models import CatModelOrchestrator, ModelRunJob, ModelRunRequest
@@ -41,7 +42,7 @@ from app.engine.pricing_periods_fx import (
     compute_technical_pricing,
     convert_currency,
 )
-from app.engine.slice_runner import evaluate_programme_dag
+from app.engine.slice_runner import evaluate_portfolio_rollup, evaluate_programme_dag
 from app.engine.synthetic import SyntheticLossRequest, generate_synthetic_freq_sev
 from app.models.domain import DeterministicRunResponse
 from app.models.enums import ProgrammeStatus, StructureType, ViewOfRisk
@@ -49,6 +50,7 @@ from app.models.phase1 import SimSetDetail
 from app.services.branching import BranchCreate, BranchDiffResponse, BranchOut, BranchService
 from app.services.claims import ClaimCreate, ClaimOut, ClaimRevision, ClaimsService
 from app.services.contracts import ContractStore, contract_to_programme_deal
+from app.services.exports import build_portfolio_csv, build_portfolio_tearsheet_html, build_programme_tearsheet_html
 from app.services.fund_ops import CashEntry, EventReserve, FundOpsStore, InvestorSeries, MarketMark, SlipIntakeDraft, check_permission
 from app.services.lineage import LineageRegistry
 from app.services.sim_sets import SimSetStore
@@ -381,5 +383,58 @@ def create_extended_router(
             alerts.append({"severity": "WARN", "code": "STALE_MANIFESTS", "message": f"{stale_count} historic run manifests are STALE after upstream edits."})
         alerts.append({"severity": "INFO", "code": "ACCESS_HOOK_ACTIVE", "message": "Permission/approval hook active (Phase 9 enforcement ready)."})
         return alerts
+
+    # ── Phase 6 / 9: Excel CSV & Printable PDF Tear-Sheet Exports (Screen = Export via same runners) ──
+
+    @router.get("/api/exports/portfolio-csv")
+    def export_portfolio_csv(
+        view: ViewOfRisk = Query(default=ViewOfRisk.ADJUSTED),
+        total_capital: float = Query(default=160.0, alias="totalCapital", gt=0),
+    ) -> PlainTextResponse:
+        rollup = evaluate_portfolio_rollup(
+            portfolio_id="fund-keystone-j27",
+            portfolio_name="Keystone Collateralized Cat Fund — J27",
+            programmes=_bound_deals(),
+            yelt=sim_store.get_yelt(base_sim_id),
+            view=view,
+            total_capital=total_capital,
+            lineage=lineage,
+        )
+        csv_body = build_portfolio_csv(rollup)
+        return PlainTextResponse(
+            content=csv_body,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="roaringlion-portfolio-{view.value.lower()}.csv"'},
+        )
+
+    @router.get("/api/exports/portfolio-tearsheet", response_class=HTMLResponse)
+    def export_portfolio_tearsheet(
+        view: ViewOfRisk = Query(default=ViewOfRisk.ADJUSTED),
+        total_capital: float = Query(default=160.0, alias="totalCapital", gt=0),
+    ) -> HTMLResponse:
+        rollup = evaluate_portfolio_rollup(
+            portfolio_id="fund-keystone-j27",
+            portfolio_name="Keystone Collateralized Cat Fund — J27",
+            programmes=_bound_deals(),
+            yelt=sim_store.get_yelt(base_sim_id),
+            view=view,
+            total_capital=total_capital,
+            lineage=lineage,
+        )
+        return HTMLResponse(content=build_portfolio_tearsheet_html(rollup))
+
+    @router.get("/api/exports/programme-tearsheet/{programme_id}", response_class=HTMLResponse)
+    def export_programme_tearsheet(programme_id: str) -> HTMLResponse:
+        c = contract_store.get_contract(programme_id)
+        if not c:
+            raise HTTPException(status_code=404, detail="Programme not found")
+        prog = contract_to_programme_deal(c)
+        dag_eval, _ = evaluate_programme_dag(
+            prog,
+            sim_store.get_yelt(prog.sim_set_id),
+            lineage,
+            industry_yelt=sim_store.get_yelt(ind_sim_id),
+        )
+        return HTMLResponse(content=build_programme_tearsheet_html(prog, dag_eval))
 
     return router

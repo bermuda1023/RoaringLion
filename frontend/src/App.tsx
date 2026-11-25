@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { API_BASE, api } from './api/client';
+import { API_BASE, api, apiUrl } from './api/client';
 import { BreadcrumbBar } from './components/BreadcrumbBar';
 import { RocCdfChart } from './components/RocCdfChart';
 import { AllocationAndBranches } from './pages/AllocationAndBranches';
@@ -171,6 +171,23 @@ export function App() {
                   <span style={{ color: '#94a3b8', fontSize: 11 }}>
                     Rollup: {portfolioQ.data.computeMs} ms
                   </span>
+                  <a
+                    className="btn btn-ghost"
+                    style={{ textDecoration: 'none' }}
+                    href={apiUrl(`/api/exports/portfolio-csv?view=${portfolioView}&totalCapital=${totalCapital}`)}
+                    download
+                  >
+                    Export CSV (Excel)
+                  </a>
+                  <a
+                    className="btn btn-ghost"
+                    style={{ textDecoration: 'none' }}
+                    href={apiUrl(`/api/exports/portfolio-tearsheet?view=${portfolioView}&totalCapital=${totalCapital}`)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Tear-Sheet (PDF)
+                  </a>
                 </div>
               </div>
               <div className="grid-kpi">

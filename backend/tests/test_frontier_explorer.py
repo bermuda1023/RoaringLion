@@ -64,3 +64,21 @@ def test_frontier_explorer_layer_bounds_lock_and_custom_constraints():
     c_names = [c["name"] for c in rec["constraints"]]
     assert any("EL / Capital" in n for n in c_names)
     assert any("1-in-500" in n for n in c_names)
+
+
+def test_portfolio_and_programme_exports_include_manifest_provenance():
+    r_csv = client.get("/api/exports/portfolio-csv?view=ADJUSTED&totalCapital=160")
+    assert r_csv.status_code == 200
+    assert "text/csv" in r_csv.headers["content-type"]
+    assert "Manifest ID" in r_csv.text
+    assert "Euler Co-TVaR Layer Allocation" in r_csv.text
+
+    r_pdf = client.get("/api/exports/portfolio-tearsheet?view=ADJUSTED&totalCapital=160")
+    assert r_pdf.status_code == 200
+    assert "ROARING LION — Portfolio Tear-Sheet" in r_pdf.text
+    assert "Breadcrumb Provenance" in r_pdf.text
+
+    r_deal = client.get("/api/exports/programme-tearsheet/prog-farmers-us-27")
+    assert r_deal.status_code == 200
+    assert "Underwriting Deal Tear-Sheet" in r_deal.text
+    assert "Farmers Group" in r_deal.text
