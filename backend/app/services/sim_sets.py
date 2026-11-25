@@ -321,3 +321,42 @@ class SimSetStore:
             expected_annual_loss=sim_aal,
             manifest=manifest,
         )
+
+    def register_derived(
+        self,
+        table: YeltTable,
+        lineage: LineageRegistry,
+        *,
+        breadcrumb: list[BreadcrumbStep],
+        parameters: dict,
+    ) -> SimSetDetail:
+        """Persist a YELT produced by a graph node so it can be priced, exported or reused like any sim set."""
+        with get_session() as db:
+            rec = self._persist(db, table, SimSetFormat.DERIVED, is_industry=False)
+            db.commit()
+        aal = round(float(table.losses.sum()) / max(table.num_trials, 1), 4)
+        manifest = lineage.record_manifest(
+            run_type="SIM_SET_FROM_NODE",
+            input_hashes={step.entity_type.lower(): step.content_hash for step in breadcrumb if step.content_hash},
+            parameters=parameters,
+            output_payload={"sim_set_id": table.sim_set_id, "aal": aal, "total_events": int(len(table.losses))},
+            breadcrumb=[
+                *breadcrumb,
+                BreadcrumbStep(entity_type="SIM_SET", entity_id=table.sim_set_id, label=table.name, content_hash=table.content_hash),
+            ],
+        )
+        return SimSetDetail(
+            sim_set_id=rec.sim_set_id,
+            name=rec.name,
+            source_format=SimSetFormat.DERIVED,
+            event_catalog_id=rec.event_catalog_id,
+            num_trials=rec.num_trials,
+            total_events=rec.total_events,
+            currency=rec.currency,
+            region_perils=json.loads(rec.region_perils_json),
+            content_hash=rec.content_hash,
+            parquet_path=rec.parquet_path,
+            is_industry_catalog=False,
+            expected_annual_loss=aal,
+            manifest=manifest,
+        )

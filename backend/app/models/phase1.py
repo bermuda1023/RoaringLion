@@ -378,3 +378,8 @@ class StaleManifestInfo(CamelModel):
     run_type: str
     is_stale: bool
     stale_reasons: list[str] = []
+
+
+class YeltFromNodeRequest(CamelModel):
+    name: str | None = None
+    view: ViewOfRisk | None = None

@@ -29,6 +29,12 @@ def test_terms_per_node_type():
     assert node_terms("LOSS_SIZE_FILTER", {"minLoss": 5}) == "≥ 5m"
     assert node_terms("UPLIFT", {"factor": 1.1, "additiveLoad": 2}) == "×1.10 + 2m"
     assert node_terms("LOSS_SOURCE", {"simSetId": "x"}) is None
+    assert node_terms("YELT_OUTPUT", {"view": "UNADJUSTED"}) == "Unadjusted"
+    assert node_terms("YELT_OUTPUT", {}) is None
+    assert node_terms("PRICING_OUTPUT", {"contractId": "p1", "linkedLabel": "RL-2027-001 · 1st Cat XL"}) == "RL-2027-001 · 1st Cat XL"
+    assert node_terms("PRICING_OUTPUT", {"linkedLabel": "stale"}) is None
+    assert smart_label("PRICING_OUTPUT", {}, "Pricing Output — RL-2027-001 · 1st Cat XL") == "Pricing Output"
+    assert smart_label("YELT_OUTPUT", {"view": "ADJUSTED"}, "YELT Output (Agg XL)") == "YELT Output — Adjusted"
 
 
 def test_smart_label_keeps_name_and_respects_custom():

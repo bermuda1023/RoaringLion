@@ -12,9 +12,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { api, apiUrl } from '../api/client';
 import { BreadcrumbBar } from '../components/BreadcrumbBar';
+import { PricingOutputPanel, YeltOutputPanel } from '../components/OutputNodePanels';
 import type { GraphEdgeSpec, GraphNodeSpec, GraphSpec, ProgrammeDeal } from '../types/contracts';
 import { fmtMoneyB, fmtMoneyM, fmtNum, fmtPct, fmtRatioPct, NODE_PARAM_META } from '../utils/format';
-import { isAutoLabel, LABEL_META_KEYS, labelName, nameFromLabel, nodeTerms, smartLabel } from '../utils/nodeLabels';
+import { isAutoLabel, LABEL_META_KEYS, labelName, nameFromLabel, nodeTerms, OUTPUT_LINK_KEYS, smartLabel } from '../utils/nodeLabels';
 
 const AVAILABLE_ZONES = ['US-FL', 'US-TX', 'US-SE', 'US-CA', 'JP-KANTO', 'EU-DE'];
 const AVAILABLE_PERILS = [
@@ -25,6 +26,20 @@ const AVAILABLE_REGION_PERILS = ['US-FL-WS', 'US-TX-WS', 'US-SE-WS', 'US-CA-EQ',
 
 function withParams(n: GraphNodeSpec, params: Record<string, unknown>): GraphNodeSpec {
   return { ...n, params, label: smartLabel(n.nodeType, params, n.label) };
+}
+
+/** True when the draft would evaluate the same as the saved graph, ignoring layout and the given params on one node. */
+function evaluatesLikeSaved(draft: GraphSpec, saved: GraphSpec, nodeId: string, ignoreKeys: string[]): boolean {
+  const norm = (g: GraphSpec) =>
+    JSON.stringify({
+      nodes: g.nodes.map((n) =>
+        n.nodeId === nodeId
+          ? { id: n.nodeId, t: n.nodeType, p: Object.fromEntries(Object.entries(n.params).filter(([k]) => !ignoreKeys.includes(k) && !LABEL_META_KEYS.includes(k))) }
+          : { id: n.nodeId, t: n.nodeType, p: n.params },
+      ),
+      edges: g.edges.map((e) => [e.source, e.target, e.sign, e.weight]),
+    });
+  return saved.nodes.some((n) => n.nodeId === nodeId) && norm(draft) === norm(saved);
 }
 
 function nodeAccent(nodeType: string): string {
@@ -78,10 +93,15 @@ export function StructuringStudio({
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
-    setDraftGraph(selectedProg.graph);
-    setFlUplift(selectedProg.upliftSet.rules[0]?.flatSeverityFactor ?? 1.1);
     setSelectedNodeId(null);
     setSelectedEdgeId(null);
+  }, [selectedProg.programmeId]);
+
+  useEffect(() => {
+    setDraftGraph(selectedProg.graph);
+    setFlUplift(selectedProg.upliftSet.rules[0]?.flatSeverityFactor ?? 1.1);
+    setSelectedNodeId((id) => (id && selectedProg.graph.nodes.some((n) => n.nodeId === id) ? id : null));
+    setSelectedEdgeId((id) => (id && selectedProg.graph.edges.some((e) => e.edgeId === id) ? id : null));
     setDirty(false);
   }, [selectedProg.programmeId, selectedProg.graph.version]);
 
@@ -105,7 +125,7 @@ export function StructuringStudio({
           ...n,
           params: Object.fromEntries(
             Object.entries(n.params).map(([k, v]) => {
-              if (LABEL_META_KEYS.includes(k)) return [k, v];
+              if (LABEL_META_KEYS.includes(k) || OUTPUT_LINK_KEYS.includes(k)) return [k, v];
               if (typeof v === 'string' && v.trim() === '' && optionalKeys.has(k)) return [k, null];
               if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return [k, Number(v)];
               return [k, v];
@@ -403,6 +423,24 @@ export function StructuringStudio({
                     </div>
                   );
                 })()}
+                {selectedNode.nodeType === 'YELT_OUTPUT' && (
+                  <YeltOutputPanel
+                    node={selectedNode}
+                    programmeId={selectedProg.programmeId}
+                    saved={evaluatesLikeSaved(draftGraph, selectedProg.graph, selectedNode.nodeId, ['view'])}
+                    versionKey={`${selectedProg.graph.version}-${selectedProg.upliftSet.version}`}
+                    onParams={(params) => updateSelectedNode((n) => withParams(n, params))}
+                  />
+                )}
+                {selectedNode.nodeType === 'PRICING_OUTPUT' && (
+                  <PricingOutputPanel
+                    node={selectedNode}
+                    saved={evaluatesLikeSaved(draftGraph, selectedProg.graph, selectedNode.nodeId, [])}
+                    adj={adjById[selectedNode.nodeId]}
+                    unadj={unadjById[selectedNode.nodeId]}
+                    onParams={(params) => updateSelectedNode((n) => withParams(n, params))}
+                  />
+                )}
                 {selectedNode.nodeType === 'REGION_PERIL_FILTER' && (() => {
                   const selZones: string[] = Array.isArray(selectedNode.params.zones) ? (selectedNode.params.zones as string[]) : [];
                   const selPerils: string[] = Array.isArray(selectedNode.params.perils) ? (selectedNode.params.perils as string[]) : [];
@@ -507,7 +545,7 @@ export function StructuringStudio({
                 })()}
 
                 {Object.entries(selectedNode.params)
-                  .filter(([k, v]) => !LABEL_META_KEYS.includes(k) && (typeof v === 'number' || typeof v === 'string'))
+                  .filter(([k, v]) => !LABEL_META_KEYS.includes(k) && !OUTPUT_LINK_KEYS.includes(k) && (typeof v === 'number' || typeof v === 'string'))
                   .map(([k, v]) => {
                     const meta = NODE_PARAM_META[k];
                     const isRatioPct = Boolean(meta?.isRatioPct);

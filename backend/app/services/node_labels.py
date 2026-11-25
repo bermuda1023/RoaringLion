@@ -146,6 +146,12 @@ def node_terms(node_type: str, params: dict) -> str | None:
         if add:
             s += f" {'+' if add > 0 else '−'} {_amt(abs(add))}"
         return s
+    if t == "YELT_OUTPUT":
+        view = p.get("view")
+        return {"ADJUSTED": "Adjusted", "UNADJUSTED": "Unadjusted"}.get(view) if isinstance(view, str) else None
+    if t == "PRICING_OUTPUT":
+        linked = p.get("linkedLabel")
+        return linked if p.get("contractId") and isinstance(linked, str) and linked else None
     return None
 
 
@@ -171,12 +177,19 @@ def compose_label(name: str, terms: str | None) -> str:
     return f"{name}{SEP}{terms}" if name else terms
 
 
+# Output nodes only carry terms once configured; dropping the configuration drops the terms suffix.
+_OPTIONAL_TERM_TYPES = {"YELT_OUTPUT", "PRICING_OUTPUT"}
+
+
 def smart_label(node_type: str, params: dict, label: str) -> str:
     """The label a node should carry given its params; custom or term-less nodes keep their label."""
     if (params or {}).get("autoLabel") is False:
         return label
     terms = node_terms(node_type, params)
     if terms is None:
+        t = getattr(node_type, "value", node_type)
+        if t in _OPTIONAL_TERM_TYPES and SEP in label:
+            return label_name(params, label) or label
         return label
     return compose_label(label_name(params, label), terms)
 

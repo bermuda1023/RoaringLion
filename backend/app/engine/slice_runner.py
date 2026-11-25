@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 import roaring_lion_engine as rle
 
+from app.engine.pricing_link import PricingLink, compute_pricing_economics
 from app.engine.sim_generator import RP_TO_ID, YeltTable
 from app.models.domain import (
     BreadcrumbStep,
@@ -301,6 +302,7 @@ def evaluate_programme_dag(
     lineage: LineageRegistry,
     views: list[ViewOfRisk] | None = None,
     industry_yelt: YeltTable | None = None,
+    pricing_links: dict[str, PricingLink] | None = None,
 ) -> tuple[DagEvalResponse, dict[str, dict[str, np.ndarray]]]:
     """Evaluate a programme's DAG on UNADJUSTED and ADJUSTED views via Rust with content-addressed node caching."""
     t0 = time.perf_counter()
@@ -315,6 +317,7 @@ def evaluate_programme_dag(
     views_output: dict[str, list[NodeViewMetrics]] = {}
     annual_vectors: dict[str, dict[str, np.ndarray]] = {}
     rip_vectors: dict[str, dict[str, np.ndarray]] = {}
+    event_vectors: dict[str, dict[str, np.ndarray]] = {}
     cache_hits = 0
     cache_misses = 0
 
@@ -540,6 +543,13 @@ def evaluate_programme_dag(
             # Loss ratio needs this node's own premium. Pass-through outputs inherit RIP
             # from upstream terms; dividing EL by that RIP alone invents a ratio.
             elr = (ep["el"] / (prem + exp_rip)) if prem > 0 else None
+            pricing = None
+            link = (pricing_links or {}).get(nid) if node.node_type == NodeType.PRICING_OUTPUT else None
+            if link is not None:
+                tvar_250 = next((pt["tvar"] for pt in ep["ep_points"] if abs(pt["return_period"] - 250.0) < 1e-6), 0.0)
+                pricing = compute_pricing_economics(link, in_edges, nodes_by_id, ann, rip, tvar_250)
+                rol = pricing.rol
+                elr = pricing.loss_ratio
 
             node_metrics.append(
                 NodeViewMetrics(
@@ -556,10 +566,12 @@ def evaluate_programme_dag(
                     rol=round(rol, 4) if rol is not None else None,
                     elr=round(elr, 4) if elr is not None else None,
                     ep_points=[EpPoint(**pt) for pt in ep["ep_points"]],
+                    pricing=pricing,
                 )
             )
 
         views_output[view_key] = node_metrics
+        event_vectors[view_key] = node_event_streams
         annual_vectors[view_key] = node_ann
         rip_vectors[view_key] = node_rip
 
@@ -609,7 +621,7 @@ def evaluate_programme_dag(
         views=views_output,
         manifest=manifest,
     )
-    return resp, {"annual": annual_vectors, "rip": rip_vectors}
+    return resp, {"annual": annual_vectors, "rip": rip_vectors, "events": event_vectors}
 
 
 def evaluate_portfolio_rollup(

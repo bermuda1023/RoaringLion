@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
+import uuid
 from pathlib import Path
 
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.database import init_engine
@@ -18,6 +20,7 @@ from app.engine.slice_runner import (
     validate_dag_acyclic,
 )
 from app.models.domain import (
+    BreadcrumbStep,
     DagEvalResponse,
     DeterministicRunRequest,
     DeterministicRunResponse,
@@ -40,9 +43,11 @@ from app.models.phase1 import (
     SimSetDetail,
     SliceRollupRequest,
     StaleManifestInfo,
+    YeltFromNodeRequest,
 )
 from app.services.contracts import ContractStore, contract_to_programme_deal, graph_layers
 from app.services.lineage import LineageRegistry
+from app.services.node_outputs import node_yelt_table, resolve_pricing_links, yelt_export_bytes, yelt_summary
 from app.services.sim_sets import SimSetStore
 from app.routes_extended import create_extended_router
 
@@ -263,14 +268,114 @@ def evaluate_programme(programme_id: str) -> DagEvalResponse:
     c = CONTRACT_STORE.get_contract(programme_id)
     if not c:
         raise HTTPException(status_code=404, detail="Programme not found")
+    resp, _, _ = _evaluate_contract(c, LINEAGE)
+    return resp
+
+
+def _evaluate_contract(c: ContractFull, lineage: LineageRegistry, views: list[ViewOfRisk] | None = None):
     prog = contract_to_programme_deal(c)
     yelt = SIM_STORE.get_yelt(prog.sim_set_id)
     ind_yelt = SIM_STORE.get_yelt(_ind_yelt.sim_set_id)
+    links = resolve_pricing_links(prog.graph, c, CONTRACT_STORE.get_contract)
     try:
-        resp, _ = evaluate_programme_dag(prog, yelt, LINEAGE, industry_yelt=ind_yelt)
+        resp, vecs = evaluate_programme_dag(prog, yelt, lineage, views=views, industry_yelt=ind_yelt, pricing_links=links)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return resp
+    return resp, vecs, yelt
+
+
+def _node_yelt(programme_id: str, node_id: str, view: ViewOfRisk, *, sim_set_id: str = "", name: str = ""):
+    c = CONTRACT_STORE.get_contract(programme_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Programme not found")
+    node = next((n for n in c.graph.nodes if n.node_id == node_id), None)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found on the saved graph; save the graph first")
+    _, vecs, yelt = _evaluate_contract(c, LineageRegistry(persist=False), views=[view])
+    table = node_yelt_table(
+        yelt,
+        vecs["events"][view.value][node_id],
+        sim_set_id=sim_set_id or f"node-{node_id}",
+        name=name or f"{c.cedent_name} — {node.label}",
+        lineage_key={"graph": c.graph.content_hash, "node": node_id, "view": view.value, "sim_set": yelt.content_hash},
+    )
+    return c, node, yelt, table
+
+
+def _yelt_view(params: dict, override: ViewOfRisk | None) -> ViewOfRisk:
+    if override is not None:
+        return override
+    try:
+        return ViewOfRisk(str(params.get("view", ViewOfRisk.ADJUSTED.value)))
+    except ValueError:
+        return ViewOfRisk.ADJUSTED
+
+
+@app.get("/api/programmes/{programme_id}/nodes/{node_id}/yelt")
+def node_yelt_summary(programme_id: str, node_id: str, view: ViewOfRisk | None = None) -> dict:
+    c = CONTRACT_STORE.get_contract(programme_id)
+    node = next((n for n in c.graph.nodes if n.node_id == node_id), None) if c else None
+    v = _yelt_view(node.params if node else {}, view)
+    c, node, _, table = _node_yelt(programme_id, node_id, v)
+    feeds = [e.source for e in c.graph.edges if e.target == node_id]
+    labels = {n.node_id: n.label for n in c.graph.nodes}
+    return {
+        "programmeId": programme_id,
+        "nodeId": node_id,
+        "nodeLabel": node.label,
+        "view": v.value,
+        "inputs": [{"nodeId": f, "label": labels.get(f, f)} for f in feeds],
+        "graphVersion": c.graph.version,
+        **yelt_summary(table),
+    }
+
+
+@app.get("/api/programmes/{programme_id}/nodes/{node_id}/yelt/export")
+def node_yelt_export(
+    programme_id: str,
+    node_id: str,
+    view: ViewOfRisk | None = None,
+    fmt: str = Query(default="csv", alias="format", pattern="^(csv|parquet)$"),
+) -> Response:
+    c = CONTRACT_STORE.get_contract(programme_id)
+    node = next((n for n in c.graph.nodes if n.node_id == node_id), None) if c else None
+    v = _yelt_view(node.params if node else {}, view)
+    c, node, _, table = _node_yelt(programme_id, node_id, v)
+    stem = re.sub(r"[^A-Za-z0-9]+", "_", f"{c.profile.unique_code or c.programme_id}_{node.label}_{v.value}").strip("_")
+    return Response(
+        content=yelt_export_bytes(table, fmt),
+        media_type="application/vnd.apache.parquet" if fmt == "parquet" else "text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{stem if "YELT" in stem else stem + "_YELT"}.{fmt}"'},
+    )
+
+
+@app.post("/api/programmes/{programme_id}/nodes/{node_id}/yelt/save", response_model=SimSetDetail)
+def node_yelt_save(programme_id: str, node_id: str, req: YeltFromNodeRequest) -> SimSetDetail:
+    c = CONTRACT_STORE.get_contract(programme_id)
+    node = next((n for n in c.graph.nodes if n.node_id == node_id), None) if c else None
+    v = _yelt_view(node.params if node else {}, req.view)
+    sim_id = f"sim-node-{uuid.uuid4().hex[:10]}"
+    c, node, yelt, table = _node_yelt(programme_id, node_id, v, sim_set_id=sim_id, name=(req.name or "").strip())
+    if not len(table.losses):
+        raise HTTPException(status_code=422, detail="This node produces no losses, so there is no YELT to save")
+    detail = SIM_STORE.register_derived(
+        table,
+        LINEAGE,
+        breadcrumb=[
+            BreadcrumbStep(entity_type="SIM_SET", entity_id=yelt.sim_set_id, label=yelt.name, content_hash=yelt.content_hash),
+            BreadcrumbStep(entity_type="PROGRAMME", entity_id=c.programme_id, label=f"{c.cedent_name} — {c.programme_name}"),
+            BreadcrumbStep(
+                entity_type="DAG_GRAPH",
+                entity_id=c.graph.graph_id,
+                label=f"{c.graph.name} · {node.label}",
+                version=f"v{c.graph.version}",
+                content_hash=c.graph.content_hash,
+            ),
+        ],
+        parameters={"programme_id": programme_id, "node_id": node_id, "view": v.value},
+    )
+    SIM_SETS[detail.sim_set_id] = table
+    return detail
 
 
 @app.put("/api/programmes/{programme_id}/graph", response_model=ProgrammeDeal)
@@ -484,7 +589,7 @@ def list_graph_templates(programme_id: str | None = Query(default=None, alias="p
             "source": "BLANK",
             "label": "YELT Output",
             "nodeType": "YELT_OUTPUT",
-            "params": {},
+            "params": {"view": "ADJUSTED"},
         },
     ])
     return templates

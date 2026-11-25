@@ -113,6 +113,57 @@ export interface NodeViewMetrics {
   rol?: number | null;
   elr?: number | null;
   epPoints: EpPoint[];
+  pricing?: PricingEconomics | null;
+}
+
+export interface PricingEconomics {
+  source: 'LINKED' | 'UPSTREAM';
+  contractId: string;
+  contractCode: string;
+  contractName: string;
+  layerNodeId: string;
+  layerLabel: string;
+  limit?: number | null;
+  attachment?: number | null;
+  premium: number;
+  writtenLine: number;
+  signedLine: number;
+  ourLimit?: number | null;
+  ourPremium: number;
+  brokeragePct: number;
+  brokerage: number;
+  netPremium: number;
+  expectedLoss: number;
+  expectedRip: number;
+  expectedProfit: number;
+  lossRatio?: number | null;
+  combinedRatio?: number | null;
+  rol?: number | null;
+  lossOnLine?: number | null;
+  multiple?: number | null;
+  tvar250: number;
+  returnOnTvar?: number | null;
+  technicalRol?: number | null;
+  priceAdequacy?: number | null;
+  warnings: string[];
+}
+
+export interface NodeYeltSummary {
+  programmeId: string;
+  nodeId: string;
+  nodeLabel: string;
+  view: ViewOfRisk;
+  inputs: { nodeId: string; label: string }[];
+  graphVersion: number;
+  numTrials: number;
+  eventRows: number;
+  trialsWithLoss: number;
+  aal: number;
+  sd: number;
+  maxEvent: number;
+  maxYear: number;
+  currency: string;
+  topEvents: { trialId: number; eventId: number; dayOfYear: number; regionPeril: string; loss: number }[];
 }
 
 export interface DagEvalResponse {

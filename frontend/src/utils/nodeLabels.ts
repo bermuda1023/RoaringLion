@@ -4,6 +4,7 @@
 
 export const LABEL_SEP = ' — ';
 export const LABEL_META_KEYS = ['autoLabel', 'labelName'];
+export const OUTPUT_LINK_KEYS = ['view', 'contractId', 'layerNodeId', 'linkedLabel'];
 
 type Params = Record<string, unknown>;
 
@@ -132,6 +133,10 @@ export function nodeTerms(nodeType: string, params: Params | undefined): string 
       if (add) s += ` ${add > 0 ? '+' : '−'} ${amt(Math.abs(add))}`;
       return s;
     }
+    case 'YELT_OUTPUT':
+      return p.view === 'ADJUSTED' ? 'Adjusted' : p.view === 'UNADJUSTED' ? 'Unadjusted' : null;
+    case 'PRICING_OUTPUT':
+      return p.contractId && typeof p.linkedLabel === 'string' && p.linkedLabel ? p.linkedLabel : null;
     default:
       return null;
   }
@@ -158,9 +163,15 @@ export function composeLabel(name: string, terms: string | null): string {
 export const isAutoLabel = (params: Params | undefined) => params?.autoLabel !== false;
 
 /** The label a node should carry given its params; custom or term-less nodes keep their label. */
+// Output nodes only carry terms once configured; dropping the configuration drops the terms suffix.
+const OPTIONAL_TERM_TYPES = ['YELT_OUTPUT', 'PRICING_OUTPUT'];
+
 export function smartLabel(nodeType: string, params: Params | undefined, label: string): string {
   if (!isAutoLabel(params)) return label;
   const terms = nodeTerms(nodeType, params);
-  if (terms == null) return label;
+  if (terms == null) {
+    if (OPTIONAL_TERM_TYPES.includes(nodeType) && label.includes(LABEL_SEP)) return labelName(params, label) || label;
+    return label;
+  }
   return composeLabel(labelName(params, label), terms);
 }

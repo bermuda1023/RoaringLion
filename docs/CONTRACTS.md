@@ -41,6 +41,8 @@ Columnar sorted by `(trial_id, day_of_year, event_id)`:
 - Transforms & Filters: `REGION_PERIL_FILTER`, `DATE_WINDOW_FILTER`, `LOSS_SIZE_FILTER`, `EVENT_ORDER_FILTER`, `COMBINATION`, `UPLIFT`, `FX_CONVERSION`
 - Financial Terms: `OCC_XL`, `AGG_XL`, `QUOTA_SHARE`, `AGG_QUOTA_SHARE`, `SURPLUS_SHARE`, `STOP_LOSS`, `ILW_OPTION`, `GENERIC`
 - Outputs: `PRICING_OUTPUT`, `YELT_OUTPUT`, `EP_OUTPUT`
+  - `PRICING_OUTPUT` params `contractId` / `layerNodeId` link a CMS contract layer; its premium, written/signed lines and brokerage are applied to the node's input loss stream (restated to 100% of the upstream layer's placed share). Without a link it prices the layer feeding it. Results are returned as `pricing` on the node metrics.
+  - `YELT_OUTPUT` param `view` (`ADJUSTED` | `UNADJUSTED`). `GET /api/programmes/{id}/nodes/{nodeId}/yelt` summarises the node's event losses, `/yelt/export?format=csv|parquet` downloads them, and `POST /yelt/save` registers them as a `DERIVED` simulation set.
 
 Edge semantics:
 - `sign`: `+1` (solid additive) or `-1` (dashed subtractive / inuring / deductible offset)

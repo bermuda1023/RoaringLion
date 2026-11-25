@@ -656,3 +656,34 @@ tr.total-row td { font-weight: 600; border-top: 1px solid var(--border-strong); 
 .toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--text-muted); cursor: pointer; }
 .toggle input { height: 13px; width: 13px; }
 .layer-label-preview { margin-top: 3px; font-size: 10.5px; color: var(--teal); max-width: 260px; white-space: normal; overflow-wrap: anywhere; }
+
+/* Output node panels (YELT export, pricing economics) */
+.output-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.output-panel-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: var(--teal); text-transform: uppercase; letter-spacing: 0.06em; }
+.output-muted { font-size: 10.5px; color: var(--text-muted); overflow-wrap: anywhere; }
+.output-muted b { color: var(--text-strong); font-weight: 600; }
+.output-field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-muted); }
+.output-field select { width: 100%; min-width: 0; }
+.output-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.output-actions .btn { flex: 1 1 0; text-decoration: none; justify-content: center; }
+.output-save { display: flex; flex-direction: column; gap: 6px; }
+.output-save input { width: 100%; }
+.output-warning { font-size: 10.5px; color: var(--warning); background: var(--warning-bg); border: 1px solid rgba(242, 169, 59, 0.3); border-radius: var(--radius-sm); padding: 5px 7px; }
+.econ-grid { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--border); }
+.econ-row { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text-muted); }
+.econ-row b { color: var(--text-strong); font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+.econ-row b.tone-pos { color: var(--positive); }
+.econ-row b.tone-neg { color: var(--negative); }
+.econ-row b.tone-accent { color: var(--accent-soft); }
+.seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; }
+.seg button { background: transparent; border: 0; color: var(--text-muted); font-size: 10px; padding: 3px 7px; cursor: pointer; text-transform: none; letter-spacing: 0; }
+.seg button.active { background: rgba(76, 157, 255, 0.18); color: var(--accent-soft); font-weight: 600; }
+.compact-table th, .compact-table td { padding: 4px 6px; font-size: 10.5px; }

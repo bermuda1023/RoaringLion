@@ -99,6 +99,7 @@ class SimSetFormat(str, Enum):
     YELT = "YELT"
     ELT = "ELT"
     SYNTHETIC = "SYNTHETIC"
+    DERIVED = "DERIVED"
 
 
 class LossSourceType(str, Enum):

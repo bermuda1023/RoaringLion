@@ -18,7 +18,7 @@ def test_phase2_dag_cache_hits_on_downstream_edit():
     assert r1.json()["cacheMisses"] > 0
     adj = {n["nodeId"]: n for n in r1.json()["views"]["ADJUSTED"]}
     assert adj["lyr-occ-1"]["elr"] is not None and 0 < adj["lyr-occ-1"]["elr"] < 1
-    assert adj["out-pricing-occ"]["elr"] is None
+    assert abs(adj["out-pricing-occ"]["elr"] - adj["lyr-occ-1"]["elr"]) < 1e-3
 
     # Immediate re-evaluate hits 100% cache
     r2 = client.post("/api/programmes/prog-farmers-us-27/evaluate")

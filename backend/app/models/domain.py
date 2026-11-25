@@ -136,6 +136,40 @@ class EpPoint(CamelModel):
     tvar: float
 
 
+class PricingEconomics(CamelModel):
+    """Contract-layer economics flowed through a Pricing Output node against its modelled loss stream."""
+
+    source: str  # LINKED (contract chosen on the node) or UPSTREAM (layer feeding the node)
+    contract_id: str
+    contract_code: str
+    contract_name: str
+    layer_node_id: str
+    layer_label: str
+    limit: float | None = None
+    attachment: float | None = None
+    premium: float
+    written_line: float
+    signed_line: float
+    our_limit: float | None = None
+    our_premium: float
+    brokerage_pct: float
+    brokerage: float
+    net_premium: float
+    expected_loss: float
+    expected_rip: float
+    expected_profit: float
+    loss_ratio: float | None = None
+    combined_ratio: float | None = None
+    rol: float | None = None
+    loss_on_line: float | None = None
+    multiple: float | None = None
+    tvar_250: float
+    return_on_tvar: float | None = None
+    technical_rol: float | None = None
+    price_adequacy: float | None = None
+    warnings: list[str] = []
+
+
 class NodeViewMetrics(CamelModel):
     node_id: str
     node_label: str
@@ -150,6 +184,7 @@ class NodeViewMetrics(CamelModel):
     rol: float | None = None
     elr: float | None = None
     ep_points: list[EpPoint] = []
+    pricing: PricingEconomics | None = None
 
 
 class DagEvalResponse(CamelModel):
