@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { api, type IlwPriceRequest } from '../api/client';
 import { BreadcrumbBar } from '../components/BreadcrumbBar';
+import { fmtCents, fmtMoneyM, fmtNum, fmtPct } from '../utils/format';
 
 export function IlwWorkbench() {
   const qc = useQueryClient();
@@ -83,8 +84,14 @@ export function IlwWorkbench() {
           <input type="number" value={req.limitM} onChange={(e) => setReq({ ...req, limitM: Number(e.target.value) })} style={{ width: 65, marginLeft: 4 }} />
         </label>
         <label style={{ fontSize: 11, color: '#94a3b8' }}>
-          ROL
-          <input type="number" step="0.01" value={req.rol} onChange={(e) => setReq({ ...req, rol: Number(e.target.value) })} style={{ width: 65, marginLeft: 4 }} />
+          ROL (%)
+          <input
+            type="number"
+            step="0.5"
+            value={Number((req.rol * 100).toFixed(2))}
+            onChange={(e) => setReq({ ...req, rol: Number(e.target.value) / 100 })}
+            style={{ width: 65, marginLeft: 4 }}
+          />
         </label>
       </div>
 
@@ -93,31 +100,29 @@ export function IlwWorkbench() {
           <div className="grid-kpi">
             <div className="kpi">
               <div className="kpi-label">Attach / Exhaust Prob</div>
-              <div className="kpi-val">{d.attachProbPct.toFixed(2)}%</div>
+              <div className="kpi-val">{fmtPct(d.attachProbPct, 2)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Standalone EL / ELR</div>
               <div className="kpi-val">
-                ${d.expectedLossM.toFixed(2)}m ({d.elrPct.toFixed(1)}%)
+                {fmtMoneyM(d.expectedLossM, 2)} ({fmtPct(d.elrPct, 1)})
               </div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Indemnity–Index Corr</div>
-              <div className="kpi-val" style={{ color: '#38bdf8' }}>{d.indemnityIndexCorrelation.toFixed(3)}</div>
+              <div className="kpi-val" style={{ color: '#38bdf8' }}>{fmtNum(d.indemnityIndexCorrelation, 3)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">1-in-250 TVaR Saved</div>
-              <div className="kpi-val" style={{ color: '#22c55e' }}>${d.tvar250ReductionM.toFixed(2)}m</div>
+              <div className="kpi-val" style={{ color: '#22c55e' }}>{fmtMoneyM(d.tvar250ReductionM, 2)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Hedge Effectiveness</div>
-              <div className="kpi-val">{d.hedgeEffectivenessPct.toFixed(1)}%</div>
+              <div className="kpi-val">{fmtPct(d.hedgeEffectivenessPct, 1)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Cost / $ TVaR Saved</div>
-              <div className="kpi-val">
-                {d.costPerDollarTvarSaved != null ? `${(d.costPerDollarTvarSaved * 100).toFixed(1)}¢` : '—'}
-              </div>
+              <div className="kpi-val">{fmtCents(d.costPerDollarTvarSaved, 1)}</div>
             </div>
           </div>
           <BreadcrumbBar manifest={d.manifest} />

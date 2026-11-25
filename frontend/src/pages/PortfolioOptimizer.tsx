@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
 import { fetchJson, postJson } from '../api/client';
+import { fmtMoneyM, fmtNum, fmtPct, fmtRatioPct } from '../utils/format';
 import {
   LayerContributionBarChart,
   ParetoFrontierChart,
@@ -465,14 +466,14 @@ export function PortfolioOptimizer() {
                     />
                   </label>
                   <label style={{ fontSize: 11, color: '#94a3b8' }}>
-                    Min Line Share (MILP &gt; 0)
+                    Min Line Share % (MILP &gt; 0)
                     <input
                       type="number"
-                      step="0.05"
+                      step="5"
                       min="0"
-                      max="1"
-                      value={minLine}
-                      onChange={(e) => setMinLine(Number(e.target.value))}
+                      max="100"
+                      value={Number((minLine * 100).toFixed(1))}
+                      onChange={(e) => setMinLine(Number(e.target.value) / 100)}
                       style={{ width: '100%', marginTop: 4 }}
                     />
                   </label>
@@ -903,30 +904,30 @@ export function PortfolioOptimizer() {
                   <div className="kpi">
                     <div className="kpi-label">Expected Return</div>
                     <div className="kpi-val" style={{ color: '#22c55e' }}>
-                      ${activePoint.metrics.expectedProfitM.toFixed(2)}m
+                      {fmtMoneyM(activePoint.metrics.expectedProfitM, 2)}
                     </div>
                   </div>
                   <div className="kpi">
                     <div className="kpi-label">Mean ROC</div>
-                    <div className="kpi-val">{activePoint.metrics.meanRocPct.toFixed(2)}%</div>
+                    <div className="kpi-val">{fmtPct(activePoint.metrics.meanRocPct, 2)}</div>
                   </div>
                   <div className="kpi">
                     <div className="kpi-label">1-in-100 TVaR</div>
-                    <div className="kpi-val">${activePoint.metrics.tvar100M.toFixed(1)}m</div>
+                    <div className="kpi-val">{fmtMoneyM(activePoint.metrics.tvar100M, 1)}</div>
                   </div>
                   <div className="kpi">
                     <div className="kpi-label">1-in-250 TVaR</div>
                     <div className="kpi-val" style={{ color: '#38bdf8' }}>
-                      ${activePoint.metrics.tvar250M.toFixed(1)}m
+                      {fmtMoneyM(activePoint.metrics.tvar250M, 1)}
                     </div>
                   </div>
                   <div className="kpi">
                     <div className="kpi-label">Risk / Reward</div>
-                    <div className="kpi-val">{activePoint.metrics.riskRewardRatio.toFixed(3)}</div>
+                    <div className="kpi-val">{fmtNum(activePoint.metrics.riskRewardRatio, 3)}</div>
                   </div>
                   <div className="kpi">
                     <div className="kpi-label">EL / Capital</div>
-                    <div className="kpi-val">{(activePoint.metrics.elCapitalRatio * 100).toFixed(1)}%</div>
+                    <div className="kpi-val">{fmtRatioPct(activePoint.metrics.elCapitalRatio, 1)}</div>
                   </div>
                 </div>
 
@@ -1130,17 +1131,17 @@ export function PortfolioOptimizer() {
                         <div style={{ fontSize: 10, color: '#94a3b8' }}>{r.layerName}</div>
                       </td>
                       <td className="num" style={{ fontWeight: 700, color: '#38bdf8' }}>
-                        {(r.optimalShare * 100).toFixed(1)}%
+                        {fmtRatioPct(r.optimalShare, 1)}
                       </td>
                       <td>
                         <DeltaBar deltaShare={r.deltaShare} maxAbsDelta={maxAbsDelta} />
                       </td>
-                      <td className="num">${r.optimalLimitM.toFixed(1)}m</td>
-                      <td className="num">${r.optimalPremiumM.toFixed(2)}m</td>
-                      <td className="num">${r.optimalElM.toFixed(2)}m</td>
-                      <td className="num">${r.coTvar250M.toFixed(2)}m</td>
-                      <td className="num">{r.coTvar250Pct.toFixed(1)}%</td>
-                      <td className="num">{r.coVar250Pct.toFixed(1)}%</td>
+                      <td className="num">{fmtMoneyM(r.optimalLimitM, 1)}</td>
+                      <td className="num">{fmtMoneyM(r.optimalPremiumM, 2)}</td>
+                      <td className="num">{fmtMoneyM(r.optimalElM, 2)}</td>
+                      <td className="num">{fmtMoneyM(r.coTvar250M, 2)}</td>
+                      <td className="num">{fmtPct(r.coTvar250Pct, 1)}</td>
+                      <td className="num">{fmtPct(r.coVar250Pct, 1)}</td>
                     </tr>
                   ))}
                 </tbody>

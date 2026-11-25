@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { fetchJson, postJson } from '../api/client';
 import type { ProgrammeDeal } from '../types/contracts';
+import { fmtMoneyM, fmtPct } from '../utils/format';
 
 export function BurnAndClaims({ programme }: { programme: ProgrammeDeal }) {
   const qc = useQueryClient();
@@ -59,12 +60,24 @@ export function BurnAndClaims({ programme }: { programme: ProgrammeDeal }) {
           <span>Historical As-If (1990–2025) & Burning Cost — {programme.cedentName}</span>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <label style={{ fontSize: 11, color: '#94a3b8' }}>
-              Annual Trend
-              <input type="number" step="0.005" value={trend} onChange={(e) => setTrend(Number(e.target.value))} style={{ width: 65, marginLeft: 4 }} />
+              Annual Trend (%)
+              <input
+                type="number"
+                step="0.5"
+                value={Number((trend * 100).toFixed(2))}
+                onChange={(e) => setTrend(Number(e.target.value) / 100)}
+                style={{ width: 65, marginLeft: 4 }}
+              />
             </label>
             <label style={{ fontSize: 11, color: '#94a3b8' }}>
-              Burn Credibility
-              <input type="number" step="0.05" value={credWeight} onChange={(e) => setCredWeight(Number(e.target.value))} style={{ width: 65, marginLeft: 4 }} />
+              Burn Credibility (%)
+              <input
+                type="number"
+                step="5"
+                value={Number((credWeight * 100).toFixed(1))}
+                onChange={(e) => setCredWeight(Number(e.target.value) / 100)}
+                style={{ width: 65, marginLeft: 4 }}
+              />
             </label>
             <button className="btn" onClick={() => burnMut.mutate()}>
               Run Burn Cost
@@ -82,27 +95,27 @@ export function BurnAndClaims({ programme }: { programme: ProgrammeDeal }) {
           <div className="grid-kpi">
             <div className="kpi">
               <div className="kpi-label">Avg Annual Burn (36y)</div>
-              <div className="kpi-val">${bc.averageAnnualBurnM.toFixed(2)}m</div>
+              <div className="kpi-val">{fmtMoneyM(bc.averageAnnualBurnM, 2)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Ex-Largest Burn</div>
-              <div className="kpi-val">${bc.exLargestBurnM.toFixed(2)}m</div>
+              <div className="kpi-val">{fmtMoneyM(bc.exLargestBurnM, 2)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Burn Rate / Limit</div>
-              <div className="kpi-val">{bc.burningCostRatePct.toFixed(2)}%</div>
+              <div className="kpi-val">{fmtPct(bc.burningCostRatePct, 2)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Modelled EL (Adj)</div>
-              <div className="kpi-val">${(bc.modelledElM ?? 0).toFixed(2)}m</div>
+              <div className="kpi-val">{fmtMoneyM(bc.modelledElM ?? 0, 2)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Credibility Blended EL</div>
-              <div className="kpi-val" style={{ color: '#38bdf8' }}>${(bc.credibilityBlendedElM ?? 0).toFixed(2)}m</div>
+              <div className="kpi-val" style={{ color: '#38bdf8' }}>{fmtMoneyM(bc.credibilityBlendedElM ?? 0, 2)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Rec Technical ROL</div>
-              <div className="kpi-val" style={{ color: '#22c55e' }}>{(bc.recommendedTechnicalRolPct ?? 0).toFixed(2)}%</div>
+              <div className="kpi-val" style={{ color: '#22c55e' }}>{fmtPct(bc.recommendedTechnicalRolPct ?? 0, 2)}</div>
             </div>
           </div>
         )}
@@ -142,15 +155,15 @@ export function BurnAndClaims({ programme }: { programme: ProgrammeDeal }) {
                 <td>{c.regionPerilKey}</td>
                 <td>v{c.currentVersion}</td>
                 <td><span className="badge">{c.latestStatus}</span></td>
-                <td className="num">${c.latestGroundUpLoss.toFixed(2)}m</td>
+                <td className="num">{fmtMoneyM(c.latestGroundUpLoss, 2)}</td>
               </tr>
             ))}
           </tbody>
         </table>
         {evalClaimsMut.data && (
           <div style={{ marginTop: 10, color: '#5eead4', fontSize: 12 }}>
-            Live Claims Evaluated: Ground-Up ${evalClaimsMut.data.totalGroundUp.toFixed(2)}m → Ceded Recovery $
-            {evalClaimsMut.data.totalCeded.toFixed(2)}m · RIP Due ${evalClaimsMut.data.totalRipDue.toFixed(2)}m
+            Live Claims Evaluated: Ground-Up {fmtMoneyM(evalClaimsMut.data.totalGroundUp, 2)} → Ceded Recovery{' '}
+            {fmtMoneyM(evalClaimsMut.data.totalCeded, 2)} · RIP Due {fmtMoneyM(evalClaimsMut.data.totalRipDue, 2)}
           </div>
         )}
       </div>

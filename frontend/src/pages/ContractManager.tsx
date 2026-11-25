@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { api, apiUrl, fetchJson, postJson, type ProgrammeProfile } from '../api/client';
+import { fmtInt, fmtMoneyB, fmtMoneyM, fmtPct, fmtPts, fmtRatioPct } from '../utils/format';
 
 type DossierTab = 'profile' | 'notes' | 'pricing' | 'exposure';
 
@@ -313,12 +314,12 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               />
             </label>
             <label style={{ fontSize: 11, color: '#94a3b8' }}>
-              ROL
+              ROL (%)
               <input
                 type="number"
-                step="0.01"
-                value={rol}
-                onChange={(e) => setRol(Number(e.target.value))}
+                step="0.5"
+                value={Number((rol * 100).toFixed(2))}
+                onChange={(e) => setRol(Number(e.target.value) / 100)}
                 style={{ width: 65, marginLeft: 4 }}
               />
             </label>
@@ -370,13 +371,12 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                   <td>
                     <span className="badge">{c.status}</span>
                   </td>
-                  <td className="num">{(c.signedLine * 100).toFixed(0)}%</td>
-                  <td className="num">${c.limit.toFixed(1)}m</td>
-                  <td className="num">${c.depositPremium.toFixed(2)}m</td>
-                  <td className="num">{(c.rol * 100).toFixed(2)}%</td>
+                  <td className="num">{fmtRatioPct(c.signedLine, 1)}</td>
+                  <td className="num">{fmtMoneyM(c.limit, 1)}</td>
+                  <td className="num">{fmtMoneyM(c.depositPremium, 2)}</td>
+                  <td className="num">{fmtRatioPct(c.rol, 2)}</td>
                   <td className="num" style={{ color: rarc >= 0 ? '#4ade80' : '#f87171', fontWeight: 600 }}>
-                    {rarc >= 0 ? '+' : ''}
-                    {rarc.toFixed(1)}%
+                    {fmtPct(rarc, 1, { signed: true })}
                   </td>
                   <td
                     className="num"
@@ -455,36 +455,35 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
           <div className="grid-kpi">
             <div className="kpi">
               <div className="kpi-label">Exposure / Limit</div>
-              <div className="kpi-val">${d.contract.limit.toFixed(1)}m</div>
+              <div className="kpi-val">{fmtMoneyM(d.contract.limit, 1)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">GWP / Deposit</div>
-              <div className="kpi-val">${d.contract.depositPremium.toFixed(2)}m</div>
+              <div className="kpi-val">{fmtMoneyM(d.contract.depositPremium, 2)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">ROL / Tech ROL</div>
               <div className="kpi-val">
-                {(d.contract.rol * 100).toFixed(1)}%
-                {d.contract.technicalRol ? ` / ${(d.contract.technicalRol * 100).toFixed(1)}%` : ''}
+                {fmtRatioPct(d.contract.rol, 1)}
+                {d.contract.technicalRol ? ` / ${fmtRatioPct(d.contract.technicalRol, 1)}` : ''}
               </div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Risk-Adj Rate Change (RARC)</div>
               <div className="kpi-val" style={{ color: draftProfile.rarcTotalPct >= 0 ? '#22c55e' : '#ef4444' }}>
-                {draftProfile.rarcTotalPct >= 0 ? '+' : ''}
-                {draftProfile.rarcTotalPct.toFixed(2)}%
+                {fmtPct(draftProfile.rarcTotalPct, 2, { signed: true })}
               </div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Modelled EL (Adj)</div>
               <div className="kpi-val" style={{ color: '#38bdf8' }}>
-                ${totalAdjEl.toFixed(2)}m
+                {fmtMoneyM(totalAdjEl, 2)}
               </div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Signed / Written</div>
               <div className="kpi-val">
-                {(d.contract.signedLine * 100).toFixed(0)}% / {(d.contract.writtenLine * 100).toFixed(0)}%
+                {fmtRatioPct(d.contract.signedLine, 1)} / {fmtRatioPct(d.contract.writtenLine, 1)}
               </div>
             </div>
           </div>
@@ -819,18 +818,18 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         <td style={{ fontFamily: 'monospace', fontSize: 11, color: '#93c5fd' }}>{row.uniqueCode}</td>
                         <td>{row.programmeName}</td>
                         <td><span className="badge">{row.status}</span></td>
-                        <td className="num">${row.limit.toFixed(1)}m</td>
+                        <td className="num">{fmtMoneyM(row.limit, 1)}</td>
                         <td className="num" style={{ color: row.yoyLimitDeltaM == null ? '#64748b' : row.yoyLimitDeltaM >= 0 ? '#4ade80' : '#f87171' }}>
-                          {row.yoyLimitDeltaM == null ? '—' : `${row.yoyLimitDeltaM >= 0 ? '+' : ''}$${row.yoyLimitDeltaM.toFixed(1)}m`}
+                          {fmtMoneyM(row.yoyLimitDeltaM, 1, { signed: true })}
                         </td>
-                        <td className="num">${row.depositPremium.toFixed(2)}m</td>
-                        <td className="num">{row.rolPct.toFixed(2)}%</td>
+                        <td className="num">{fmtMoneyM(row.depositPremium, 2)}</td>
+                        <td className="num">{fmtPct(row.rolPct, 2)}</td>
                         <td className="num" style={{ color: row.yoyRolDeltaPts == null ? '#64748b' : row.yoyRolDeltaPts >= 0 ? '#4ade80' : '#f87171' }}>
-                          {row.yoyRolDeltaPts == null ? '—' : `${row.yoyRolDeltaPts >= 0 ? '+' : ''}${row.yoyRolDeltaPts.toFixed(2)} pts`}
+                          {fmtPts(row.yoyRolDeltaPts, 2)}
                         </td>
-                        <td className="num">{(row.signedLine * 100).toFixed(0)}%</td>
+                        <td className="num">{fmtRatioPct(row.signedLine, 1)}</td>
                         <td className="num" style={{ color: row.rarcTotalPct >= 0 ? '#4ade80' : '#f87171', fontWeight: 600 }}>
-                          {row.rarcTotalPct >= 0 ? '+' : ''}{row.rarcTotalPct.toFixed(1)}%
+                          {fmtPct(row.rarcTotalPct, 1, { signed: true })}
                         </td>
                       </tr>
                     ))}
@@ -980,13 +979,13 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       return (
                         <tr key={a.nodeId}>
                           <td style={{ fontWeight: 600 }}>{a.nodeLabel}</td>
-                          <td className="num">${(u?.el ?? 0).toFixed(3)}m</td>
+                          <td className="num">{fmtMoneyM(u?.el ?? 0, 3)}</td>
                           <td className="num" style={{ color: '#38bdf8', fontWeight: 600 }}>
-                            ${a.el.toFixed(3)}m
+                            {fmtMoneyM(a.el, 3)}
                           </td>
-                          <td className="num">${a.expectedRip.toFixed(3)}m</td>
-                          <td className="num">${tvar250.toFixed(2)}m</td>
-                          <td className="num">{a.elr != null ? `${(a.elr * 100).toFixed(1)}%` : '—'}</td>
+                          <td className="num">{fmtMoneyM(a.expectedRip, 3)}</td>
+                          <td className="num">{fmtMoneyM(tvar250, 2)}</td>
+                          <td className="num">{fmtRatioPct(a.elr, 1)}</td>
                         </tr>
                       );
                     })}
@@ -1042,8 +1041,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </div>
                     <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 3 }}>
                       Catalog: {d.modelingLink.simSet.eventCatalogId} ·{' '}
-                      {d.modelingLink.simSet.numTrials.toLocaleString()} trials ·{' '}
-                      {d.modelingLink.simSet.totalEvents.toLocaleString()} events
+                      {fmtInt(d.modelingLink.simSet.numTrials)} trials ·{' '}
+                      {fmtInt(d.modelingLink.simSet.totalEvents)} events
                     </div>
                     <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 3 }}>
                       <strong>House Uplift Set:</strong> {d.modelingLink.upliftSet.name} (v
@@ -1119,7 +1118,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                   <>
                     <div style={{ fontSize: 12, marginBottom: 8 }}>
                       <strong>EDM:</strong> <code>{d.exposureLink.edmDatabaseName}</code> ·{' '}
-                      <strong>Total TIV:</strong> ${(d.exposureLink.totalTivM / 1000).toFixed(2)}B ·{' '}
+                      <strong>Total TIV:</strong> {fmtMoneyB(d.exposureLink.totalTivM / 1000, 2)} ·{' '}
                       <span style={{ color: '#94a3b8' }}>Server: {d.exposureLink.serverName}</span>
                     </div>
                     <table>
@@ -1134,9 +1133,9 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         {Object.entries(d.exposureLink.granularTivM ?? {}).map(([rp, tiv]) => (
                           <tr key={rp}>
                             <td style={{ color: '#93c5fd', fontWeight: 600 }}>{rp}</td>
-                            <td className="num">${Number(tiv).toLocaleString()}m</td>
+                            <td className="num">{fmtMoneyM(Number(tiv), 0)}</td>
                             <td className="num">
-                              {((Number(tiv) / Math.max(d.exposureLink!.totalTivM, 1)) * 100).toFixed(1)}%
+                              {fmtPct((Number(tiv) / Math.max(d.exposureLink!.totalTivM, 1)) * 100, 1)}
                             </td>
                           </tr>
                         ))}

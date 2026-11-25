@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { fetchJson, postJson } from '../api/client';
+import { fmtMoneyM, fmtPct } from '../utils/format';
 
 export function AllocationAndBranches() {
   const qc = useQueryClient();
@@ -105,24 +106,24 @@ export function AllocationAndBranches() {
             <div className="grid-kpi">
               <div className="kpi">
                 <div className="kpi-label">Gross Mean ROC</div>
-                <div className="kpi-val">{alloc.waterfall.grossMeanRocPct.toFixed(2)}%</div>
+                <div className="kpi-val">{fmtPct(alloc.waterfall.grossMeanRocPct, 2)}</div>
               </div>
               <div className="kpi">
                 <div className="kpi-label">Net Mean ROC</div>
-                <div className="kpi-val">{alloc.waterfall.netMeanRocPct.toFixed(2)}%</div>
+                <div className="kpi-val">{fmtPct(alloc.waterfall.netMeanRocPct, 2)}</div>
               </div>
               <div className="kpi">
                 <div className="kpi-label">Net Effective IRR</div>
-                <div className="kpi-val" style={{ color: '#38bdf8' }}>{alloc.waterfall.netEffectiveIrrPct.toFixed(2)}%</div>
+                <div className="kpi-val" style={{ color: '#38bdf8' }}>{fmtPct(alloc.waterfall.netEffectiveIrrPct, 2)}</div>
               </div>
               <div className="kpi">
                 <div className="kpi-label">Exp Trapped Collat</div>
-                <div className="kpi-val">${alloc.waterfall.expectedTrappedCollateral.toFixed(2)}m</div>
+                <div className="kpi-val">{fmtMoneyM(alloc.waterfall.expectedTrappedCollateral, 2)}</div>
               </div>
               <div className="kpi">
                 <div className="kpi-label">Gross → Net TVaR 250</div>
                 <div className="kpi-val" style={{ color: '#22c55e' }}>
-                  ${alloc.waterfall.grossTvar250.toFixed(1)}m → ${alloc.waterfall.netTvar250.toFixed(1)}m
+                  {fmtMoneyM(alloc.waterfall.grossTvar250, 1)} → {fmtMoneyM(alloc.waterfall.netTvar250, 1)}
                 </div>
               </div>
               <div className="kpi">
@@ -149,13 +150,13 @@ export function AllocationAndBranches() {
                   <tr key={`${l.programmeId}-${l.layerId}`}>
                     <td>{l.cedentName}</td>
                     <td>{l.layerName}</td>
-                    <td className="num">${l.grossCotvar250.toFixed(2)}m</td>
-                    <td className="num">{l.grossMrocPct.toFixed(1)}%</td>
-                    <td className="num">${l.allocatedRetroCost.toFixed(2)}m</td>
-                    <td className="num">${l.allocatedRetroRecovery.toFixed(2)}m</td>
-                    <td className="num" style={{ color: '#22c55e' }}>${l.retroTvarRelief.toFixed(2)}m</td>
-                    <td className="num">${l.netCotvar250.toFixed(2)}m</td>
-                    <td className="num" style={{ color: '#38bdf8', fontWeight: 600 }}>{l.netMrocPct.toFixed(1)}%</td>
+                    <td className="num">{fmtMoneyM(l.grossCotvar250, 2)}</td>
+                    <td className="num">{fmtPct(l.grossMrocPct, 1)}</td>
+                    <td className="num">{fmtMoneyM(l.allocatedRetroCost, 2)}</td>
+                    <td className="num">{fmtMoneyM(l.allocatedRetroRecovery, 2)}</td>
+                    <td className="num" style={{ color: '#22c55e' }}>{fmtMoneyM(l.retroTvarRelief, 2)}</td>
+                    <td className="num">{fmtMoneyM(l.netCotvar250, 2)}</td>
+                    <td className="num" style={{ color: '#38bdf8', fontWeight: 600 }}>{fmtPct(l.netMrocPct, 1)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -172,8 +173,14 @@ export function AllocationAndBranches() {
           <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
             <input value={branchName} onChange={(e) => setBranchName(e.target.value)} style={{ width: 160 }} />
             <label style={{ fontSize: 11, color: '#94a3b8' }}>
-              Farmers Share
-              <input type="number" step="0.1" value={farmersShare} onChange={(e) => setFarmersShare(Number(e.target.value))} style={{ width: 65, marginLeft: 4 }} />
+              Farmers Share (%)
+              <input
+                type="number"
+                step="5"
+                value={Number((farmersShare * 100).toFixed(1))}
+                onChange={(e) => setFarmersShare(Number(e.target.value) / 100)}
+                style={{ width: 65, marginLeft: 4 }}
+              />
             </label>
             <button className="btn" onClick={() => createBranchMut.mutate()}>
               Branch, Diff & Backtest
@@ -181,10 +188,10 @@ export function AllocationAndBranches() {
           </div>
           {diffMut.data && (
             <div style={{ padding: 8, background: '#0d1422', borderRadius: 6, marginBottom: 8, fontSize: 12 }}>
-              <strong>Branch Diff ({diffMut.data.branchName}):</strong> Mean ROC {diffMut.data.baselineMeanRocPct}% →{' '}
-              {diffMut.data.branchMeanRocPct}% ({diffMut.data.deltaMeanRocPct >= 0 ? '+' : ''}
-              {diffMut.data.deltaMeanRocPct}%) | TVaR 250 ${diffMut.data.baselineTvar250.toFixed(1)}m → $
-              {diffMut.data.branchTvar250.toFixed(1)}m ({diffMut.data.deltaTvar250.toFixed(1)}m)
+              <strong>Branch Diff ({diffMut.data.branchName}):</strong> Mean ROC {fmtPct(diffMut.data.baselineMeanRocPct, 2)} →{' '}
+              {fmtPct(diffMut.data.branchMeanRocPct, 2)} ({fmtPct(diffMut.data.deltaMeanRocPct, 2, { signed: true })}) | TVaR 250{' '}
+              {fmtMoneyM(diffMut.data.baselineTvar250, 1)} → {fmtMoneyM(diffMut.data.branchTvar250, 1)} (
+              {fmtMoneyM(diffMut.data.deltaTvar250, 1, { signed: true })})
             </div>
           )}
           {btMut.data && (

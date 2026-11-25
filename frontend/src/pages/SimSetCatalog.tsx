@@ -78,9 +78,15 @@ export function SimSetCatalog() {
                   <span className="badge">{s.isIndustryCatalog ? 'INDUSTRY ($B)' : s.sourceFormat}</span>
                 </td>
                 <td style={{ color: '#94a3b8' }}>{s.eventCatalogId}</td>
-                <td className="num">{s.numTrials.toLocaleString()}</td>
-                <td className="num">{s.totalEvents.toLocaleString()}</td>
-                <td className="num">{s.expectedAnnualLoss != null ? s.expectedAnnualLoss.toFixed(2) : '—'}</td>
+                <td className="num">{s.numTrials.toLocaleString('en-US')}</td>
+                <td className="num">{s.totalEvents.toLocaleString('en-US')}</td>
+                <td className="num">
+                  {s.expectedAnnualLoss != null
+                    ? s.isIndustryCatalog
+                      ? `$${s.expectedAnnualLoss.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}B`
+                      : `$${s.expectedAnnualLoss.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}m`
+                    : '—'}
+                </td>
                 <td style={{ fontSize: 11, color: '#93c5fd' }}>{s.regionPerils.join(', ')}</td>
                 <td style={{ fontFamily: 'monospace', fontSize: 11 }}>#{s.contentHash.slice(0, 8)}</td>
               </tr>

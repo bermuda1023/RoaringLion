@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { fetchJson, postJson } from '../api/client';
+import { fmtMoneyM, fmtPct, fmtRatioPct } from '../utils/format';
 
 export function CatModelsAndOps() {
   const qc = useQueryClient();
@@ -109,9 +110,9 @@ export function CatModelsAndOps() {
                 <tr key={p.programmeId}>
                   <td style={{ fontWeight: 600 }}>{p.cedentName}</td>
                   <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{p.edmDatabaseName}</td>
-                  <td className="num">${p.totalTivM.toLocaleString()}m</td>
+                  <td className="num">{fmtMoneyM(p.totalTivM, 0)}</td>
                   <td style={{ fontSize: 11, color: '#93c5fd' }}>
-                    {Object.entries(p.granularTivM).map(([k, v]) => `${k}: $${v}m`).join(' · ')}
+                    {Object.entries(p.granularTivM).map(([k, v]) => `${k}: ${fmtMoneyM(Number(v), 0)}`).join(' · ')}
                   </td>
                 </tr>
               ))}
@@ -141,14 +142,14 @@ export function CatModelsAndOps() {
                   <td style={{ fontFamily: 'monospace' }}>{inv.seriesId}</td>
                   <td>{inv.investorName}</td>
                   <td><span className="badge">{inv.shareClass}</span></td>
-                  <td className="num">${inv.navM.toFixed(1)}m</td>
-                  <td className="num">${inv.trappedSidePocketM.toFixed(1)}m</td>
+                  <td className="num">{fmtMoneyM(inv.navM, 1)}</td>
+                  <td className="num">{fmtMoneyM(inv.trappedSidePocketM, 1)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
           <div style={{ marginTop: 10, fontSize: 11, color: '#94a3b8' }}>
-            Market Marks: {marksQ.data?.map((m) => `${m.name} (${m.indicativeSpreadPct}%)`).join(' | ')}
+            Market Marks: {marksQ.data?.map((m) => `${m.name} (${fmtPct(m.indicativeSpreadPct, 2)})`).join(' | ')}
           </div>
         </div>
 
@@ -167,7 +168,7 @@ export function CatModelsAndOps() {
           />
           {slipMut.data && (
             <div style={{ marginTop: 8, padding: 8, background: '#0d1422', borderRadius: 6, fontSize: 12, color: '#5eead4' }}>
-              Extracted Draft: <strong>{slipMut.data.cedentName}</strong> · ${slipMut.data.limitM}m xs ${slipMut.data.attachmentM}m · ROL {(slipMut.data.rol * 100).toFixed(1)}% · {slipMut.data.hoursClause}h · {slipMut.data.regionPerils.join(', ')}
+              Extracted Draft: <strong>{slipMut.data.cedentName}</strong> · {fmtMoneyM(slipMut.data.limitM, 1)} xs {fmtMoneyM(slipMut.data.attachmentM, 1)} · ROL {fmtRatioPct(slipMut.data.rol, 1)} · {slipMut.data.hoursClause}h · {slipMut.data.regionPerils.join(', ')}
             </div>
           )}
         </div>

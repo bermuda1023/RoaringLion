@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { API_BASE, api, apiUrl } from './api/client';
 import { BreadcrumbBar } from './components/BreadcrumbBar';
 import { RocCdfChart } from './components/RocCdfChart';
+import { fmtMoneyM, fmtNum, fmtPct } from './utils/format';
 import { AllocationAndBranches } from './pages/AllocationAndBranches';
 import { BurnAndClaims } from './pages/BurnAndClaims';
 import { CatModelsAndOps } from './pages/CatModelsAndOps';
@@ -193,23 +194,23 @@ export function App() {
               <div className="grid-kpi">
                 <div className="kpi">
                   <div className="kpi-label">Mean ROC</div>
-                  <div className="kpi-val">{portfolioQ.data.meanRocPct.toFixed(2)}%</div>
+                  <div className="kpi-val">{fmtPct(portfolioQ.data.meanRocPct, 2)}</div>
                 </div>
                 <div className="kpi">
                   <div className="kpi-label">No-Event ROC</div>
-                  <div className="kpi-val">{portfolioQ.data.noEventRocPct.toFixed(2)}%</div>
+                  <div className="kpi-val">{fmtPct(portfolioQ.data.noEventRocPct, 2)}</div>
                 </div>
                 <div className="kpi">
                   <div className="kpi-label">Break-Even Prob</div>
-                  <div className="kpi-val">{portfolioQ.data.breakEvenProbPct.toFixed(1)}%</div>
+                  <div className="kpi-val">{fmtPct(portfolioQ.data.breakEvenProbPct, 1)}</div>
                 </div>
                 <div className="kpi">
                   <div className="kpi-label">Expected Profit</div>
-                  <div className="kpi-val">${portfolioQ.data.expectedProfit.toFixed(2)}m</div>
+                  <div className="kpi-val">{fmtMoneyM(portfolioQ.data.expectedProfit, 2)}</div>
                 </div>
                 <div className="kpi">
                   <div className="kpi-label">1-in-250 TVaR</div>
-                  <div className="kpi-val">${portfolioQ.data.portfolioTvar250.toFixed(2)}m</div>
+                  <div className="kpi-val">{fmtMoneyM(portfolioQ.data.portfolioTvar250, 2)}</div>
                 </div>
                 <div className="kpi">
                   <div className="kpi-label">Co-TVaR Sum Err</div>
@@ -238,8 +239,8 @@ export function App() {
                       {portfolioQ.data.guidelines.map((g) => (
                         <tr key={g.label}>
                           <td>{g.label}</td>
-                          <td className="num">{g.thresholdRocPct.toFixed(1)}%</td>
-                          <td className="num">{g.actualRocPct.toFixed(2)}%</td>
+                          <td className="num">{fmtPct(g.thresholdRocPct, 1)}</td>
+                          <td className="num">{fmtPct(g.actualRocPct, 2)}</td>
                           <td className={`num ${g.passed ? 'pass' : 'fail'}`}>{g.passed ? 'PASS' : 'BREACH'}</td>
                         </tr>
                       ))}
@@ -276,15 +277,15 @@ export function App() {
                     <tr key={`${row.programmeId}-${row.layerId}`}>
                       <td>{row.cedentName}</td>
                       <td>{row.layerName}</td>
-                      <td className="num">${row.limit.toFixed(1)}m</td>
-                      <td className="num">${row.premium.toFixed(2)}m</td>
-                      <td className="num">${row.el.toFixed(2)}m</td>
-                      <td className="num">${row.expectedRip.toFixed(2)}m</td>
-                      <td className="num">${row.standaloneTvar250.toFixed(2)}m</td>
-                      <td className="num" style={{ fontWeight: 600 }}>${row.eulerCotvar250.toFixed(2)}m</td>
-                      <td className="num">{row.diversificationCreditPct.toFixed(1)}%</td>
+                      <td className="num">{fmtMoneyM(row.limit, 1)}</td>
+                      <td className="num">{fmtMoneyM(row.premium, 2)}</td>
+                      <td className="num">{fmtMoneyM(row.el, 2)}</td>
+                      <td className="num">{fmtMoneyM(row.expectedRip, 2)}</td>
+                      <td className="num">{fmtMoneyM(row.standaloneTvar250, 2)}</td>
+                      <td className="num" style={{ fontWeight: 600 }}>{fmtMoneyM(row.eulerCotvar250, 2)}</td>
+                      <td className="num">{fmtPct(row.diversificationCreditPct, 1)}</td>
                       <td className="num" style={{ color: '#38bdf8', fontWeight: 600 }}>
-                        {row.marginalRocPct.toFixed(1)}%
+                        {fmtPct(row.marginalRocPct, 1)}
                       </td>
                     </tr>
                   ))}
@@ -348,15 +349,15 @@ export function App() {
               <div className="card">
                 <div className="card-title">
                   <span>
-                    Per-Layer Stateful Recovery & Erosion Statement — Total Ceded: $
-                    {detMut.data.totalCeded.toFixed(2)}m · RIP Due: ${detMut.data.totalRipDue.toFixed(2)}m
+                    Per-Layer Stateful Recovery & Erosion Statement — Total Ceded:{' '}
+                    {fmtMoneyM(detMut.data.totalCeded, 2)} · RIP Due: {fmtMoneyM(detMut.data.totalRipDue, 2)}
                   </span>
                 </div>
                 {detMut.data.layerStatements.map((stmt) => (
                   <div key={stmt.layerId} style={{ marginBottom: 16 }}>
                     <div style={{ fontWeight: 600, marginBottom: 6, color: '#f8fafc' }}>
-                      {stmt.layerName} ({stmt.layerType}) — Ceded: ${stmt.totalCededLoss.toFixed(2)}m | RIP: $
-                      {stmt.totalRipDue.toFixed(2)}m
+                      {stmt.layerName} ({stmt.layerType}) — Ceded: {fmtMoneyM(stmt.totalCededLoss, 2)} | RIP:{' '}
+                      {fmtMoneyM(stmt.totalRipDue, 2)}
                     </div>
                     <table>
                       <thead>
@@ -375,14 +376,14 @@ export function App() {
                         {stmt.steps.map((st) => (
                           <tr key={st.lossId}>
                             <td>{st.eventName}</td>
-                            <td className="num">${st.subjectLoss.toFixed(2)}m</td>
-                            <td className="num" style={{ fontWeight: 600 }}>${st.cededLoss.toFixed(2)}m</td>
-                            <td className="num">${st.ripDue.toFixed(2)}m</td>
+                            <td className="num">{fmtMoneyM(st.subjectLoss, 2)}</td>
+                            <td className="num" style={{ fontWeight: 600 }}>{fmtMoneyM(st.cededLoss, 2)}</td>
+                            <td className="num">{fmtMoneyM(st.ripDue, 2)}</td>
                             <td className="num">
-                              ${st.stateBefore.remainingAggLimit.toFixed(1)}m → ${st.stateAfter.remainingAggLimit.toFixed(1)}m
+                              {fmtMoneyM(st.stateBefore.remainingAggLimit, 1)} → {fmtMoneyM(st.stateAfter.remainingAggLimit, 1)}
                             </td>
-                            <td className="num">{st.stateAfter.reinstatementsUsed.toFixed(2)}</td>
-                            <td className="num">${st.stateAfter.aggDeductibleEroded.toFixed(1)}m</td>
+                            <td className="num">{fmtNum(st.stateAfter.reinstatementsUsed, 2)}</td>
+                            <td className="num">{fmtMoneyM(st.stateAfter.aggDeductibleEroded, 1)}</td>
                             <td className={`num ${st.stateAfter.exhausted ? 'fail' : 'pass'}`}>
                               {st.stateAfter.exhausted ? 'YES' : 'NO'}
                             </td>

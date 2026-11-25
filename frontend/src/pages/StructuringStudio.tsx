@@ -13,6 +13,7 @@ import { useEffect, useState } from 'react';
 import { api, apiUrl } from '../api/client';
 import { BreadcrumbBar } from '../components/BreadcrumbBar';
 import type { GraphEdgeSpec, GraphNodeSpec, GraphSpec, ProgrammeDeal } from '../types/contracts';
+import { fmtMoneyB, fmtMoneyM, fmtNum, fmtPct, fmtRatioPct, NODE_PARAM_META } from '../utils/format';
 
 const AVAILABLE_ZONES = ['US-FL', 'US-TX', 'US-SE', 'US-CA', 'JP-KANTO', 'EU-DE'];
 const AVAILABLE_PERILS = [
@@ -162,7 +163,7 @@ export function StructuringStudio({
             <div>{n.label}</div>
             {u && a && (
               <div style={{ fontSize: 10, opacity: 0.9, marginTop: 3, fontWeight: 400 }}>
-                Unadj: ${u.el.toFixed(2)}m | Adj: ${a.el.toFixed(2)}m
+                Unadj: {fmtMoneyM(u.el)} | Adj: {fmtMoneyM(a.el)}
               </div>
             )}
           </div>
@@ -441,33 +442,75 @@ export function StructuringStudio({
                 {Object.entries(selectedNode.params)
                   .filter(([, v]) => typeof v === 'number' || typeof v === 'string')
                   .map(([k, v]) => {
-                    // A param that started numeric (or is a numeric intermediate
-                    // like '' / '-50') stays a number input even while its raw
-                    // editing value is held as a string.
+                    const meta = NODE_PARAM_META[k];
+                    const isRatioPct = Boolean(meta?.isRatioPct);
                     const isNumeric =
-                      typeof v === 'number' || v === '' || v === '-' || (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)) && /^-?\d*\.?\d*$/.test(v.trim()));
+                      Boolean(meta) ||
+                      typeof v === 'number' ||
+                      v === '' ||
+                      v === '-' ||
+                      (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)) && /^-?\d*\.?\d*$/.test(v.trim()));
+
+                    // Display ratio-based percentages (placedShare, ripRate, cessionShare) in 0..100%
+                    const displayValue =
+                      isRatioPct && typeof v === 'number'
+                        ? String(Number((v * 100).toFixed(4)))
+                        : String(v);
+
+                    const numericVal =
+                      typeof v === 'number'
+                        ? v
+                        : typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))
+                          ? Number(v)
+                          : null;
+
+                    const formattedHint =
+                      numericVal == null
+                        ? null
+                        : meta?.unit === '$M'
+                          ? fmtMoneyM(numericVal, 2)
+                          : meta?.unit === '$B'
+                            ? fmtMoneyB(numericVal, 2)
+                            : meta?.unit === '%'
+                              ? fmtRatioPct(numericVal, 1)
+                              : meta?.unit === '×'
+                                ? `${fmtNum(numericVal, 2)}×`
+                                : fmtNum(numericVal, numericVal % 1 === 0 ? 0 : 2);
+
                     return (
-                    <label key={k} style={{ fontSize: 11, color: '#94a3b8' }}>
-                      {k}
-                      <input
-                        type={isNumeric ? 'number' : 'text'}
-                        step="any"
-                        placeholder={isNumeric ? 'Enter value' : ''}
-                        value={String(v)}
-                        onChange={(e) => {
-                          if (!isNumeric) {
-                            updateSelectedNodeParam(k, e.target.value);
-                            return;
-                          }
-                          // Keep intermediate keystrokes ('', '-') as raw text so
-                          // clearing a field or typing a negative stays editable;
-                          // the API validates the final value on save.
-                          const raw = e.target.value;
-                          updateSelectedNodeParam(k, raw === '' || raw === '-' ? raw : Number(raw));
-                        }}
-                        style={{ width: '100%', marginTop: 3 }}
-                      />
-                    </label>
+                      <label key={k} style={{ fontSize: 11, color: '#94a3b8' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 6 }}>
+                          <span>
+                            {meta?.label ?? k}
+                            {meta?.unit ? ` (${meta.unit})` : ''}
+                          </span>
+                          {formattedHint && (
+                            <span style={{ fontSize: 10, color: '#38bdf8', fontVariantNumeric: 'tabular-nums' }}>
+                              {formattedHint}
+                            </span>
+                          )}
+                        </div>
+                        <input
+                          type={isNumeric ? 'number' : 'text'}
+                          step="any"
+                          placeholder={meta?.placeholder ?? (isNumeric ? 'Enter value' : '')}
+                          value={displayValue}
+                          onChange={(e) => {
+                            if (!isNumeric) {
+                              updateSelectedNodeParam(k, e.target.value);
+                              return;
+                            }
+                            const raw = e.target.value;
+                            if (raw === '' || raw === '-') {
+                              updateSelectedNodeParam(k, raw);
+                              return;
+                            }
+                            const num = Number(raw);
+                            updateSelectedNodeParam(k, isRatioPct ? num / 100 : num);
+                          }}
+                          style={{ width: '100%', marginTop: 3 }}
+                        />
+                      </label>
                     );
                   })}
                 <button
@@ -653,16 +696,15 @@ export function StructuringStudio({
                 <tr key={u.nodeId} onClick={() => setSelectedNodeId(u.nodeId)} style={{ cursor: 'pointer' }}>
                   <td style={{ fontWeight: u.nodeId === selectedNodeId ? 700 : 400 }}>{u.nodeLabel}</td>
                   <td style={{ color: '#94a3b8' }}>{u.nodeType}</td>
-                  <td className="num">${u.el.toFixed(3)}m</td>
-                  <td className="num" style={{ fontWeight: 600 }}>${a.el.toFixed(3)}m</td>
+                  <td className="num">{fmtMoneyM(u.el, 3)}</td>
+                  <td className="num" style={{ fontWeight: 600 }}>{fmtMoneyM(a.el, 3)}</td>
                   <td className="num" style={{ color: deltaPct > 0 ? '#f59e0b' : '#94a3b8' }}>
-                    {deltaPct >= 0 ? '+' : ''}
-                    {deltaPct.toFixed(1)}%
+                    {fmtPct(deltaPct, 1, { signed: true })}
                   </td>
-                  <td className="num">${a.sd.toFixed(3)}m</td>
-                  <td className="num">${a.expectedRip.toFixed(3)}m</td>
-                  <td className="num">${tvar250.toFixed(2)}m</td>
-                  <td className="num">{a.elr != null ? `${(a.elr * 100).toFixed(1)}%` : '—'}</td>
+                  <td className="num">{fmtMoneyM(a.sd, 3)}</td>
+                  <td className="num">{fmtMoneyM(a.expectedRip, 3)}</td>
+                  <td className="num">{fmtMoneyM(tvar250, 2)}</td>
+                  <td className="num">{fmtRatioPct(a.elr, 1)}</td>
                 </tr>
               );
             })}
