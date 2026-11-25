@@ -29,6 +29,8 @@ from app.models.enums import (
 from app.models.phase1 import (
     ContractCreate,
     ContractFull,
+    ContractLayer,
+    ContractLayerUpdate,
     ContractNoteCreate,
     ContractNoteOut,
     ContractUpdate,
@@ -181,6 +183,112 @@ def contract_to_programme_deal(c: ContractFull) -> ProgrammeDeal:
         region_perils=c.region_perils,
         perils=c.perils,
     )
+
+
+
+_LAYER_TYPES = {
+    NodeType.OCC_XL: ("occLimit", "occAttachment"),
+    NodeType.AGG_XL: ("aggLimit", "aggAttachment"),
+    NodeType.ILW_OPTION: ("limit", "trigger"),
+    NodeType.QUOTA_SHARE: ("aggCap", None),
+    NodeType.AGG_QUOTA_SHARE: ("aggCap", None),
+    NodeType.SURPLUS_SHARE: (None, None),
+    NodeType.CASCADING_TOWER: (None, None),
+}
+
+
+def _opt_float(v) -> float | None:
+    return None if v is None else float(v)
+
+
+def graph_layers(graph: GraphSpec, default_written: float, default_signed: float) -> list[ContractLayer]:
+    """Financial-terms nodes of a programme graph presented as contract layers (limits at 100%)."""
+    out: list[ContractLayer] = []
+    for node in graph.nodes:
+        if node.node_type not in _LAYER_TYPES:
+            continue
+        p = node.params
+        limit_key, attach_key = _LAYER_TYPES[node.node_type]
+        editable = ["label", "depositPremium", "writtenLine", "signedLine"]
+        if node.node_type == NodeType.CASCADING_TOWER:
+            subs = p.get("layers", []) or []
+            limit = sum(float(l.get("occLimit", 0) or 0) for l in subs) or None
+            attachment = min((float(l.get("occAttachment", 0) or 0) for l in subs), default=None)
+            premium = sum(float(l.get("depositPremium", 0) or 0) for l in subs)
+            signed = float(subs[0].get("placedShare", default_signed)) if subs else default_signed
+            editable = ["label", "writtenLine", "signedLine"]
+        else:
+            limit = _opt_float(p.get(limit_key)) if limit_key else None
+            attachment = _opt_float(p.get(attach_key)) if attach_key else None
+            premium = float(p.get("depositPremium", 0.0) or 0.0)
+            signed = float(p.get("placedShare", default_signed))
+            if limit_key:
+                editable.append("limit")
+            if attach_key:
+                editable.append("attachment")
+            if node.node_type == NodeType.OCC_XL:
+                editable += ["reinstatements", "ripRate"]
+        written = float(p.get("writtenLine", max(default_written, signed)))
+        out.append(
+            ContractLayer(
+                node_id=node.node_id,
+                label=node.label,
+                node_type=node.node_type.value,
+                limit=limit,
+                attachment=attachment,
+                deposit_premium=round(premium, 6),
+                rol=round(premium / limit, 6) if limit else None,
+                reinstatements=_opt_float(p.get("reinstatements")) if node.node_type == NodeType.OCC_XL else None,
+                rip_rate=_opt_float(p.get("ripRate")) if node.node_type == NodeType.OCC_XL else None,
+                written_line=written,
+                signed_line=signed,
+                our_limit=round(limit * signed, 6) if limit else None,
+                our_premium=round(premium * signed, 6),
+                editable=editable,
+            )
+        )
+    return out
+
+
+def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) -> GraphSpec:
+    nodes = {n.node_id: n for n in graph.nodes}
+    for u in updates:
+        node = nodes.get(u.node_id)
+        if node is None or node.node_type not in _LAYER_TYPES:
+            raise KeyError(f"Layer {u.node_id} not found on this programme")
+        for name, val in (("writtenLine", u.written_line), ("signedLine", u.signed_line)):
+            if val is not None and not 0.0 <= val <= 1.0:
+                raise ValueError(f"{node.label}: {name} must be between 0% and 100%")
+        p = dict(node.params)
+        limit_key, attach_key = _LAYER_TYPES[node.node_type]
+        if u.label is not None and u.label.strip():
+            node.label = u.label.strip()
+        if node.node_type == NodeType.CASCADING_TOWER:
+            if u.signed_line is not None:
+                p["layers"] = [{**l, "placedShare": u.signed_line} for l in p.get("layers", []) or []]
+        else:
+            if u.limit is not None and limit_key:
+                if u.limit <= 0:
+                    raise ValueError(f"{node.label}: limit must be greater than 0")
+                p[limit_key] = u.limit
+            if u.attachment is not None and attach_key:
+                if u.attachment < 0:
+                    raise ValueError(f"{node.label}: attachment must be 0 or more")
+                p[attach_key] = u.attachment
+            if u.deposit_premium is not None:
+                if u.deposit_premium < 0:
+                    raise ValueError(f"{node.label}: premium must be 0 or more")
+                p["depositPremium"] = u.deposit_premium
+            if u.reinstatements is not None and node.node_type == NodeType.OCC_XL:
+                p["reinstatements"] = u.reinstatements
+            if u.rip_rate is not None and node.node_type == NodeType.OCC_XL:
+                p["ripRate"] = u.rip_rate
+            if u.signed_line is not None:
+                p["placedShare"] = u.signed_line
+        if u.written_line is not None:
+            p["writtenLine"] = u.written_line
+        node.params = p
+    return graph
 
 
 class ContractStore:
@@ -527,6 +635,42 @@ class ContractStore:
             rec.uplift_set_json = uplift.model_dump_json()
             rec.version += 1
             rec.content_hash = canonical_hash({"programme_id": rec.programme_id, "version": rec.version, "uplift": uplift.content_hash})
+            rec.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            db.refresh(rec)
+            return _record_to_full(rec)
+
+    def update_layers(self, programme_id: str, updates: list[ContractLayerUpdate]) -> ContractFull | None:
+        from app.engine.slice_runner import validate_dag_acyclic
+
+        with get_session() as db:
+            rec = db.get(ContractRecord, programme_id)
+            if not rec:
+                return None
+            graph = GraphSpec(**json.loads(rec.graph_json))
+            graph = apply_layer_updates(graph, updates)
+            validate_dag_acyclic(graph)
+            graph.version += 1
+            graph.content_hash = canonical_hash({
+                "nodes": [n.model_dump() for n in graph.nodes],
+                "edges": [e.model_dump() for e in graph.edges],
+            })
+            rec.graph_json = graph.model_dump_json()
+
+            layers = [l for l in graph_layers(graph, rec.written_line, rec.signed_line) if l.limit]
+            total_limit = sum(l.limit or 0.0 for l in layers)
+            if total_limit > 0:
+                rec.limit = round(total_limit, 6)
+                rec.deposit_premium = round(sum(l.deposit_premium for l in layers), 6)
+                rec.rol = round(rec.deposit_premium / total_limit, 6)
+                rec.written_line = round(sum((l.limit or 0) * l.written_line for l in layers) / total_limit, 6)
+                rec.signed_line = round(sum((l.limit or 0) * l.signed_line for l in layers) / total_limit, 6)
+                attachments = [l.attachment for l in layers if l.attachment is not None]
+                if attachments:
+                    rec.attachment = min(attachments)
+
+            rec.version += 1
+            rec.content_hash = canonical_hash({"programme_id": rec.programme_id, "version": rec.version, "graph": graph.content_hash})
             rec.updated_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(rec)

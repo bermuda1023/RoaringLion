@@ -112,6 +112,39 @@ class RenewProgrammeRequest(CamelModel):
     rarc_total_pct: float | None = None
 
 
+class ContractLayer(CamelModel):
+    node_id: str
+    label: str
+    node_type: str
+    limit: float | None = None
+    attachment: float | None = None
+    deposit_premium: float = 0.0
+    rol: float | None = None
+    reinstatements: float | None = None
+    rip_rate: float | None = None
+    written_line: float
+    signed_line: float
+    our_limit: float | None = None
+    our_premium: float = 0.0
+    editable: list[str] = []
+
+
+class ContractLayerUpdate(CamelModel):
+    node_id: str
+    label: str | None = None
+    limit: float | None = None
+    attachment: float | None = None
+    deposit_premium: float | None = None
+    reinstatements: float | None = None
+    rip_rate: float | None = None
+    written_line: float | None = None
+    signed_line: float | None = None
+
+
+class ContractLayersUpdateRequest(CamelModel):
+    layers: list[ContractLayerUpdate]
+
+
 class RenewalChainRow(CamelModel):
     programme_id: str
     unique_code: str

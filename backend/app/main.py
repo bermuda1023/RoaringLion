@@ -31,6 +31,8 @@ from app.models.enums import ContractDirection, ProgrammeStatus, StructureType, 
 from app.models.phase1 import (
     ContractCreate,
     ContractFull,
+    ContractLayer,
+    ContractLayersUpdateRequest,
     ContractUpdate,
     EltIngestRequest,
     IlwPriceRequest,
@@ -39,7 +41,7 @@ from app.models.phase1 import (
     SliceRollupRequest,
     StaleManifestInfo,
 )
-from app.services.contracts import ContractStore, contract_to_programme_deal
+from app.services.contracts import ContractStore, contract_to_programme_deal, graph_layers
 from app.services.lineage import LineageRegistry
 from app.services.sim_sets import SimSetStore
 from app.routes_extended import create_extended_router
@@ -210,6 +212,28 @@ def update_contract(programme_id: str, patch: ContractUpdate) -> ContractFull:
         raise HTTPException(status_code=404, detail="Contract not found")
     _sync_memory_aliases()
     return full
+
+
+@app.get("/api/contracts/{programme_id}/layers", response_model=list[ContractLayer])
+def get_contract_layers(programme_id: str) -> list[ContractLayer]:
+    c = CONTRACT_STORE.get_contract(programme_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    return graph_layers(c.graph, c.written_line, c.signed_line)
+
+
+@app.put("/api/contracts/{programme_id}/layers", response_model=list[ContractLayer])
+def update_contract_layers(programme_id: str, payload: ContractLayersUpdateRequest) -> list[ContractLayer]:
+    try:
+        c = CONTRACT_STORE.update_layers(programme_id, payload.layers)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc).strip("'\"")) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not c:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    _sync_memory_aliases()
+    return graph_layers(c.graph, c.written_line, c.signed_line)
 
 
 @app.get("/api/programmes", response_model=list[ProgrammeDeal])

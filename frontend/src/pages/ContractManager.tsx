@@ -1,9 +1,35 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { api, apiUrl, fetchJson, postJson, type ProgrammeProfile } from '../api/client';
+import { api, apiUrl, fetchJson, postJson, type ContractFull, type ProgrammeProfile } from '../api/client';
+import { ContractLayersEditor } from '../components/ContractLayersEditor';
 import { fmtInt, fmtMoneyB, fmtMoneyM, fmtPct, fmtPts, fmtRatioPct } from '../utils/format';
+import { matchesNumberFilter, matchesTextFilter } from '../utils/tableFilter';
 
-type DossierTab = 'profile' | 'notes' | 'pricing' | 'exposure';
+type DossierTab = 'profile' | 'layers' | 'notes' | 'pricing' | 'exposure';
+
+interface LedgerColumn {
+  key: string;
+  label: string;
+  title?: string;
+  kind: 'text' | 'num' | 'select';
+  get: (c: ContractFull) => string | number | null | undefined;
+}
+
+// Numeric filters are entered in the units shown: percentages as 0–100, money in $M.
+const LEDGER_COLUMNS: LedgerColumn[] = [
+  { key: 'code', label: 'Unique Code', kind: 'text', get: (c) => c.profile?.uniqueCode || c.programmeId },
+  { key: 'cedent', label: 'Cedent', kind: 'text', get: (c) => c.cedentName },
+  { key: 'programme', label: 'Programme', kind: 'text', get: (c) => c.programmeName },
+  { key: 'period', label: 'Period', kind: 'text', get: (c) => c.renewalPeriod },
+  { key: 'uw', label: 'UW / Office', kind: 'text', get: (c) => `${c.underwriter} (${c.office})` },
+  { key: 'status', label: 'Status', kind: 'select', get: (c) => String(c.status) },
+  { key: 'written', label: 'Written', kind: 'num', get: (c) => c.writtenLine * 100 },
+  { key: 'signed', label: 'Signed', kind: 'num', get: (c) => c.signedLine * 100 },
+  { key: 'limit', label: 'Limit ($M)', kind: 'num', get: (c) => c.limit },
+  { key: 'prem', label: 'Prem ($M)', kind: 'num', get: (c) => c.depositPremium },
+  { key: 'rol', label: 'ROL', kind: 'num', get: (c) => c.rol * 100 },
+  { key: 'rarc', label: 'RARC', title: 'Risk-Adjusted Rate Change', kind: 'num', get: (c) => c.profile?.rarcTotalPct ?? 0 },
+];
 
 interface RenewalChainRow {
   programmeId: string;
@@ -81,7 +107,8 @@ interface ContractDossier {
 export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id: string) => void }) {
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
+  const [colFilters, setColFilters] = useState<Record<string, string>>({});
+  const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'code', dir: 'asc' });
   const [showNew, setShowNew] = useState(false);
   const [cedentName, setCedentName] = useState('Coastal Shield Ins');
   const [programmeName, setProgrammeName] = useState('FL Peak Cat XL 2027');
@@ -95,6 +122,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   const [dossierTab, setDossierTab] = useState<DossierTab>('profile');
   const [draftProfile, setDraftProfile] = useState<ProgrammeProfile | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [rarcInput, setRarcInput] = useState('');
 
   // Underwriting notes composer
   const [noteScope, setNoteScope] = useState<'programme' | 'cedent'>('programme');
@@ -104,9 +132,40 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   const [modelVendor, setModelVendor] = useState('RMS');
 
   const contractsQ = useQuery({
-    queryKey: ['contracts', statusFilter, search],
-    queryFn: () => api.listContracts({ status: statusFilter || undefined, search: search || undefined }),
+    queryKey: ['contracts'],
+    queryFn: () => api.listContracts(),
   });
+
+  const statusOptions = Array.from(new Set((contractsQ.data ?? []).map((c) => String(c.status)))).sort();
+  const activeFilterCount = Object.values(colFilters).filter((v) => v.trim()).length;
+  const visibleContracts = (() => {
+    const q = search.trim().toLowerCase();
+    const rows = (contractsQ.data ?? []).filter((c) => {
+      if (q && !LEDGER_COLUMNS.some((col) => String(col.get(c) ?? '').toLowerCase().includes(q)) &&
+        !`${c.broker} ${c.profile?.closingBroker ?? ''}`.toLowerCase().includes(q)) {
+        return false;
+      }
+      return LEDGER_COLUMNS.every((col) => {
+        const f = colFilters[col.key] ?? '';
+        if (!f.trim()) return true;
+        const v = col.get(c);
+        if (col.kind === 'num') return matchesNumberFilter(v as number, f);
+        if (col.kind === 'select') return String(v) === f;
+        return matchesTextFilter(String(v ?? ''), f);
+      });
+    });
+    const col = LEDGER_COLUMNS.find((x) => x.key === sort.key);
+    if (col) {
+      const mul = sort.dir === 'asc' ? 1 : -1;
+      rows.sort((a, b) => {
+        const va = col.get(a);
+        const vb = col.get(b);
+        if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * mul;
+        return String(va ?? '').localeCompare(String(vb ?? ''), undefined, { numeric: true }) * mul;
+      });
+    }
+    return rows;
+  })();
 
   const dossierQ = useQuery({
     queryKey: ['contractDossier', activeId],
@@ -117,6 +176,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   useEffect(() => {
     if (dossierQ.data?.contract?.profile) {
       setDraftProfile(dossierQ.data.contract.profile);
+      setRarcInput(String(dossierQ.data.contract.profile.rarcTotalPct ?? 0));
       setSavedMsg(null);
     }
   }, [dossierQ.data?.contract?.programmeId, dossierQ.data?.contract?.version]);
@@ -237,21 +297,24 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
     <>
       <div className="card">
         <div className="card-title">
-          <span>Programme Ledger</span>
+          <span>
+            Programme Ledger
+            <span className="badge" style={{ marginLeft: 4 }}>
+              {visibleContracts.length} of {contractsQ.data?.length ?? 0}
+            </span>
+          </span>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <input
-              placeholder="Search cedent, deal, broker..."
+              placeholder="Search all columns…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               style={{ width: 200 }}
             />
-            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-              <option value="">All Statuses</option>
-              <option value="BOUND">BOUND</option>
-              <option value="QUOTED">QUOTED</option>
-              <option value="FIRM_ORDER">FIRM_ORDER</option>
-              <option value="PLANNED">PLANNED</option>
-            </select>
+            {activeFilterCount > 0 && (
+              <button className="btn btn-ghost" onClick={() => setColFilters({})}>
+                Clear filters ({activeFilterCount})
+              </button>
+            )}
             <button className="btn" onClick={() => setShowNew((v) => !v)}>
               {showNew ? 'Cancel' : '+ New Deal'}
             </button>
@@ -329,82 +392,122 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
           </div>
         )}
 
-        <div className="table-wrap"><table>
-          <thead>
-            <tr>
-              <th>Unique Code</th>
-              <th>Cedent</th>
-              <th>Programme</th>
-              <th>Period</th>
-              <th>UW / Office</th>
-              <th>Status</th>
-              <th className="num">Signed</th>
-              <th className="num">Limit ($M)</th>
-              <th className="num">Prem ($M)</th>
-              <th className="num">ROL</th>
-              <th className="num" title="Risk-Adjusted Rate Change">RARC</th>
-              <th className="num">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {contractsQ.data?.map((c) => {
-              const isSelected = c.programmeId === activeId;
-              const rarc = c.profile?.rarcTotalPct ?? 0;
-              return (
-                <tr
-                  key={c.programmeId}
-                  onClick={() => setActiveId(c.programmeId)}
-                  style={{
-                    cursor: 'pointer',
-                    background: isSelected ? 'rgba(56, 189, 248, 0.08)' : undefined,
-                  }}
-                >
-                  <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--accent-soft)' }}>
-                    {c.profile?.uniqueCode || c.programmeId}
-                  </td>
-                  <td style={{ fontWeight: 600 }}>{c.cedentName}</td>
-                  <td>{c.programmeName}</td>
-                  <td>{c.renewalPeriod}</td>
-                  <td style={{ color: 'var(--text-muted)' }}>
-                    {c.underwriter} ({c.office})
-                  </td>
-                  <td>
-                    <span className={`badge status-${String(c.status).toLowerCase()}`}>{c.status}</span>
-                  </td>
-                  <td className="num">{fmtRatioPct(c.signedLine, 1)}</td>
-                  <td className="num">{fmtMoneyM(c.limit, 1)}</td>
-                  <td className="num">{fmtMoneyM(c.depositPremium, 2)}</td>
-                  <td className="num">{fmtRatioPct(c.rol, 2)}</td>
-                  <td className="num" style={{ color: rarc >= 0 ? 'var(--positive)' : 'var(--negative)', fontWeight: 600 }}>
-                    {fmtPct(rarc, 1, { signed: true })}
-                  </td>
-                  <td
-                    className="num"
-                    style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}
-                    onClick={(e) => e.stopPropagation()}
+        <div className="table-wrap">
+          <table className="ledger-table">
+            <thead>
+              <tr>
+                {LEDGER_COLUMNS.map((col) => (
+                  <th
+                    key={col.key}
+                    className={`sortable ${col.kind === 'num' ? 'num' : ''}`}
+                    title={col.title}
+                    onClick={() =>
+                      setSort((s) =>
+                        s.key === col.key ? { key: col.key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key: col.key, dir: 'asc' },
+                      )
+                    }
                   >
-                    {c.status !== 'BOUND' && (
-                      <button
-                        className="btn"
-                        style={{ padding: '3px 8px', fontSize: 11 }}
-                        onClick={() => bindMut.mutate({ id: c.programmeId, status: 'BOUND' })}
+                    {col.label}
+                    <span className="sort-ind">{sort.key === col.key ? (sort.dir === 'asc' ? '▲' : '▼') : ''}</span>
+                  </th>
+                ))}
+                <th className="num">Actions</th>
+              </tr>
+              <tr className="filter-row">
+                {LEDGER_COLUMNS.map((col) => (
+                  <th key={col.key}>
+                    {col.kind === 'select' ? (
+                      <select
+                        className="col-filter"
+                        value={colFilters[col.key] ?? ''}
+                        onChange={(e) => setColFilters((f) => ({ ...f, [col.key]: e.target.value }))}
                       >
-                        Bind
-                      </button>
+                        <option value="">All</option>
+                        {statusOptions.map((st) => (
+                          <option key={st} value={st}>
+                            {st}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        className="col-filter"
+                        placeholder={col.kind === 'num' ? '> < a-b' : 'Filter'}
+                        title={col.kind === 'num' ? 'e.g. >50, <=20, 10-30 or an exact value' : 'Contains…'}
+                        value={colFilters[col.key] ?? ''}
+                        onChange={(e) => setColFilters((f) => ({ ...f, [col.key]: e.target.value }))}
+                        style={col.kind === 'num' ? { textAlign: 'right' } : undefined}
+                      />
                     )}
-                    <button
-                      className="btn btn-ghost"
-                      style={{ padding: '3px 8px', fontSize: 11 }}
-                      onClick={() => onSelectProgramme(c.programmeId)}
-                    >
-                      Open DAG
-                    </button>
+                  </th>
+                ))}
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {visibleContracts.length === 0 && (
+                <tr>
+                  <td colSpan={LEDGER_COLUMNS.length + 1} className="empty-cell">
+                    No programmes match these filters.
                   </td>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table></div>
+              )}
+              {visibleContracts.map((c) => {
+                const isSelected = c.programmeId === activeId;
+                const rarc = c.profile?.rarcTotalPct ?? 0;
+                return (
+                  <tr
+                    key={c.programmeId}
+                    onClick={() => setActiveId(c.programmeId)}
+                    className={isSelected ? 'row-selected' : undefined}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <td className="mono" style={{ color: 'var(--accent-soft)' }}>
+                      {c.profile?.uniqueCode || c.programmeId}
+                    </td>
+                    <td style={{ fontWeight: 600 }}>{c.cedentName}</td>
+                    <td>{c.programmeName}</td>
+                    <td>{c.renewalPeriod}</td>
+                    <td style={{ color: 'var(--text-muted)' }}>
+                      {c.underwriter} ({c.office})
+                    </td>
+                    <td>
+                      <span className={`badge status-${String(c.status).toLowerCase()}`}>{c.status}</span>
+                    </td>
+                    <td className="num">{fmtRatioPct(c.writtenLine, 1)}</td>
+                    <td className="num">{fmtRatioPct(c.signedLine, 1)}</td>
+                    <td className="num">{fmtMoneyM(c.limit, 1)}</td>
+                    <td className="num">{fmtMoneyM(c.depositPremium, 2)}</td>
+                    <td className="num">{fmtRatioPct(c.rol, 2)}</td>
+                    <td className="num" style={{ color: rarc >= 0 ? 'var(--positive)' : 'var(--negative)', fontWeight: 600 }}>
+                      {fmtPct(rarc, 1, { signed: true })}
+                    </td>
+                    <td className="num" onClick={(e) => e.stopPropagation()}>
+                      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                        {c.status !== 'BOUND' && (
+                          <button
+                            className="btn"
+                            style={{ height: 26, padding: '0 10px', fontSize: 11 }}
+                            onClick={() => bindMut.mutate({ id: c.programmeId, status: 'BOUND' })}
+                          >
+                            Bind
+                          </button>
+                        )}
+                        <button
+                          className="btn btn-ghost"
+                          style={{ height: 26, padding: '0 10px', fontSize: 11 }}
+                          onClick={() => onSelectProgramme(c.programmeId)}
+                        >
+                          Open DAG
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {/* ══════════════════ 360° PROGRAMME PROFILE & LINKAGE DOSSIER ══════════════════ */}
@@ -428,7 +531,13 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                 className={`tab ${dossierTab === 'profile' ? 'active' : ''}`}
                 onClick={() => setDossierTab('profile')}
               >
-                Unique Code &amp; RARC
+                Programme Profile
+              </button>
+              <button
+                className={`tab ${dossierTab === 'layers' ? 'active' : ''}`}
+                onClick={() => setDossierTab('layers')}
+              >
+                Layers &amp; Lines
               </button>
               <button
                 className={`tab ${dossierTab === 'notes' ? 'active' : ''}`}
@@ -488,7 +597,20 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
             </div>
           </div>
 
-          {/* ── Sub-tab 1: Unique Code & RARC ── */}
+          {dossierTab === 'layers' && (
+            <ContractLayersEditor
+              programmeId={activeId}
+              currency={d.contract.currency}
+              onSaved={() => {
+                qc.invalidateQueries({ queryKey: ['contracts'] });
+                qc.invalidateQueries({ queryKey: ['contractDossier', activeId] });
+                qc.invalidateQueries({ queryKey: ['programmes'] });
+                qc.invalidateQueries({ queryKey: ['portfolio'] });
+              }}
+            />
+          )}
+
+          {/* ── Sub-tab 1: Programme Profile & RARC ── */}
           {dossierTab === 'profile' && (
             <>
               {savedMsg && (
@@ -614,7 +736,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                 <div className="panel">
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                     <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
-                      Risk-Adjusted Rate Change (RARC) &amp; YoY Renewal Comparison
+                      Rate Change &amp; Prior Year Comparison
                     </span>
                     <button
                       className="btn"
@@ -624,68 +746,32 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       {saveProfileMut.isPending ? 'Saving…' : 'Save Programme Profile'}
                     </button>
                   </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 8, marginBottom: 12 }}>
-                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      Econ Inflation %
+                  <label style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
+                    Risk-Adjusted Rate Change (RARC) %
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4 }}>
                       <input
                         type="number"
                         step="0.1"
-                        value={draftProfile.economicInflationPct}
-                        onChange={(e) => setDraftProfile({ ...draftProfile, economicInflationPct: Number(e.target.value) })}
-                        style={{ width: '100%', marginTop: 3 }}
+                        value={rarcInput}
+                        onChange={(e) => {
+                          setRarcInput(e.target.value);
+                          const n = Number(e.target.value);
+                          if (e.target.value.trim() !== '' && Number.isFinite(n)) {
+                            setDraftProfile({ ...draftProfile, rarcTotalPct: n });
+                          }
+                        }}
+                        style={{ width: 140, fontWeight: 600, textAlign: 'right' }}
                       />
-                    </label>
-                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      Social Inflation %
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={draftProfile.socialInflationPct}
-                        onChange={(e) => setDraftProfile({ ...draftProfile, socialInflationPct: Number(e.target.value) })}
-                        style={{ width: '100%', marginTop: 3 }}
-                      />
-                    </label>
-                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      Gearing Effect %
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={draftProfile.gearingEffectPct}
-                        onChange={(e) => setDraftProfile({ ...draftProfile, gearingEffectPct: Number(e.target.value) })}
-                        style={{ width: '100%', marginTop: 3 }}
-                      />
-                    </label>
-                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      Exposure Δ %
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={draftProfile.rarcExposurePct}
-                        onChange={(e) => setDraftProfile({ ...draftProfile, rarcExposurePct: Number(e.target.value) })}
-                        style={{ width: '100%', marginTop: 3 }}
-                      />
-                    </label>
-                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      Layer Δ %
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={draftProfile.rarcLayerPct}
-                        onChange={(e) => setDraftProfile({ ...draftProfile, rarcLayerPct: Number(e.target.value) })}
-                        style={{ width: '100%', marginTop: 3 }}
-                      />
-                    </label>
-                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      RARC Total %
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={draftProfile.rarcTotalPct}
-                        onChange={(e) => setDraftProfile({ ...draftProfile, rarcTotalPct: Number(e.target.value) })}
-                        style={{ width: '100%', marginTop: 3, fontWeight: 700 }}
-                      />
-                    </label>
-                  </div>
+                      <span
+                        style={{
+                          fontSize: 12,
+                          color: draftProfile.rarcTotalPct >= 0 ? 'var(--positive)' : 'var(--negative)',
+                        }}
+                      >
+                        {draftProfile.rarcTotalPct >= 0 ? 'Rate increase' : 'Rate decrease'} vs prior year
+                      </span>
+                    </div>
+                  </label>
 
                   <div className="table-wrap"><table>
                     <thead>
