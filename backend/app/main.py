@@ -389,8 +389,8 @@ def get_portfolio_rollup(
     ]
     yelt = SIM_STORE.get_yelt(_base_yelt.sim_set_id)
     return evaluate_portfolio_rollup(
-        portfolio_id="fund-keystone-j27",
-        portfolio_name="Keystone Collateralized Cat Fund — J27",
+        portfolio_id="fund-main-j27",
+        portfolio_name="RoaringLion Collateralized Cat Fund — J27",
         programmes=bound,
         yelt=yelt,
         view=view,

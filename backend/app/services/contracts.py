@@ -33,7 +33,7 @@ from app.models.phase1 import (
     ContractNoteOut,
     ContractUpdate,
     IlwPriceRequest,
-    ProgrammeFrontSheet,
+    ProgrammeProfile,
     SliceRollupRequest,
 )
 from app.services.lineage import LineageRegistry, canonical_hash
@@ -148,7 +148,7 @@ def _record_to_full(r: ContractRecord) -> ContractFull:
         uplift_set=UpliftSet(**json.loads(r.uplift_set_json)),
         graph=GraphSpec(**json.loads(r.graph_json)),
         ilw_spec=json.loads(r.ilw_spec_json) if r.ilw_spec_json else None,
-        front_sheet=ProgrammeFrontSheet(**json.loads(r.front_sheet_json)) if r.front_sheet_json else ProgrammeFrontSheet(),
+        profile=ProgrammeProfile(**json.loads(r.profile_json)) if r.profile_json else ProgrammeProfile(),
         version=r.version,
         content_hash=r.content_hash,
         updated_at=r.updated_at,
@@ -196,20 +196,20 @@ class ContractStore:
                 is_farmers = "farmers" in prog.programme_id
                 is_pacific = "pacific" in prog.programme_id
                 ee_id = "ee-prog-farmers-27" if is_farmers else ("ee-prog-pacific-27" if is_pacific else None)
-                fs = ProgrammeFrontSheet(
-                    front_sheet_code=f"{prog.office}-{prog.treaty_year}-2000{idx:02d}",
-                    program_code=f"6070{40 + idx}",
-                    legal_entity="Keystone Re Transformer",
+                profile = ProgrammeProfile(
+                    unique_code=f"RL-{prog.treaty_year}-{idx:03d}",
+                    program_code=f"PGM-{idx:03d}",
+                    legal_entity="RoaringLion Re Transformer",
                     trading_unit="N.A. Property" if (is_farmers or is_pacific) else "International Property",
                     planning_class="Property CAT",
                     new_or_renewal="RENEWAL",
                     is_multi_year=False,
                     written_date="2026-11-18",
-                    external_file_path=f"https://sharepoint.internal/reinsurance/{prog.treaty_year}/{prog.programme_id}",
+                    external_file_path=f"https://docs.internal/reinsurance/{prog.treaty_year}/{prog.programme_id}",
                     cedent_group=prog.cedent_name,
                     cedent_country="USA" if is_farmers else ("USA / JP" if is_pacific else "DE"),
                     cedent_credit_rating="AM Best A" if is_farmers else ("AM Best A-" if is_pacific else "S&P A+"),
-                    broker_group="Marsh McLennan" if "Guy Carpenter" in prog.broker else prog.broker,
+                    broker_group=prog.broker,
                     closing_broker=prog.broker,
                     broker_contact="Lead Treaty Desk",
                     pricing_analyst="Cat Modeling Desk",
@@ -219,7 +219,7 @@ class ContractStore:
                     claim_trigger="LOSSES_OCCURRING",
                     loss_event_type="1ST_LOSS",
                     reinstatement_basis="PRO_RATA_AMOUNT",
-                    inuring_note="FHCF & underlying QS inure prior to 1st Cat XL" if is_farmers else "Clean occurrence tower",
+                    inuring_note="Underlying QS inures prior to 1st Cat XL" if is_farmers else "Clean occurrence tower",
                     economic_inflation_pct=3.5 if is_farmers else 2.5,
                     social_inflation_pct=1.2 if is_farmers else 0.0,
                     gearing_effect_pct=14.5 if is_farmers else 6.0,
@@ -243,7 +243,7 @@ class ContractStore:
                     office=prog.office,
                     underwriter=prog.underwriter,
                     broker=prog.broker,
-                    fronting_carrier="Keystone Re Transformer",
+                    fronting_carrier="RoaringLion Re Transformer",
                     collateral_cell=f"Cell-{prog.renewal_period}",
                     status=prog.status.value,
                     direction=ContractDirection.ASSUMED.value,
@@ -272,7 +272,7 @@ class ContractStore:
                     custom_tags_json=json.dumps(["Peak" if "US-FL-WS" in prog.region_perils else "Diversifier"]),
                     uplift_set_json=prog.uplift_set.model_dump_json(),
                     graph_json=prog.graph.model_dump_json(),
-                    front_sheet_json=fs.model_dump_json(),
+                    profile_json=profile.model_dump_json(),
                     version=1,
                     content_hash=chash,
                 )
@@ -285,7 +285,7 @@ class ContractStore:
                             cedent_name=prog.cedent_name,
                             author=prog.underwriter,
                             category="UNDERWRITING",
-                            body="FL Wind house uplift +10% applied (Adjusted view). Attachment raised +5m YoY; RARC +6.1% meets Keystone hurdle.",
+                            body="FL Wind house uplift +10% applied (Adjusted view). Attachment raised +5m YoY; risk-adjusted rate change +6.1% meets fund hurdle.",
                         )
                     )
             db.commit()
@@ -390,7 +390,7 @@ class ContractStore:
             uplift_set_json=uplift.model_dump_json(),
             graph_json=graph.model_dump_json(),
             ilw_spec_json=json.dumps(payload.ilw_spec) if payload.ilw_spec else None,
-            front_sheet_json=(payload.front_sheet or ProgrammeFrontSheet(front_sheet_code=f"{payload.office}-{payload.treaty_year}-{prog_id[-6:].upper()}", cedent_group=payload.cedent_name)).model_dump_json(),
+            profile_json=(payload.profile or ProgrammeProfile(unique_code=f"RL-{payload.treaty_year}-{prog_id[-6:].upper()}", cedent_group=payload.cedent_name)).model_dump_json(),
             version=1,
             content_hash=chash,
         )
@@ -413,8 +413,8 @@ class ContractStore:
             for k, v in data.items():
                 if k == "custom_tags":
                     rec.custom_tags_json = json.dumps(v)
-                elif k == "front_sheet" and v is not None:
-                    rec.front_sheet_json = ProgrammeFrontSheet(**v).model_dump_json()
+                elif k == "profile" and v is not None:
+                    rec.profile_json = ProgrammeProfile(**v).model_dump_json()
                 elif hasattr(v, "value"):
                     setattr(rec, k, v.value)
                 else:
@@ -504,8 +504,8 @@ class ContractStore:
             treaty_year=2027,
             renewal_period="J27",
             office="BDA",
-            underwriter="J. Anfosso",
-            broker="Howden Re",
+            underwriter="Lead Underwriter",
+            broker="Broker C",
             status=ProgrammeStatus.BOUND,
             direction=req.direction,
             structure=StructureType.ILW,
@@ -579,7 +579,7 @@ class ContractStore:
                 note_id=f"note-{uuid.uuid4().hex[:8]}",
                 programme_id=programme_id,
                 cedent_name=rec.cedent_name,
-                author=payload.author.strip() or "J. Anfosso",
+                author=payload.author.strip() or "Lead Underwriter",
                 category=payload.category.upper(),
                 body=payload.body.strip(),
             )

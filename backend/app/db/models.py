@@ -63,7 +63,7 @@ class ContractRecord(Base):
     uplift_set_json: Mapped[str] = mapped_column(Text, default="{}")
     graph_json: Mapped[str] = mapped_column(Text, default="{}")
     ilw_spec_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    front_sheet_json: Mapped[str] = mapped_column(Text, default="{}")
+    profile_json: Mapped[str] = mapped_column(Text, default="{}")
 
     version: Mapped[int] = mapped_column(Integer, default=1)
     content_hash: Mapped[str] = mapped_column(String(32), default="")
@@ -143,7 +143,7 @@ class ContractNoteRecord(Base):
     note_id: Mapped[str] = mapped_column(String(80), primary_key=True)
     programme_id: Mapped[str] = mapped_column(String(80), index=True)
     cedent_name: Mapped[str] = mapped_column(String(160), index=True)
-    author: Mapped[str] = mapped_column(String(100), default="J. Anfosso")
+    author: Mapped[str] = mapped_column(String(100), default="Lead Underwriter")
     category: Mapped[str] = mapped_column(String(30), default="UNDERWRITING")
     body: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

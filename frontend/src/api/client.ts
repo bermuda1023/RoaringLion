@@ -9,8 +9,8 @@ import type {
   ViewOfRisk,
 } from '../types/contracts';
 
-export interface ProgrammeFrontSheet {
-  frontSheetCode: string;
+export interface ProgrammeProfile {
+  uniqueCode: string;
   programCode: string;
   legalEntity: string;
   tradingUnit: string;
@@ -65,7 +65,7 @@ export interface ContractFull extends ProgrammeDeal {
   frontingFeePct: number;
   customTags: string[];
   exposureEclipseProgrammeId?: string | null;
-  frontSheet: ProgrammeFrontSheet;
+  profile: ProgrammeProfile;
   version: number;
   contentHash: string;
 }

@@ -392,8 +392,8 @@ def create_extended_router(
         total_capital: float = Query(default=160.0, alias="totalCapital", gt=0),
     ) -> PlainTextResponse:
         rollup = evaluate_portfolio_rollup(
-            portfolio_id="fund-keystone-j27",
-            portfolio_name="Keystone Collateralized Cat Fund — J27",
+            portfolio_id="fund-main-j27",
+            portfolio_name="RoaringLion Collateralized Cat Fund — J27",
             programmes=_bound_deals(),
             yelt=sim_store.get_yelt(base_sim_id),
             view=view,
@@ -413,8 +413,8 @@ def create_extended_router(
         total_capital: float = Query(default=160.0, alias="totalCapital", gt=0),
     ) -> HTMLResponse:
         rollup = evaluate_portfolio_rollup(
-            portfolio_id="fund-keystone-j27",
-            portfolio_name="Keystone Collateralized Cat Fund — J27",
+            portfolio_id="fund-main-j27",
+            portfolio_name="RoaringLion Collateralized Cat Fund — J27",
             programmes=_bound_deals(),
             yelt=sim_store.get_yelt(base_sim_id),
             view=view,
@@ -437,7 +437,7 @@ def create_extended_router(
         )
         return HTMLResponse(content=build_programme_tearsheet_html(prog, dag_eval))
 
-    # ── CMS Programme Front Sheet, Underwriting Notes & 360° Linkage Dossier ──
+    # ── CMS Programme Profile, Underwriting Notes & 360° Linkage Dossier ──
 
     @router.get("/api/contracts/{programme_id}/notes", response_model=list[ContractNoteOut])
     def list_contract_notes(
@@ -476,7 +476,7 @@ def create_extended_router(
         related = [
             {
                 "programmeId": other.programme_id,
-                "frontSheetCode": other.front_sheet.front_sheet_code,
+                "uniqueCode": other.profile.unique_code,
                 "programmeName": other.programme_name,
                 "treatyYear": other.treaty_year,
                 "renewalPeriod": other.renewal_period,

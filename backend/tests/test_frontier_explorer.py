@@ -1,4 +1,4 @@
-"""Verification tests for the Analyze Re-inspired Layer-Level Optimization Frontier Explorer."""
+"""Verification tests for the Layer-Level Optimization Frontier Explorer, Exports, and CMS Profile Dossier."""
 
 from __future__ import annotations
 
@@ -84,13 +84,13 @@ def test_portfolio_and_programme_exports_include_manifest_provenance():
     assert "Farmers Group" in r_deal.text
 
 
-def test_cms_front_sheet_notes_and_360_dossier():
-    # Update front sheet metadata (RARC + credit rating + broker contact)
+def test_cms_profile_notes_and_360_dossier():
+    # Update programme profile metadata (unique code + RARC + credit rating + broker contact)
     r_upd = client.put(
         "/api/contracts/prog-farmers-us-27",
         json={
-            "frontSheet": {
-                "frontSheetCode": "BDA-2027-200001",
+            "profile": {
+                "uniqueCode": "RL-2027-001",
                 "cedentCreditRating": "AM Best A+",
                 "brokerContact": "Treaty Desk Lead",
                 "rarcTotalPct": 7.25,
@@ -99,12 +99,12 @@ def test_cms_front_sheet_notes_and_360_dossier():
         },
     )
     assert r_upd.status_code == 200
-    assert r_upd.json()["frontSheet"]["rarcTotalPct"] == 7.25
+    assert r_upd.json()["profile"]["rarcTotalPct"] == 7.25
 
     # Post an underwriting note and verify retrieval
     r_note = client.post(
         "/api/contracts/prog-farmers-us-27/notes",
-        json={"author": "J. Anfosso", "category": "PRICING", "body": "Confirmed +10% FL uplift and FHCF inuring."},
+        json={"author": "Lead Underwriter", "category": "PRICING", "body": "Confirmed +10% FL uplift and underlying QS inuring."},
     )
     assert r_note.status_code == 200
     assert r_note.json()["category"] == "PRICING"
@@ -113,8 +113,8 @@ def test_cms_front_sheet_notes_and_360_dossier():
     r_dos = client.get("/api/contracts/prog-farmers-us-27/dossier")
     assert r_dos.status_code == 200
     dos = r_dos.json()
-    assert dos["contract"]["frontSheet"]["cedentCreditRating"] == "AM Best A+"
-    assert any("FHCF inuring" in n["body"] for n in dos["notes"])
+    assert dos["contract"]["profile"]["cedentCreditRating"] == "AM Best A+"
+    assert any("underlying QS inuring" in n["body"] for n in dos["notes"])
     assert len(dos["pricingLink"]["adjustedNodes"]) >= 4
     assert dos["exposureLink"] is not None
     assert dos["exposureLink"]["edmDatabaseName"] == "EDM_FARMERS_2027_Q1"

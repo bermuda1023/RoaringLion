@@ -42,9 +42,9 @@ def init_engine(db_url: str | None = None):
     insp = inspect(_engine)
     if "contracts" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("contracts")}
-        if "front_sheet_json" not in cols:
+        if "profile_json" not in cols:
             with _engine.begin() as conn:
-                conn.execute(text("ALTER TABLE contracts ADD COLUMN front_sheet_json TEXT DEFAULT '{}'"))
+                conn.execute(text("ALTER TABLE contracts ADD COLUMN profile_json TEXT DEFAULT '{}'"))
     return _engine
 
 

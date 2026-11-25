@@ -55,7 +55,7 @@ def test_phase2_cycle_rejection_and_extended_nodes_and_bind():
             "treatyYear": 2027,
             "renewalPeriod": "J27",
             "office": "BDA",
-            "underwriter": "J. Anfosso",
+            "underwriter": "Lead Underwriter",
             "broker": "Aon",
             "status": "QUOTED",
             "limit": 70.0,

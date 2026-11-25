@@ -1,14 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { api, apiUrl, fetchJson, postJson, type ProgrammeFrontSheet } from '../api/client';
+import { api, apiUrl, fetchJson, postJson, type ProgrammeProfile } from '../api/client';
 
-type DossierTab = 'frontsheet' | 'notes' | 'pricing' | 'exposure';
+type DossierTab = 'profile' | 'notes' | 'pricing' | 'exposure';
 
 interface ContractDossier {
   contract: any;
   relatedProgrammes: {
     programmeId: string;
-    frontSheetCode: string;
+    uniqueCode: string;
     programmeName: string;
     treatyYear: number;
     renewalPeriod: string;
@@ -68,16 +68,16 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   const [rol, setRol] = useState(0.21);
   const [regionPeril, setRegionPeril] = useState('US-FL-WS');
 
-  // Selected programme for 360° Front Sheet & Linkage Dossier
+  // Selected programme for 360° Programme Profile & Linkage Dossier
   const [activeId, setActiveId] = useState<string>('prog-farmers-us-27');
-  const [dossierTab, setDossierTab] = useState<DossierTab>('frontsheet');
-  const [draftFs, setDraftFs] = useState<ProgrammeFrontSheet | null>(null);
+  const [dossierTab, setDossierTab] = useState<DossierTab>('profile');
+  const [draftProfile, setDraftProfile] = useState<ProgrammeProfile | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
   // Underwriting notes composer
   const [noteScope, setNoteScope] = useState<'programme' | 'cedent'>('programme');
   const [noteCategory, setNoteCategory] = useState('UNDERWRITING');
-  const [noteAuthor, setNoteAuthor] = useState('J. Anfosso');
+  const [noteAuthor, setNoteAuthor] = useState('Lead Underwriter');
   const [noteBody, setNoteBody] = useState('');
   const [modelVendor, setModelVendor] = useState('RMS');
 
@@ -93,8 +93,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   });
 
   useEffect(() => {
-    if (dossierQ.data?.contract?.frontSheet) {
-      setDraftFs(dossierQ.data.contract.frontSheet);
+    if (dossierQ.data?.contract?.profile) {
+      setDraftProfile(dossierQ.data.contract.profile);
       setSavedMsg(null);
     }
   }, [dossierQ.data?.contract?.programmeId, dossierQ.data?.contract?.version]);
@@ -107,8 +107,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
         treatyYear: 2027,
         renewalPeriod: 'MY27',
         office: 'BDA',
-        underwriter: 'J. Anfosso',
-        broker: 'Guy Carpenter',
+        underwriter: 'Lead Underwriter',
+        broker: 'Broker A',
         status: 'QUOTED',
         direction: 'ASSUMED',
         structure: 'OCC_XL',
@@ -138,10 +138,10 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
     },
   });
 
-  const saveFrontSheetMut = useMutation({
-    mutationFn: () => api.updateContract(activeId, { frontSheet: draftFs }),
+  const saveProfileMut = useMutation({
+    mutationFn: () => api.updateContract(activeId, { profile: draftProfile }),
     onSuccess: () => {
-      setSavedMsg('Front sheet saved & versioned.');
+      setSavedMsg('Programme profile saved & versioned.');
       qc.invalidateQueries({ queryKey: ['contracts'] });
       qc.invalidateQueries({ queryKey: ['contractDossier', activeId] });
     },
@@ -214,9 +214,9 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
           </div>
         </div>
 
-        {(createMut.error || saveFrontSheetMut.error || addNoteMut.error) && (
+        {(createMut.error || saveProfileMut.error || addNoteMut.error) && (
           <div className="error-banner">
-            {String(((createMut.error ?? saveFrontSheetMut.error ?? addNoteMut.error) as Error).message)}
+            {String(((createMut.error ?? saveProfileMut.error ?? addNoteMut.error) as Error).message)}
           </div>
         )}
 
@@ -285,7 +285,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
         <table>
           <thead>
             <tr>
-              <th>Ref</th>
+              <th>Unique Code</th>
               <th>Cedent</th>
               <th>Programme</th>
               <th>Period</th>
@@ -295,14 +295,14 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               <th className="num">Limit ($M)</th>
               <th className="num">Prem ($M)</th>
               <th className="num">ROL</th>
-              <th className="num">RARC</th>
+              <th className="num" title="Risk-Adjusted Rate Change">RARC</th>
               <th className="num">Actions</th>
             </tr>
           </thead>
           <tbody>
             {contractsQ.data?.map((c) => {
               const isSelected = c.programmeId === activeId;
-              const rarc = c.frontSheet?.rarcTotalPct ?? 0;
+              const rarc = c.profile?.rarcTotalPct ?? 0;
               return (
                 <tr
                   key={c.programmeId}
@@ -313,7 +313,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                   }}
                 >
                   <td style={{ fontFamily: 'monospace', fontSize: 11, color: '#93c5fd' }}>
-                    {c.frontSheet?.frontSheetCode || c.programmeId}
+                    {c.profile?.uniqueCode || c.programmeId}
                   </td>
                   <td style={{ fontWeight: 600 }}>{c.cedentName}</td>
                   <td>{c.programmeName}</td>
@@ -361,28 +361,28 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
         </table>
       </div>
 
-      {/* ══════════════════ 360° PROGRAMME FRONT SHEET & LINKAGE DOSSIER ══════════════════ */}
-      {d && draftFs && (
+      {/* ══════════════════ 360° PROGRAMME PROFILE & LINKAGE DOSSIER ══════════════════ */}
+      {d && draftProfile && (
         <div className="card">
           <div className="card-title">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <span style={{ fontFamily: 'monospace', color: '#38bdf8' }}>
-                {draftFs.frontSheetCode || d.contract.programmeId}
+                {draftProfile.uniqueCode || d.contract.programmeId}
               </span>
               <span>
                 {d.contract.cedentName} — {d.contract.programmeName}
               </span>
               <span className="badge">{d.contract.status}</span>
               <span style={{ fontSize: 11, color: '#94a3b8' }}>
-                {draftFs.tradingUnit} · {draftFs.planningClass} · {draftFs.cedentCreditRating}
+                {draftProfile.tradingUnit} · {draftProfile.planningClass} · {draftProfile.cedentCreditRating}
               </span>
             </div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               <button
-                className={`tab ${dossierTab === 'frontsheet' ? 'active' : ''}`}
-                onClick={() => setDossierTab('frontsheet')}
+                className={`tab ${dossierTab === 'profile' ? 'active' : ''}`}
+                onClick={() => setDossierTab('profile')}
               >
-                Front Sheet &amp; RARC
+                Unique Code &amp; RARC
               </button>
               <button
                 className={`tab ${dossierTab === 'notes' ? 'active' : ''}`}
@@ -405,7 +405,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
             </div>
           </div>
 
-          {/* Executive Front-Sheet KPI Ribbon */}
+          {/* Executive Programme KPI Ribbon */}
           <div className="grid-kpi">
             <div className="kpi">
               <div className="kpi-label">Exposure / Limit</div>
@@ -423,10 +423,10 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               </div>
             </div>
             <div className="kpi">
-              <div className="kpi-label">RARC Total</div>
-              <div className="kpi-val" style={{ color: draftFs.rarcTotalPct >= 0 ? '#22c55e' : '#ef4444' }}>
-                {draftFs.rarcTotalPct >= 0 ? '+' : ''}
-                {draftFs.rarcTotalPct.toFixed(2)}%
+              <div className="kpi-label">Risk-Adj Rate Change (RARC)</div>
+              <div className="kpi-val" style={{ color: draftProfile.rarcTotalPct >= 0 ? '#22c55e' : '#ef4444' }}>
+                {draftProfile.rarcTotalPct >= 0 ? '+' : ''}
+                {draftProfile.rarcTotalPct.toFixed(2)}%
               </div>
             </div>
             <div className="kpi">
@@ -443,8 +443,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
             </div>
           </div>
 
-          {/* ── Sub-tab 1: Front Sheet & RARC ── */}
-          {dossierTab === 'frontsheet' && (
+          {/* ── Sub-tab 1: Unique Code & RARC ── */}
+          {dossierTab === 'profile' && (
             <>
               {savedMsg && (
                 <div
@@ -464,70 +464,70 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               <div className="grid-2" style={{ marginBottom: 12 }}>
                 <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
                   <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 10 }}>
-                    Programme Classification, Counterparty &amp; Team
+                    Programme Identification, Counterparty &amp; Team
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(145px, 1fr))', gap: 8 }}>
                     <label style={{ fontSize: 11, color: '#94a3b8' }}>
-                      Front Sheet Code
+                      Unique Code
                       <input
-                        value={draftFs.frontSheetCode}
-                        onChange={(e) => setDraftFs({ ...draftFs, frontSheetCode: e.target.value })}
+                        value={draftProfile.uniqueCode}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, uniqueCode: e.target.value })}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
                     <label style={{ fontSize: 11, color: '#94a3b8' }}>
                       Program Code
                       <input
-                        value={draftFs.programCode}
-                        onChange={(e) => setDraftFs({ ...draftFs, programCode: e.target.value })}
+                        value={draftProfile.programCode}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, programCode: e.target.value })}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
                     <label style={{ fontSize: 11, color: '#94a3b8' }}>
                       Credit Rating
                       <input
-                        value={draftFs.cedentCreditRating}
-                        onChange={(e) => setDraftFs({ ...draftFs, cedentCreditRating: e.target.value })}
+                        value={draftProfile.cedentCreditRating}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, cedentCreditRating: e.target.value })}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
                     <label style={{ fontSize: 11, color: '#94a3b8' }}>
                       Trading Unit
                       <input
-                        value={draftFs.tradingUnit}
-                        onChange={(e) => setDraftFs({ ...draftFs, tradingUnit: e.target.value })}
+                        value={draftProfile.tradingUnit}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, tradingUnit: e.target.value })}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
                     <label style={{ fontSize: 11, color: '#94a3b8' }}>
                       Closing Broker
                       <input
-                        value={draftFs.closingBroker ?? ''}
-                        onChange={(e) => setDraftFs({ ...draftFs, closingBroker: e.target.value })}
+                        value={draftProfile.closingBroker ?? ''}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, closingBroker: e.target.value })}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
                     <label style={{ fontSize: 11, color: '#94a3b8' }}>
                       Broker Contact
                       <input
-                        value={draftFs.brokerContact ?? ''}
-                        onChange={(e) => setDraftFs({ ...draftFs, brokerContact: e.target.value })}
+                        value={draftProfile.brokerContact ?? ''}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, brokerContact: e.target.value })}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
                     <label style={{ fontSize: 11, color: '#94a3b8' }}>
                       Pricing Analyst
                       <input
-                        value={draftFs.pricingAnalyst ?? ''}
-                        onChange={(e) => setDraftFs({ ...draftFs, pricingAnalyst: e.target.value })}
+                        value={draftProfile.pricingAnalyst ?? ''}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, pricingAnalyst: e.target.value })}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
                     <label style={{ fontSize: 11, color: '#94a3b8' }}>
                       Claim Trigger
                       <select
-                        value={draftFs.claimTrigger}
-                        onChange={(e) => setDraftFs({ ...draftFs, claimTrigger: e.target.value })}
+                        value={draftProfile.claimTrigger}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, claimTrigger: e.target.value })}
                         style={{ width: '100%', marginTop: 3 }}
                       >
                         <option value="LOSSES_OCCURRING">Losses Occurring</option>
@@ -537,8 +537,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     <label style={{ fontSize: 11, color: '#94a3b8' }}>
                       Reinstatement Basis
                       <select
-                        value={draftFs.reinstatementBasis}
-                        onChange={(e) => setDraftFs({ ...draftFs, reinstatementBasis: e.target.value })}
+                        value={draftProfile.reinstatementBasis}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, reinstatementBasis: e.target.value })}
                         style={{ width: '100%', marginTop: 3 }}
                       >
                         <option value="PRO_RATA_AMOUNT">Pro-Rata Amount</option>
@@ -550,33 +550,33 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                   <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginTop: 8 }}>
                     Inuring / Wording Summary
                     <input
-                      value={draftFs.inuringNote ?? ''}
-                      onChange={(e) => setDraftFs({ ...draftFs, inuringNote: e.target.value })}
+                      value={draftProfile.inuringNote ?? ''}
+                      onChange={(e) => setDraftProfile({ ...draftProfile, inuringNote: e.target.value })}
                       style={{ width: '100%', marginTop: 3 }}
                     />
                   </label>
                   <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginTop: 8 }}>
-                    External Slip / SharePoint File Path
+                    External Slip / Document Folder Path
                     <input
-                      value={draftFs.externalFilePath ?? ''}
-                      onChange={(e) => setDraftFs({ ...draftFs, externalFilePath: e.target.value })}
+                      value={draftProfile.externalFilePath ?? ''}
+                      onChange={(e) => setDraftProfile({ ...draftProfile, externalFilePath: e.target.value })}
                       style={{ width: '100%', marginTop: 3 }}
                     />
                   </label>
                 </div>
 
-                {/* Right: RARC Decomposition & Prior UY Comparison */}
+                {/* Right: Risk-Adjusted Rate Change (RARC) & Prior UY Comparison */}
                 <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                     <span style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd' }}>
-                      RARC Decomposition &amp; YoY Renewal Comparison
+                      Risk-Adjusted Rate Change (RARC) &amp; YoY Renewal Comparison
                     </span>
                     <button
                       className="btn"
-                      onClick={() => saveFrontSheetMut.mutate()}
-                      disabled={saveFrontSheetMut.isPending}
+                      onClick={() => saveProfileMut.mutate()}
+                      disabled={saveProfileMut.isPending}
                     >
-                      {saveFrontSheetMut.isPending ? 'Saving…' : 'Save Front Sheet'}
+                      {saveProfileMut.isPending ? 'Saving…' : 'Save Programme Profile'}
                     </button>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 8, marginBottom: 12 }}>
@@ -585,8 +585,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       <input
                         type="number"
                         step="0.1"
-                        value={draftFs.economicInflationPct}
-                        onChange={(e) => setDraftFs({ ...draftFs, economicInflationPct: Number(e.target.value) })}
+                        value={draftProfile.economicInflationPct}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, economicInflationPct: Number(e.target.value) })}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
@@ -595,8 +595,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       <input
                         type="number"
                         step="0.1"
-                        value={draftFs.socialInflationPct}
-                        onChange={(e) => setDraftFs({ ...draftFs, socialInflationPct: Number(e.target.value) })}
+                        value={draftProfile.socialInflationPct}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, socialInflationPct: Number(e.target.value) })}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
@@ -605,28 +605,28 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       <input
                         type="number"
                         step="0.1"
-                        value={draftFs.gearingEffectPct}
-                        onChange={(e) => setDraftFs({ ...draftFs, gearingEffectPct: Number(e.target.value) })}
+                        value={draftProfile.gearingEffectPct}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, gearingEffectPct: Number(e.target.value) })}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
                     <label style={{ fontSize: 11, color: '#94a3b8' }}>
-                      RARC Exposure %
+                      Exposure Δ %
                       <input
                         type="number"
                         step="0.1"
-                        value={draftFs.rarcExposurePct}
-                        onChange={(e) => setDraftFs({ ...draftFs, rarcExposurePct: Number(e.target.value) })}
+                        value={draftProfile.rarcExposurePct}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, rarcExposurePct: Number(e.target.value) })}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
                     <label style={{ fontSize: 11, color: '#94a3b8' }}>
-                      RARC Layer %
+                      Layer Δ %
                       <input
                         type="number"
                         step="0.1"
-                        value={draftFs.rarcLayerPct}
-                        onChange={(e) => setDraftFs({ ...draftFs, rarcLayerPct: Number(e.target.value) })}
+                        value={draftProfile.rarcLayerPct}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, rarcLayerPct: Number(e.target.value) })}
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
@@ -635,8 +635,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       <input
                         type="number"
                         step="0.1"
-                        value={draftFs.rarcTotalPct}
-                        onChange={(e) => setDraftFs({ ...draftFs, rarcTotalPct: Number(e.target.value) })}
+                        value={draftProfile.rarcTotalPct}
+                        onChange={(e) => setDraftProfile({ ...draftProfile, rarcTotalPct: Number(e.target.value) })}
                         style={{ width: '100%', marginTop: 3, fontWeight: 700 }}
                       />
                     </label>
@@ -656,16 +656,16 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       <tr>
                         <td style={{ color: '#94a3b8' }}>Previous UY ({d.contract.treatyYear - 1})</td>
                         <td className="num">
-                          {draftFs.priorYearLimitM != null ? `$${draftFs.priorYearLimitM.toFixed(1)}m` : '—'}
+                          {draftProfile.priorYearLimitM != null ? `$${draftProfile.priorYearLimitM.toFixed(1)}m` : '—'}
                         </td>
                         <td className="num">
-                          {draftFs.priorYearPremiumM != null ? `$${draftFs.priorYearPremiumM.toFixed(2)}m` : '—'}
+                          {draftProfile.priorYearPremiumM != null ? `$${draftProfile.priorYearPremiumM.toFixed(2)}m` : '—'}
                         </td>
                         <td className="num">
-                          {draftFs.priorYearRolPct != null ? `${draftFs.priorYearRolPct.toFixed(2)}%` : '—'}
+                          {draftProfile.priorYearRolPct != null ? `${draftProfile.priorYearRolPct.toFixed(2)}%` : '—'}
                         </td>
                         <td className="num">
-                          {draftFs.priorYearSignedLine != null ? `${(draftFs.priorYearSignedLine * 100).toFixed(0)}%` : '—'}
+                          {draftProfile.priorYearSignedLine != null ? `${(draftProfile.priorYearSignedLine * 100).toFixed(0)}%` : '—'}
                         </td>
                       </tr>
                       <tr>
@@ -691,7 +691,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                             style={{ fontSize: 11, padding: '3px 8px' }}
                             onClick={() => setActiveId(rp.programmeId)}
                           >
-                            {rp.frontSheetCode || rp.programmeId} · {rp.programmeName} ({rp.status})
+                            {rp.uniqueCode || rp.programmeId} · {rp.programmeName} ({rp.status})
                           </button>
                         ))}
                       </div>

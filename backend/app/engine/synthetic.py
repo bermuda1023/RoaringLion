@@ -1,4 +1,4 @@
-"""Phase 5: Synthetic Frequency-Severity-Seasonality Loss Generator (TigerEye-inspired)."""
+"""Phase 5: Synthetic Frequency-Severity-Seasonality Loss Generator."""
 
 from __future__ import annotations
 

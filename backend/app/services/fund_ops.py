@@ -88,9 +88,9 @@ class FundOpsStore:
             )
         ]
         self.cash_entries: list[CashEntry] = [
-            CashEntry(entry_id="CASH-01", entry_type="PREMIUM_INSTALMENT", programme_id="prog-farmers-us-27", counterparty="Guy Carpenter", amount_m=4.825, due_date="2027-01-15", status="SETTLED"),
-            CashEntry(entry_id="CASH-02", entry_type="PREMIUM_INSTALMENT", programme_id="prog-farmers-us-27", counterparty="Guy Carpenter", amount_m=4.825, due_date="2027-04-15", status="SCHEDULED"),
-            CashEntry(entry_id="CASH-03", entry_type="COLLATERAL_RELEASE", programme_id="prog-eurowind-27", counterparty="Keystone Trust", amount_m=30.0, due_date="2028-01-05", status="SCHEDULED"),
+            CashEntry(entry_id="CASH-01", entry_type="PREMIUM_INSTALMENT", programme_id="prog-farmers-us-27", counterparty="Broker A", amount_m=4.825, due_date="2027-01-15", status="SETTLED"),
+            CashEntry(entry_id="CASH-02", entry_type="PREMIUM_INSTALMENT", programme_id="prog-farmers-us-27", counterparty="Broker A", amount_m=4.825, due_date="2027-04-15", status="SCHEDULED"),
+            CashEntry(entry_id="CASH-03", entry_type="COLLATERAL_RELEASE", programme_id="prog-eurowind-27", counterparty="Collateral Trust", amount_m=30.0, due_date="2028-01-05", status="SCHEDULED"),
         ]
         self.market_marks: list[MarketMark] = [
             MarketMark(instrument_id="MKT-ILW-FL50", name="US FL Wind $50B Binary ILW", instrument_type="ILW", region_peril="US-FL-WS", indicative_spread_pct=19.5, mark_price=100.0, as_of_date="2026-11-19"),

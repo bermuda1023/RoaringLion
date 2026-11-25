@@ -22,7 +22,7 @@ from app.services.lineage import LineageRegistry, canonical_hash
 
 class BranchCreate(CamelModel):
     name: str
-    parent_portfolio_id: str = "fund-keystone-j27"
+    parent_portfolio_id: str = "fund-main-j27"
     description: str = ""
     # Map programmeId -> new absolute signed-line share (0.5 = take a 50% line)
     signed_line_overrides: dict[str, float] = {}

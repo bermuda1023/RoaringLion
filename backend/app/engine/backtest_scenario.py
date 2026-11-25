@@ -135,7 +135,7 @@ def run_all_direction_backtest(
         output_payload={"baseline_avg_roc_pct": round(base_avg, 2), "worst_year": worst.year},
         breadcrumb=[
             BreadcrumbStep(entity_type="BACKTEST_CATALOG", entity_id="hist-1990-2025", label="Historical Benchmark Catalog 1990-2025"),
-            BreadcrumbStep(entity_type="PORTFOLIO", entity_id=branch.branch_id if branch else "fund-keystone-j27", label=branch.name if branch else "Keystone Bound Baseline"),
+            BreadcrumbStep(entity_type="PORTFOLIO", entity_id=branch.branch_id if branch else "fund-main-j27", label=branch.name if branch else "RoaringLion Bound Baseline"),
         ],
     )
     return BacktestMatrixResponse(

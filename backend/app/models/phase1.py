@@ -31,13 +31,13 @@ class IlwSpec(CamelModel):
     direction: ContractDirection = ContractDirection.CEDED if hasattr(ContractDirection, "CEDED") else ContractDirection.EXTERNAL_RETRO
 
 
-class ProgrammeFrontSheet(CamelModel):
-    """Institutional underwriting front-sheet metadata per programme (reference, counterparty, team, RARC, coverage, files)."""
+class ProgrammeProfile(CamelModel):
+    """Institutional underwriting programme metadata (unique code, counterparty, team, RARC, coverage, files)."""
 
     # Identification & classification
-    front_sheet_code: str = ""
+    unique_code: str = ""
     program_code: str = ""
-    legal_entity: str = "Keystone Re Transformer"
+    legal_entity: str = "RoaringLion Re Transformer"
     trading_unit: str = "N.A. Property"
     planning_class: str = "Property CAT"
     new_or_renewal: str = "RENEWAL"  # NEW | RENEWAL
@@ -68,7 +68,7 @@ class ProgrammeFrontSheet(CamelModel):
     reinstatement_basis: str = "PRO_RATA_AMOUNT"  # PRO_RATA_AMOUNT | PRO_RATA_TIME | FREE
     inuring_note: str | None = None
 
-    # RARC (Risk-Adjusted Rate Change) decomposition & Prior UY comparison
+    # RARC (Risk-Adjusted Rate Change) & Prior UY comparison
     economic_inflation_pct: float = 3.0
     social_inflation_pct: float = 0.0
     gearing_effect_pct: float = 0.0
@@ -83,7 +83,7 @@ class ProgrammeFrontSheet(CamelModel):
 
 
 class ContractNoteCreate(CamelModel):
-    author: str = "J. Anfosso"
+    author: str = "Lead Underwriter"
     category: str = "UNDERWRITING"  # UNDERWRITING | PRICING | BROKER | CLAIMS | MODELING
     body: str
 
@@ -107,7 +107,7 @@ class ContractCreate(CamelModel):
     treaty_year: int = 2027
     renewal_period: str = "J27"
     office: str = "BDA"
-    underwriter: str = "J. Anfosso"
+    underwriter: str = "Lead Underwriter"
     secondary_underwriter: str | None = None
     broker: str = "Direct"
     fronting_carrier: str | None = None
@@ -140,7 +140,7 @@ class ContractCreate(CamelModel):
     uplift_set: UpliftSet | None = None
     graph: GraphSpec | None = None
     ilw_spec: dict[str, Any] | None = None
-    front_sheet: ProgrammeFrontSheet | None = None
+    profile: ProgrammeProfile | None = None
 
 
 class ContractUpdate(CamelModel):
@@ -163,7 +163,7 @@ class ContractUpdate(CamelModel):
     renewal_period: str | None = None
     custom_tags: list[str] | None = None
     exposure_eclipse_programme_id: str | None = None
-    front_sheet: ProgrammeFrontSheet | None = None
+    profile: ProgrammeProfile | None = None
 
 
 class ContractFull(CamelModel):
@@ -208,7 +208,7 @@ class ContractFull(CamelModel):
     uplift_set: UpliftSet
     graph: GraphSpec
     ilw_spec: dict[str, Any] | None = None
-    front_sheet: ProgrammeFrontSheet = ProgrammeFrontSheet()
+    profile: ProgrammeProfile = ProgrammeProfile()
     version: int = 1
     content_hash: str = ""
     updated_at: datetime | None = None
