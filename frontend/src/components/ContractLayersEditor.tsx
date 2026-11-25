@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { fetchJson } from '../api/client';
 import { fmtMoneyM, fmtNum, fmtRatioPct } from '../utils/format';
+import { composeLabel, nodeTerms } from '../utils/nodeLabels';
 
 export interface ContractLayer {
   nodeId: string;
@@ -18,6 +19,9 @@ export interface ContractLayer {
   ourLimit: number | null;
   ourPremium: number;
   editable: string[];
+  name: string;
+  terms: string | null;
+  autoLabel: boolean;
 }
 
 type Field = 'label' | 'limit' | 'attachment' | 'depositPremium' | 'reinstatements' | 'ripRate' | 'writtenLine' | 'signedLine';
@@ -37,8 +41,8 @@ const PCT_FIELDS: Field[] = ['writtenLine', 'signedLine', 'ripRate'];
 
 function initialText(layer: ContractLayer, field: Field): string {
   const v = layer[field as keyof ContractLayer] as number | string | null;
+  if (field === 'label') return layer.autoLabel ? layer.name : layer.label;
   if (v == null) return '';
-  if (field === 'label') return String(v);
   if (PCT_FIELDS.includes(field)) return String(Number(((v as number) * 100).toFixed(4)));
   return String(Number((v as number).toFixed(6)));
 }
@@ -89,7 +93,17 @@ export function ContractLayersEditor({
     const signedPct = num('signedLine', layer.signedLine * 100);
     const written = writtenPct == null ? null : writtenPct / 100;
     const signed = signedPct == null ? null : signedPct / 100;
+    const reinst = num('reinstatements', layer.reinstatements);
+    const ripPct = num('ripRate', layer.ripRate == null ? null : layer.ripRate * 100);
+    const att = num('attachment', layer.attachment);
+    const liveParams: Record<string, Record<string, unknown>> = {
+      OCC_XL: { occLimit: limit, occAttachment: att, reinstatements: reinst, ripRate: ripPct == null ? null : ripPct / 100, placedShare: signed },
+      AGG_XL: { aggLimit: limit, aggAttachment: att, placedShare: signed },
+      ILW_OPTION: { limit, trigger: att, placedShare: signed },
+    };
+    const terms = liveParams[layer.nodeType] ? nodeTerms(layer.nodeType, liveParams[layer.nodeType]) ?? layer.terms : layer.terms;
     return {
+      terms,
       limit,
       premium,
       written,
@@ -222,7 +236,7 @@ export function ContractLayersEditor({
           <table>
             <thead>
               <tr>
-                <th>Layer</th>
+                <th>Layer name</th>
                 <th>Type</th>
                 <th className="num">Limit</th>
                 <th className="num">Attachment</th>
@@ -241,7 +255,14 @@ export function ContractLayersEditor({
                 const l = live(layer);
                 return (
                   <tr key={layer.nodeId}>
-                    <td>{cell(layer, 'label', { width: 230 })}</td>
+                    <td>
+                      {cell(layer, 'label', { width: 230 })}
+                      {layer.autoLabel && l.terms && (
+                        <div className="layer-label-preview" title="Full label (updates automatically from the terms)">
+                          {composeLabel(text(layer, 'label'), l.terms)}
+                        </div>
+                      )}
+                    </td>
                     <td style={{ color: 'var(--text-muted)' }}>{TYPE_LABEL[layer.nodeType] ?? layer.nodeType}</td>
                     <td className="num">{cell(layer, 'limit', { step: '1' })}</td>
                     <td className="num">{cell(layer, 'attachment', { step: '1' })}</td>

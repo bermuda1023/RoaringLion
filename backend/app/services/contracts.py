@@ -41,6 +41,7 @@ from app.models.phase1 import (
     SliceRollupRequest,
 )
 from app.services.lineage import LineageRegistry, canonical_hash
+from app.services.node_labels import label_name, node_terms, relabel_graph, smart_label
 from app.services.seed_data import _build_eurowind_programme, _build_farmers_programme, _build_pacific_eq_programme
 
 
@@ -98,15 +99,18 @@ def _default_graph_for_contract(c: ContractCreate, prog_id: str) -> GraphSpec:
         GraphEdgeSpec(edge_id=f"e2-{prog_id}", source=f"flt-{prog_id}", target=f"lyr-{prog_id}", sign=1, weight=1.0),
         GraphEdgeSpec(edge_id=f"e3-{prog_id}", source=f"lyr-{prog_id}", target=f"out-{prog_id}", sign=1, weight=1.0),
     ]
-    return GraphSpec(
+    graph = GraphSpec(
         graph_id=f"grp-{prog_id}",
         name=f"{c.cedent_name} — {c.programme_name}",
         version=1,
         currency=c.currency,
         nodes=nodes,
         edges=edges,
-        content_hash=canonical_hash({"nodes": [n.model_dump() for n in nodes], "edges": [e.model_dump() for e in edges]}),
+        content_hash="",
     )
+    relabel_graph(graph)
+    graph.content_hash = canonical_hash({"nodes": [n.model_dump() for n in nodes], "edges": [e.model_dump() for e in edges]})
+    return graph
 
 
 def _record_to_full(r: ContractRecord) -> ContractFull:
@@ -245,6 +249,9 @@ def graph_layers(graph: GraphSpec, default_written: float, default_signed: float
                 our_limit=round(limit * signed, 6) if limit else None,
                 our_premium=round(premium * signed, 6),
                 editable=editable,
+                name=label_name(p, node.label),
+                terms=node_terms(node.node_type, p),
+                auto_label=p.get("autoLabel") is not False,
             )
         )
     return out
@@ -261,8 +268,12 @@ def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) ->
                 raise ValueError(f"{node.label}: {name} must be between 0% and 100%")
         p = dict(node.params)
         limit_key, attach_key = _LAYER_TYPES[node.node_type]
-        if u.label is not None and u.label.strip():
-            node.label = u.label.strip()
+        if u.label is not None:
+            if p.get("autoLabel") is False:
+                if u.label.strip():
+                    node.label = u.label.strip()
+            else:
+                p["labelName"] = u.label.strip()
         if node.node_type == NodeType.CASCADING_TOWER:
             if u.signed_line is not None:
                 p["layers"] = [{**l, "placedShare": u.signed_line} for l in p.get("layers", []) or []]
@@ -288,7 +299,25 @@ def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) ->
         if u.written_line is not None:
             p["writtenLine"] = u.written_line
         node.params = p
+        node.label = smart_label(node.node_type, p, node.label)
     return graph
+
+
+
+def _roll_up_layers(rec: ContractRecord, graph: GraphSpec) -> None:
+    """Programme totals follow the layers: summed 100% limit/premium, limit-weighted written/signed lines."""
+    layers = [l for l in graph_layers(graph, rec.written_line, rec.signed_line) if l.limit]
+    total_limit = sum(l.limit or 0.0 for l in layers)
+    if total_limit <= 0:
+        return
+    rec.limit = round(total_limit, 6)
+    rec.deposit_premium = round(sum(l.deposit_premium for l in layers), 6)
+    rec.rol = round(rec.deposit_premium / total_limit, 6)
+    rec.written_line = round(sum((l.limit or 0) * l.written_line for l in layers) / total_limit, 6)
+    rec.signed_line = round(sum((l.limit or 0) * l.signed_line for l in layers) / total_limit, 6)
+    attachments = [l.attachment for l in layers if l.attachment is not None]
+    if attachments:
+        rec.attachment = min(attachments)
 
 
 class ContractStore:
@@ -657,17 +686,7 @@ class ContractStore:
             })
             rec.graph_json = graph.model_dump_json()
 
-            layers = [l for l in graph_layers(graph, rec.written_line, rec.signed_line) if l.limit]
-            total_limit = sum(l.limit or 0.0 for l in layers)
-            if total_limit > 0:
-                rec.limit = round(total_limit, 6)
-                rec.deposit_premium = round(sum(l.deposit_premium for l in layers), 6)
-                rec.rol = round(rec.deposit_premium / total_limit, 6)
-                rec.written_line = round(sum((l.limit or 0) * l.written_line for l in layers) / total_limit, 6)
-                rec.signed_line = round(sum((l.limit or 0) * l.signed_line for l in layers) / total_limit, 6)
-                attachments = [l.attachment for l in layers if l.attachment is not None]
-                if attachments:
-                    rec.attachment = min(attachments)
+            _roll_up_layers(rec, graph)
 
             rec.version += 1
             rec.content_hash = canonical_hash({"programme_id": rec.programme_id, "version": rec.version, "graph": graph.content_hash})
@@ -682,12 +701,14 @@ class ContractStore:
             if not rec:
                 return None
             old_graph = GraphSpec(**json.loads(rec.graph_json))
+            relabel_graph(graph)
             graph.version = old_graph.version + 1
             graph.content_hash = canonical_hash({
                 "nodes": [n.model_dump() for n in graph.nodes],
                 "edges": [e.model_dump() for e in graph.edges],
             })
             rec.graph_json = graph.model_dump_json()
+            _roll_up_layers(rec, graph)
             rec.version += 1
             rec.content_hash = canonical_hash({"programme_id": rec.programme_id, "version": rec.version, "graph": graph.content_hash})
             rec.updated_at = datetime.now(timezone.utc)

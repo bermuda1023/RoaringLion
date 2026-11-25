@@ -101,6 +101,7 @@ export const NODE_PARAM_META: Record<string, ParamFieldMeta> = {
   ripRate: { label: 'Reinstatement Premium (RIP) Rate', unit: '%', isRatioPct: true, placeholder: 'e.g. 100' },
   depositPremium: { label: 'Deposit Premium', unit: '$M', placeholder: 'e.g. 11.5' },
   placedShare: { label: 'Placed / Signed Share', unit: '%', isRatioPct: true, placeholder: '100' },
+  writtenLine: { label: 'Written Line', unit: '%', isRatioPct: true, placeholder: '100' },
   aggLimit: { label: 'Aggregate Limit', unit: '$M', placeholder: 'e.g. 35' },
   aggAttachment: { label: 'Aggregate Attachment (Deductible)', unit: '$M', placeholder: 'e.g. 95' },
   perEventFranchise: { label: 'Per-Event Franchise', unit: '$M', placeholder: '0' },

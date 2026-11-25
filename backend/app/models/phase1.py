@@ -127,6 +127,9 @@ class ContractLayer(CamelModel):
     our_limit: float | None = None
     our_premium: float = 0.0
     editable: list[str] = []
+    name: str = ""
+    terms: str | None = None
+    auto_label: bool = True
 
 
 class ContractLayerUpdate(CamelModel):

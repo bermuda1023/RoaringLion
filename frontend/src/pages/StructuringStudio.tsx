@@ -14,6 +14,7 @@ import { api, apiUrl } from '../api/client';
 import { BreadcrumbBar } from '../components/BreadcrumbBar';
 import type { GraphEdgeSpec, GraphNodeSpec, GraphSpec, ProgrammeDeal } from '../types/contracts';
 import { fmtMoneyB, fmtMoneyM, fmtNum, fmtPct, fmtRatioPct, NODE_PARAM_META } from '../utils/format';
+import { isAutoLabel, LABEL_META_KEYS, labelName, nameFromLabel, nodeTerms, smartLabel } from '../utils/nodeLabels';
 
 const AVAILABLE_ZONES = ['US-FL', 'US-TX', 'US-SE', 'US-CA', 'JP-KANTO', 'EU-DE'];
 const AVAILABLE_PERILS = [
@@ -21,6 +22,10 @@ const AVAILABLE_PERILS = [
   { code: 'EQ', label: 'EQ (Earthquake)' },
 ];
 const AVAILABLE_REGION_PERILS = ['US-FL-WS', 'US-TX-WS', 'US-SE-WS', 'US-CA-EQ', 'JP-KANTO-EQ', 'EU-DE-WS'];
+
+function withParams(n: GraphNodeSpec, params: Record<string, unknown>): GraphNodeSpec {
+  return { ...n, params, label: smartLabel(n.nodeType, params, n.label) };
+}
 
 function nodeAccent(nodeType: string): string {
   if (nodeType === 'LOSS_SOURCE' || nodeType === 'INDUSTRY_INDEX_SOURCE') return '#4c9dff';
@@ -100,6 +105,7 @@ export function StructuringStudio({
           ...n,
           params: Object.fromEntries(
             Object.entries(n.params).map(([k, v]) => {
+              if (LABEL_META_KEYS.includes(k)) return [k, v];
               if (typeof v === 'string' && v.trim() === '' && optionalKeys.has(k)) return [k, null];
               if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return [k, Number(v)];
               return [k, v];
@@ -116,6 +122,7 @@ export function StructuringStudio({
       qc.invalidateQueries({ queryKey: ['dagEval'] });
       qc.invalidateQueries({ queryKey: ['portfolio'] });
       qc.invalidateQueries({ queryKey: ['staleness'] });
+      qc.invalidateQueries({ queryKey: ['contractLayers'] });
     },
   });
 
@@ -208,7 +215,7 @@ export function StructuringStudio({
     const newNode: GraphNodeSpec = {
       nodeId: `n-${Date.now().toString(36)}`,
       nodeType: tpl.nodeType,
-      label: tpl.label,
+      label: smartLabel(tpl.nodeType, tpl.params, tpl.label),
       params: structuredClone(tpl.params),
       position: { x: 420 + Math.round(Math.random() * 140), y: 80 + Math.round(Math.random() * 180) },
     };
@@ -226,9 +233,15 @@ export function StructuringStudio({
     setDraftGraph((g) => ({
       ...g,
       nodes: g.nodes.map((n) =>
-        n.nodeId === selectedNode.nodeId ? { ...n, params: { ...n.params, [key]: val } } : n,
+        n.nodeId === selectedNode.nodeId ? withParams(n, { ...n.params, [key]: val }) : n,
       ),
     }));
+    setDirty(true);
+  };
+
+  const updateSelectedNode = (fn: (n: GraphNodeSpec) => GraphNodeSpec) => {
+    if (!selectedNode) return;
+    setDraftGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.nodeId === selectedNode.nodeId ? fn(n) : n)) }));
     setDirty(true);
   };
 
@@ -325,22 +338,71 @@ export function StructuringStudio({
                 <div style={{ fontSize: 10, color: 'var(--text-faint)', fontFamily: 'var(--mono)' }}>
                   ID: {selectedNode.nodeId} ({selectedNode.nodeType})
                 </div>
-                <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  Label
-                  <input
-                    value={selectedNode.label}
-                    onChange={(e) => {
-                      setDraftGraph((g) => ({
-                        ...g,
-                        nodes: g.nodes.map((n) =>
-                          n.nodeId === selectedNode.nodeId ? { ...n, label: e.target.value } : n,
-                        ),
-                      }));
-                      setDirty(true);
-                    }}
-                    style={{ width: '100%', marginTop: 3 }}
-                  />
-                </label>
+                {(() => {
+                  const terms = nodeTerms(selectedNode.nodeType, selectedNode.params);
+                  const auto = isAutoLabel(selectedNode.params);
+                  if (terms == null) {
+                    return (
+                      <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        Label
+                        <input
+                          value={selectedNode.label}
+                          onChange={(e) => updateSelectedNode((n) => ({ ...n, label: e.target.value }))}
+                          style={{ width: '100%', marginTop: 3 }}
+                        />
+                      </label>
+                    );
+                  }
+                  return (
+                    <div className="label-editor">
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{auto ? 'Name' : 'Custom label'}</span>
+                        <label className="toggle" title="When on, the label updates automatically as terms change">
+                          <input
+                            type="checkbox"
+                            checked={auto}
+                            onChange={(e) =>
+                              updateSelectedNode((n) => {
+                                const params = { ...n.params };
+                                if (e.target.checked) {
+                                  delete params.autoLabel;
+                                  params.labelName = nameFromLabel(n.label);
+                                } else {
+                                  params.autoLabel = false;
+                                }
+                                return withParams(n, params);
+                              })
+                            }
+                          />
+                          <span>Auto terms</span>
+                        </label>
+                      </div>
+                      {auto ? (
+                        <>
+                          <input
+                            value={labelName(selectedNode.params, selectedNode.label)}
+                            placeholder="e.g. 1st Cat XL"
+                            onChange={(e) => updateSelectedNode((n) => withParams(n, { ...n.params, labelName: e.target.value }))}
+                            style={{ width: '100%', marginTop: 3 }}
+                          />
+                          <div className="label-terms" title="Generated from the node's terms">
+                            <span>Terms</span>
+                            {terms}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <input
+                            value={selectedNode.label}
+                            onChange={(e) => updateSelectedNode((n) => ({ ...n, label: e.target.value }))}
+                            style={{ width: '100%', marginTop: 3 }}
+                          />
+                          <div className="label-terms muted">Auto terms off — label will not change with parameters.</div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
                 {selectedNode.nodeType === 'REGION_PERIL_FILTER' && (() => {
                   const selZones: string[] = Array.isArray(selectedNode.params.zones) ? (selectedNode.params.zones as string[]) : [];
                   const selPerils: string[] = Array.isArray(selectedNode.params.perils) ? (selectedNode.params.perils as string[]) : [];
@@ -445,7 +507,7 @@ export function StructuringStudio({
                 })()}
 
                 {Object.entries(selectedNode.params)
-                  .filter(([, v]) => typeof v === 'number' || typeof v === 'string')
+                  .filter(([k, v]) => !LABEL_META_KEYS.includes(k) && (typeof v === 'number' || typeof v === 'string'))
                   .map(([k, v]) => {
                     const meta = NODE_PARAM_META[k];
                     const isRatioPct = Boolean(meta?.isRatioPct);
