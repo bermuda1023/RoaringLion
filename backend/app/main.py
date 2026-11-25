@@ -273,80 +273,197 @@ def bind_programme_snapshot(programme_id: str) -> dict:
 
 
 @app.get("/api/graph-templates")
-def list_graph_templates() -> list[dict]:
-    return [
+def list_graph_templates(programme_id: str | None = Query(default=None, alias="programmeId")) -> list[dict]:
+    """Return blank-canvas node types plus optional CMS-suggested layers for the active programme."""
+    templates: list[dict] = []
+
+    if programme_id:
+        c = CONTRACT_STORE.get_contract(programme_id)
+        if c:
+            struct_node = {
+                StructureType.OCC_XL: "OCC_XL",
+                StructureType.AGG_XL: "AGG_XL",
+                StructureType.QUOTA_SHARE: "AGG_QUOTA_SHARE",
+                StructureType.CASCADING: "CASCADING_TOWER",
+                StructureType.ILW: "ILW_OPTION",
+            }.get(c.structure, "OCC_XL")
+
+            if struct_node == "AGG_XL":
+                cms_params: dict = {
+                    "aggLimit": c.limit,
+                    "aggAttachment": c.attachment,
+                    "perEventFranchise": 0.0,
+                    "perEventCap": None,
+                    "depositPremium": c.deposit_premium,
+                    "placedShare": c.signed_line,
+                }
+            elif struct_node == "AGG_QUOTA_SHARE":
+                cms_params = {
+                    "cessionShare": c.signed_line,
+                    "eventCap": c.limit,
+                    "aggCap": c.limit,
+                    "depositPremium": c.deposit_premium,
+                    "placedShare": 1.0,
+                }
+            else:
+                cms_params = {
+                    "occLimit": c.limit,
+                    "occAttachment": c.attachment,
+                    "occFranchise": 0.0,
+                    "reinstatements": 1.0,
+                    "ripRate": 1.0,
+                    "depositPremium": c.deposit_premium,
+                    "placedShare": c.signed_line,
+                }
+
+            templates.append({
+                "templateId": f"cms-layer-{c.programme_id}",
+                "category": "Suggested from CMS",
+                "source": "CMS",
+                "label": f"{c.programme_name} ({c.limit:g}m xs {c.attachment:g}m)",
+                "nodeType": struct_node,
+                "params": cms_params,
+            })
+
+            if c.region_perils:
+                templates.append({
+                    "templateId": f"cms-perils-{c.programme_id}",
+                    "category": "Suggested from CMS",
+                    "source": "CMS",
+                    "label": f"Programme Perils ({', '.join(c.region_perils)})",
+                    "nodeType": "REGION_PERIL_FILTER",
+                    "params": {"regionPerils": list(c.region_perils)},
+                })
+
+            if c.prior_contract_id:
+                prior = CONTRACT_STORE.get_contract(c.prior_contract_id)
+                if prior:
+                    for n in prior.graph.nodes:
+                        if n.node_type.value in ("OCC_XL", "AGG_XL", "QUOTA_SHARE", "AGG_QUOTA_SHARE", "SURPLUS_SHARE", "CASCADING_TOWER"):
+                            templates.append({
+                                "templateId": f"cms-prior-{prior.programme_id}-{n.node_id}",
+                                "category": f"Prior UY ({prior.treaty_year}) CMS",
+                                "source": "CMS",
+                                "label": n.label,
+                                "nodeType": n.node_type.value,
+                                "params": dict(n.params),
+                            })
+
+    # Clean blank-canvas node palette (no hardcoded layer sizes or preset terms)
+    templates.extend([
         {
-            "templateId": "tpl-occ-xl",
+            "templateId": "blank-occ-xl",
             "category": "Financial Terms",
-            "label": "Occ XL (50m xs 80m, 1@100%)",
+            "source": "BLANK",
+            "label": "Occurrence XL",
             "nodeType": "OCC_XL",
-            "params": {"occLimit": 50.0, "occAttachment": 80.0, "occFranchise": 0.0, "reinstatements": 1.0, "ripRate": 1.0, "depositPremium": 10.0, "placedShare": 1.0},
-        },
-        {
-            "templateId": "tpl-agg-xl",
-            "category": "Financial Terms",
-            "label": "Agg XL (35m xs 95m)",
-            "nodeType": "AGG_XL",
-            "params": {"aggLimit": 35.0, "aggAttachment": 95.0, "perEventFranchise": 10.0, "perEventCap": 60.0, "depositPremium": 7.5, "placedShare": 1.0},
-        },
-        {
-            "templateId": "tpl-qs",
-            "category": "Financial Terms",
-            "label": "Quota Share (25% / 40m Agg Cap)",
-            "nodeType": "AGG_QUOTA_SHARE",
-            "params": {"cessionShare": 0.25, "eventCap": 25.0, "aggCap": 40.0, "depositPremium": 8.0, "placedShare": 1.0},
-        },
-        {
-            "templateId": "tpl-surplus",
-            "category": "Financial Terms",
-            "label": "Surplus Share (4 Lines xs 25m)",
-            "nodeType": "SURPLUS_SHARE",
-            "params": {"retentionLine": 25.0, "numLines": 4.0, "depositPremium": 6.5, "placedShare": 1.0},
-        },
-        {
-            "templateId": "tpl-cascading",
-            "category": "Templates",
-            "label": "Cascading Drop-Down (2-Layer)",
-            "nodeType": "CASCADING_TOWER",
             "params": {
-                "occLimit": 70.0,
-                "depositPremium": 14.0,
+                "occLimit": "",
+                "occAttachment": "",
+                "occFranchise": 0.0,
+                "reinstatements": 0.0,
+                "ripRate": 0.0,
+                "depositPremium": "",
                 "placedShare": 1.0,
-                "layers": [
-                    {"occLimit": 30.0, "occAttachment": 50.0, "reinstatements": 0.0, "ripRate": 0.0, "depositPremium": 8.0, "placedShare": 1.0},
-                    {"occLimit": 40.0, "occAttachment": 80.0, "reinstatements": 0.0, "ripRate": 0.0, "depositPremium": 6.0, "placedShare": 1.0},
-                ],
             },
         },
         {
-            "templateId": "tpl-flt-rp",
+            "templateId": "blank-agg-xl",
+            "category": "Financial Terms",
+            "source": "BLANK",
+            "label": "Aggregate XL",
+            "nodeType": "AGG_XL",
+            "params": {
+                "aggLimit": "",
+                "aggAttachment": "",
+                "perEventFranchise": 0.0,
+                "perEventCap": "",
+                "depositPremium": "",
+                "placedShare": 1.0,
+            },
+        },
+        {
+            "templateId": "blank-qs",
+            "category": "Financial Terms",
+            "source": "BLANK",
+            "label": "Quota Share",
+            "nodeType": "AGG_QUOTA_SHARE",
+            "params": {
+                "cessionShare": "",
+                "eventCap": "",
+                "aggCap": "",
+                "depositPremium": "",
+                "placedShare": 1.0,
+            },
+        },
+        {
+            "templateId": "blank-surplus",
+            "category": "Financial Terms",
+            "source": "BLANK",
+            "label": "Surplus Share",
+            "nodeType": "SURPLUS_SHARE",
+            "params": {
+                "retentionLine": "",
+                "numLines": "",
+                "depositPremium": "",
+                "placedShare": 1.0,
+            },
+        },
+        {
+            "templateId": "blank-cascading",
+            "category": "Financial Terms",
+            "source": "BLANK",
+            "label": "Cascading Tower",
+            "nodeType": "CASCADING_TOWER",
+            "params": {
+                "occLimit": "",
+                "depositPremium": "",
+                "placedShare": 1.0,
+                "layers": [],
+            },
+        },
+        {
+            "templateId": "blank-flt-rp",
             "category": "Filters",
-            "label": "Zone Peril Filter (FL Wind)",
+            "source": "BLANK",
+            "label": "Zone Peril Filter",
             "nodeType": "REGION_PERIL_FILTER",
-            "params": {"regionPerils": ["US-FL-WS"]},
+            "params": {"regionPerils": []},
         },
         {
-            "templateId": "tpl-flt-2nd",
+            "templateId": "blank-flt-order",
             "category": "Filters",
-            "label": "Event Order Filter (2nd+ Event)",
+            "source": "BLANK",
+            "label": "Event Order Filter",
             "nodeType": "EVENT_ORDER_FILTER",
-            "params": {"minOrder": 2, "maxOrder": None, "minLossThreshold": 15.0},
+            "params": {"minOrder": 2, "maxOrder": "", "minLossThreshold": 0.0},
         },
         {
-            "templateId": "tpl-combo",
+            "templateId": "blank-combo",
             "category": "Transforms",
+            "source": "BLANK",
             "label": "Combination (+/- Inuring)",
             "nodeType": "COMBINATION",
             "params": {},
         },
         {
-            "templateId": "tpl-out-pricing",
+            "templateId": "blank-out-pricing",
             "category": "Outputs",
+            "source": "BLANK",
             "label": "Pricing Output",
             "nodeType": "PRICING_OUTPUT",
             "params": {},
         },
-    ]
+        {
+            "templateId": "blank-out-yelt",
+            "category": "Outputs",
+            "source": "BLANK",
+            "label": "YELT Output",
+            "nodeType": "YELT_OUTPUT",
+            "params": {},
+        },
+    ])
+    return templates
 
 
 # ─────────────────────────── Background Industry ILW Engine ───────────────────────────

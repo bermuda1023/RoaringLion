@@ -141,3 +141,20 @@ def test_phase2_cycle_rejection_and_extended_nodes_and_bind():
     assert r_bind.status_code == 200
     assert r_bind.json()["contract"]["status"] == "BOUND"
     assert r_bind.json()["bindManifestId"].startswith("man-deal_bind-")
+
+
+def test_graph_templates_blank_canvas_and_cms_suggestions():
+    client = TestClient(app)
+    r_blank = client.get("/api/graph-templates")
+    assert r_blank.status_code == 200
+    blank_occ = next(t for t in r_blank.json() if t["templateId"] == "blank-occ-xl")
+    assert blank_occ["label"] == "Occurrence XL"
+    assert blank_occ["params"]["occLimit"] == ""
+    assert blank_occ["params"]["occAttachment"] == ""
+
+    r_cms = client.get("/api/graph-templates?programmeId=prog-farmers-us-27")
+    assert r_cms.status_code == 200
+    cms_items = [t for t in r_cms.json() if t.get("source") == "CMS"]
+    assert any(t["templateId"] == "cms-layer-prog-farmers-us-27" for t in cms_items)
+    assert any(t["templateId"] == "cms-perils-prog-farmers-us-27" for t in cms_items)
+    assert any("Prior UY (2026)" in t["category"] for t in cms_items)

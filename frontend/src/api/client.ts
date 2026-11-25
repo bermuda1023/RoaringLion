@@ -212,16 +212,17 @@ export const api = {
     fetchJson<{ contract: ContractFull; bindManifestId: string }>(`/api/programmes/${id}/bind`, {
       method: 'POST',
     }),
-  listGraphTemplates: () =>
+  listGraphTemplates: (programmeId?: string) =>
     fetchJson<
       {
         templateId: string;
         category: string;
+        source?: 'CMS' | 'BLANK';
         label: string;
         nodeType: string;
         params: Record<string, unknown>;
       }[]
-    >('/api/graph-templates'),
+    >(`/api/graph-templates${programmeId ? `?programmeId=${encodeURIComponent(programmeId)}` : ''}`),
   updateUplifts: (id: string, rules: UpliftRule[]) =>
     fetchJson<ProgrammeDeal>(`/api/programmes/${id}/uplifts`, {
       method: 'PUT',

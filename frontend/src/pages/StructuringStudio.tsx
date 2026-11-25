@@ -66,7 +66,10 @@ export function StructuringStudio({
     setDirty(false);
   }, [selectedProg.programmeId, selectedProg.graph.version]);
 
-  const templatesQ = useQuery({ queryKey: ['graphTemplates'], queryFn: api.listGraphTemplates });
+  const templatesQ = useQuery({
+    queryKey: ['graphTemplates', selectedProg.programmeId],
+    queryFn: () => api.listGraphTemplates(selectedProg.programmeId),
+  });
 
   const dagEvalQ = useQuery({
     queryKey: ['dagEval', selectedProg.programmeId, selectedProg.graph.version, selectedProg.upliftSet.version],
@@ -75,16 +78,18 @@ export function StructuringStudio({
 
   const saveGraphMut = useMutation({
     mutationFn: () => {
-      // Params edited through the inspector may hold numeric strings; restore numbers.
+      // Params edited through the inspector may hold numeric strings; restore numbers and turn blank optional caps into null.
+      const optionalKeys = new Set(['perEventCap', 'eventCap', 'aggCap', 'maxOrder', 'maxLoss']);
       const clean: GraphSpec = {
         ...draftGraph,
         nodes: draftGraph.nodes.map((n) => ({
           ...n,
           params: Object.fromEntries(
-            Object.entries(n.params).map(([k, v]) => [
-              k,
-              typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)) ? Number(v) : v,
-            ]),
+            Object.entries(n.params).map(([k, v]) => {
+              if (typeof v === 'string' && v.trim() === '' && optionalKeys.has(k)) return [k, null];
+              if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return [k, Number(v)];
+              return [k, v];
+            }),
           ),
         })),
       };
@@ -331,6 +336,7 @@ export function StructuringStudio({
                       <input
                         type={isNumeric ? 'number' : 'text'}
                         step="any"
+                        placeholder={isNumeric ? 'Enter value' : ''}
                         value={String(v)}
                         onChange={(e) => {
                           if (!isNumeric) {
@@ -447,23 +453,50 @@ export function StructuringStudio({
             </ReactFlow>
           </div>
 
-          {/* Right Rail: Node Palette & Reusable Templates */}
+          {/* Right Rail: CMS Suggestions & Blank-Canvas Node Palette */}
           <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 10, overflowY: 'auto', maxHeight: 400 }}>
             <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: '#5eead4' }}>
-              Node & Term Library
+              Suggested from CMS
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
+              {(templatesQ.data ?? [])
+                .filter((tpl) => tpl.source === 'CMS')
+                .map((tpl) => (
+                  <button
+                    key={tpl.templateId}
+                    className="btn btn-ghost"
+                    style={{
+                      textAlign: 'left',
+                      fontSize: 11,
+                      padding: '6px 8px',
+                      borderColor: 'rgba(56, 189, 248, 0.35)',
+                      background: 'rgba(56, 189, 248, 0.08)',
+                    }}
+                    onClick={() => addTemplateNode(tpl)}
+                  >
+                    <div style={{ color: '#38bdf8', fontSize: 9, textTransform: 'uppercase' }}>{tpl.category}</div>
+                    <div>+ {tpl.label}</div>
+                  </button>
+                ))}
+            </div>
+
+            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: '#94a3b8' }}>
+              Blank Canvas Nodes
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {templatesQ.data?.map((tpl) => (
-                <button
-                  key={tpl.templateId}
-                  className="btn btn-ghost"
-                  style={{ textAlign: 'left', fontSize: 11, padding: '6px 8px' }}
-                  onClick={() => addTemplateNode(tpl)}
-                >
-                  <div style={{ color: '#94a3b8', fontSize: 9, textTransform: 'uppercase' }}>{tpl.category}</div>
-                  <div>+ {tpl.label}</div>
-                </button>
-              ))}
+              {(templatesQ.data ?? [])
+                .filter((tpl) => tpl.source !== 'CMS')
+                .map((tpl) => (
+                  <button
+                    key={tpl.templateId}
+                    className="btn btn-ghost"
+                    style={{ textAlign: 'left', fontSize: 11, padding: '6px 8px' }}
+                    onClick={() => addTemplateNode(tpl)}
+                  >
+                    <div style={{ color: '#94a3b8', fontSize: 9, textTransform: 'uppercase' }}>{tpl.category}</div>
+                    <div>+ {tpl.label}</div>
+                  </button>
+                ))}
             </div>
           </div>
         </div>
