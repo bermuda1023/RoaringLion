@@ -15,7 +15,18 @@ import { BreadcrumbBar } from '../components/BreadcrumbBar';
 import { PricingOutputPanel, YeltOutputPanel } from '../components/OutputNodePanels';
 import type { GraphEdgeSpec, GraphNodeSpec, GraphSpec, ProgrammeDeal } from '../types/contracts';
 import { fmtMoneyB, fmtMoneyM, fmtNum, fmtPct, fmtRatioPct, NODE_PARAM_META } from '../utils/format';
-import { isAutoLabel, LABEL_META_KEYS, labelName, nameFromLabel, nodeTerms, OUTPUT_LINK_KEYS, smartLabel } from '../utils/nodeLabels';
+import {
+  isAutoLabel,
+  LABEL_META_KEYS,
+  labelName,
+  LAYER_META_KEYS,
+  LAYER_NODE_TYPES,
+  nameFromLabel,
+  nextLayerCode,
+  nodeTerms,
+  OUTPUT_LINK_KEYS,
+  smartLabel,
+} from '../utils/nodeLabels';
 
 const AVAILABLE_ZONES = ['US-FL', 'US-TX', 'US-SE', 'US-CA', 'JP-KANTO', 'EU-DE'];
 const AVAILABLE_PERILS = [
@@ -106,7 +117,7 @@ export function StructuringStudio({
   }, [selectedProg.programmeId, selectedProg.graph.version]);
 
   const templatesQ = useQuery({
-    queryKey: ['graphTemplates', selectedProg.programmeId],
+    queryKey: ['graphTemplates', selectedProg.programmeId, selectedProg.graph.version],
     queryFn: () => api.listGraphTemplates(selectedProg.programmeId),
   });
 
@@ -125,7 +136,7 @@ export function StructuringStudio({
           ...n,
           params: Object.fromEntries(
             Object.entries(n.params).map(([k, v]) => {
-              if (LABEL_META_KEYS.includes(k) || OUTPUT_LINK_KEYS.includes(k)) return [k, v];
+              if (LABEL_META_KEYS.includes(k) || LAYER_META_KEYS.includes(k) || OUTPUT_LINK_KEYS.includes(k)) return [k, v];
               if (typeof v === 'string' && v.trim() === '' && optionalKeys.has(k)) return [k, null];
               if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return [k, Number(v)];
               return [k, v];
@@ -143,6 +154,7 @@ export function StructuringStudio({
       qc.invalidateQueries({ queryKey: ['portfolio'] });
       qc.invalidateQueries({ queryKey: ['staleness'] });
       qc.invalidateQueries({ queryKey: ['contractLayers'] });
+      qc.invalidateQueries({ queryKey: ['graphTemplates'] });
     },
   });
 
@@ -182,6 +194,10 @@ export function StructuringStudio({
     const a = adjById[n.nodeId];
     const isSource = n.nodeType === 'LOSS_SOURCE' || n.nodeType === 'INDUSTRY_INDEX_SOURCE';
     const isOutput = n.nodeType === 'PRICING_OUTPUT' || n.nodeType === 'YELT_OUTPUT' || n.nodeType === 'EP_OUTPUT';
+    const layerCode =
+      LAYER_NODE_TYPES.includes(n.nodeType) && typeof n.params.layerCode === 'string' && n.params.layerCode.trim()
+        ? n.params.layerCode.trim()
+        : null;
     return {
       id: n.nodeId,
       type: isSource ? 'input' : isOutput ? 'output' : 'default',
@@ -192,7 +208,10 @@ export function StructuringStudio({
       data: {
         label: (
           <div>
-            <div>{n.label}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              {layerCode && <span className="layer-code-pill">{layerCode}</span>}
+              <span>{n.label}</span>
+            </div>
             {u && a && (
               <div style={{ fontSize: 10, opacity: 0.9, marginTop: 3, fontWeight: 400 }}>
                 Unadj: {fmtMoneyM(u.el)} | Adj: {fmtMoneyM(a.el)}
@@ -231,12 +250,38 @@ export function StructuringStudio({
     setDirty(true);
   };
 
-  const addTemplateNode = (tpl: { label: string; nodeType: string; params: Record<string, unknown> }) => {
+  const canvasLayerCodes = new Set(
+    draftGraph.nodes
+      .filter((n) => LAYER_NODE_TYPES.includes(n.nodeType))
+      .map((n) => String(n.params.layerCode ?? '').trim().toLowerCase())
+      .filter(Boolean),
+  );
+
+  const addTemplateNode = (tpl: {
+    label: string;
+    nodeType: string;
+    layerCode?: string;
+    layerNodeId?: string;
+    params: Record<string, unknown>;
+  }) => {
+    const params = structuredClone(tpl.params);
+    let nodeId = `n-${Date.now().toString(36)}`;
+    if (LAYER_NODE_TYPES.includes(tpl.nodeType)) {
+      const existingCodes = draftGraph.nodes
+        .filter((n) => LAYER_NODE_TYPES.includes(n.nodeType))
+        .map((n) => (typeof n.params.layerCode === 'string' ? n.params.layerCode : ''));
+      const candidate = String(tpl.layerCode ?? params.layerCode ?? '').trim();
+      const usedLower = new Set(existingCodes.map((c) => c.trim().toLowerCase()).filter(Boolean));
+      params.layerCode = candidate && !usedLower.has(candidate.toLowerCase()) ? candidate : nextLayerCode(existingCodes);
+      if (tpl.layerNodeId && !draftGraph.nodes.some((n) => n.nodeId === tpl.layerNodeId)) {
+        nodeId = tpl.layerNodeId;
+      }
+    }
     const newNode: GraphNodeSpec = {
-      nodeId: `n-${Date.now().toString(36)}`,
+      nodeId,
       nodeType: tpl.nodeType,
-      label: smartLabel(tpl.nodeType, tpl.params, tpl.label),
-      params: structuredClone(tpl.params),
+      label: smartLabel(tpl.nodeType, params, tpl.label),
+      params,
       position: { x: 420 + Math.round(Math.random() * 140), y: 80 + Math.round(Math.random() * 180) },
     };
     setDraftGraph((g) => ({ ...g, nodes: [...g.nodes, newNode] }));
@@ -358,6 +403,39 @@ export function StructuringStudio({
                 <div style={{ fontSize: 10, color: 'var(--text-faint)', fontFamily: 'var(--mono)' }}>
                   ID: {selectedNode.nodeId} ({selectedNode.nodeType})
                 </div>
+                {LAYER_NODE_TYPES.includes(selectedNode.nodeType) && (() => {
+                  const rawCode = typeof selectedNode.params.layerCode === 'string' ? selectedNode.params.layerCode : '';
+                  const trimmed = rawCode.trim();
+                  const duplicate =
+                    Boolean(trimmed) &&
+                    draftGraph.nodes.some(
+                      (n) =>
+                        n.nodeId !== selectedNode.nodeId &&
+                        LAYER_NODE_TYPES.includes(n.nodeType) &&
+                        String(n.params.layerCode ?? '').trim().toLowerCase() === trimmed.toLowerCase(),
+                    );
+                  return (
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 6 }}>
+                        <span>Layer ID</span>
+                        <span style={{ fontSize: 10, color: duplicate || !trimmed ? 'var(--negative)' : 'var(--text-faint)' }}>
+                          {!trimmed ? 'Required' : duplicate ? 'Duplicate in programme' : 'Unique in programme'}
+                        </span>
+                      </div>
+                      <input
+                        className="mono"
+                        value={rawCode}
+                        placeholder="e.g. L1"
+                        onChange={(e) => updateSelectedNodeParam('layerCode', e.target.value)}
+                        style={{
+                          width: '100%',
+                          marginTop: 3,
+                          borderColor: duplicate || !trimmed ? 'var(--negative)' : undefined,
+                        }}
+                      />
+                    </label>
+                  );
+                })()}
                 {(() => {
                   const terms = nodeTerms(selectedNode.nodeType, selectedNode.params);
                   const auto = isAutoLabel(selectedNode.params);
@@ -459,7 +537,7 @@ export function StructuringStudio({
                     borderRadius: 4,
                     cursor: 'pointer',
                     border: active ? '1px solid var(--accent)' : '1px solid var(--border-strong)',
-                    background: active ? 'rgba(56, 189, 248, 0.22)' : 'var(--surface)',
+                    background: active ? 'var(--accent-bg)' : 'var(--surface)',
                     color: active ? 'var(--accent-soft)' : 'var(--text-muted)',
                     fontWeight: active ? 600 : 400,
                   });
@@ -545,7 +623,13 @@ export function StructuringStudio({
                 })()}
 
                 {Object.entries(selectedNode.params)
-                  .filter(([k, v]) => !LABEL_META_KEYS.includes(k) && !OUTPUT_LINK_KEYS.includes(k) && (typeof v === 'number' || typeof v === 'string'))
+                  .filter(
+                    ([k, v]) =>
+                      !LABEL_META_KEYS.includes(k) &&
+                      !LAYER_META_KEYS.includes(k) &&
+                      !OUTPUT_LINK_KEYS.includes(k) &&
+                      (typeof v === 'number' || typeof v === 'string'),
+                  )
                   .map(([k, v]) => {
                     const meta = NODE_PARAM_META[k];
                     const isRatioPct = Boolean(meta?.isRatioPct);
@@ -714,25 +798,34 @@ export function StructuringStudio({
               fitViewOptions={{ padding: 0.12 }}
               proOptions={{ hideAttribution: true }}
             >
-              <Background color="#232b3a" gap={22} />
+              <Background color="#2a241e" gap={22} />
               <Controls />
             </ReactFlow>
           </div>
 
           {/* Right Rail: CMS Suggestions & Blank-Canvas Node Palette */}
-          <div className="panel" style={{ padding: 10, overflowY: 'auto', maxHeight: 400 }}>
+          <div className="panel" style={{ padding: 10, overflowY: 'auto', maxHeight: 440 }}>
             <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: 'var(--teal)' }}>
               Suggested from CMS
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
               {(templatesQ.data ?? [])
                 .filter((tpl) => tpl.source === 'CMS')
-                .map((tpl) => (
-                  <button key={tpl.templateId} className="palette-item suggested" onClick={() => addTemplateNode(tpl)}>
-                    <span className="palette-cat">{tpl.category}</span>
-                    <span className="palette-label">{tpl.label}</span>
-                  </button>
-                ))}
+                .map((tpl) => {
+                  const isCurrentLayer = tpl.templateId.startsWith(`cms-layer-${selectedProg.programmeId}`);
+                  const onCanvas =
+                    isCurrentLayer &&
+                    Boolean(tpl.layerCode && canvasLayerCodes.has(tpl.layerCode.trim().toLowerCase()));
+                  return (
+                    <button key={tpl.templateId} className="palette-item suggested" onClick={() => addTemplateNode(tpl)}>
+                      <span className="palette-head">
+                        <span className="palette-cat">{tpl.category}</span>
+                        {onCanvas && <span className="canvas-tag">On canvas</span>}
+                      </span>
+                      <span className="palette-label">{tpl.label}</span>
+                    </button>
+                  );
+                })}
             </div>
 
             <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: 'var(--text-muted)' }}>
@@ -783,9 +876,17 @@ export function StructuringStudio({
               const a = adjNodes[idx];
               const deltaPct = u.el > 0 ? ((a.el - u.el) / u.el) * 100 : 0;
               const tvar250 = a.epPoints.find((p) => Math.abs(p.returnPeriod - 250) < 0.1)?.tvar ?? 0;
+              const graphNode = draftGraph.nodes.find((n) => n.nodeId === u.nodeId);
+              const layerCode =
+                graphNode && LAYER_NODE_TYPES.includes(graphNode.nodeType) && typeof graphNode.params.layerCode === 'string'
+                  ? graphNode.params.layerCode.trim()
+                  : '';
               return (
                 <tr key={u.nodeId} onClick={() => setSelectedNodeId(u.nodeId)} style={{ cursor: 'pointer' }}>
-                  <td style={{ fontWeight: u.nodeId === selectedNodeId ? 700 : 400 }}>{u.nodeLabel}</td>
+                  <td style={{ fontWeight: u.nodeId === selectedNodeId ? 700 : 400 }}>
+                    {layerCode && <span className="layer-code-pill" style={{ marginRight: 6 }}>{layerCode}</span>}
+                    {u.nodeLabel}
+                  </td>
                   <td style={{ color: 'var(--text-muted)' }}>{u.nodeType}</td>
                   <td className="num">{fmtMoneyM(u.el, 3)}</td>
                   <td className="num" style={{ fontWeight: 600 }}>{fmtMoneyM(a.el, 3)}</td>

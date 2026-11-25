@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -47,6 +48,41 @@ from app.services.seed_data import _build_eurowind_programme, _build_farmers_pro
 
 
 _OUTPUT_TYPES = (NodeType.PRICING_OUTPUT, NodeType.YELT_OUTPUT, NodeType.EP_OUTPUT)
+_AUTO_LAYER_CODE_RE = re.compile(r"^L(\d+)$", re.IGNORECASE)
+
+
+def _next_layer_code(used_lower: set[str]) -> str:
+    nums = [int(m.group(1)) for code in used_lower if (m := _AUTO_LAYER_CODE_RE.match(code))]
+    n = max(nums, default=0) + 1
+    while f"l{n}" in used_lower:
+        n += 1
+    return f"L{n}"
+
+
+def ensure_layer_codes(graph: GraphSpec, *, strict: bool = True) -> GraphSpec:
+    """Ensure every financial-terms layer node on a programme graph has a unique non-empty layerCode."""
+    layer_nodes = [n for n in graph.nodes if n.node_type in _LAYER_TYPES]
+    used_lower: set[str] = set()
+    missing: list[GraphNodeSpec] = []
+    for node in layer_nodes:
+        raw = node.params.get("layerCode")
+        code = str(raw).strip() if raw is not None else ""
+        if code:
+            key = code.lower()
+            if key in used_lower:
+                if strict:
+                    raise ValueError(f"Duplicate layer identifier '{code}' within this programme")
+                missing.append(node)
+                continue
+            used_lower.add(key)
+            node.params = {**node.params, "layerCode": code}
+        else:
+            missing.append(node)
+    for node in missing:
+        code = _next_layer_code(used_lower)
+        used_lower.add(code.lower())
+        node.params = {**node.params, "layerCode": code}
+    return graph
 
 
 def _layer_node(spec: ContractLayerSpec, node_id: str, written: float, signed: float, position: dict) -> GraphNodeSpec:
@@ -88,6 +124,8 @@ def _layer_node(spec: ContractLayerSpec, node_id: str, written: float, signed: f
         params["brokeragePct"] = spec.brokerage_pct
     if spec.technical_rol is not None:
         params["technicalRol"] = spec.technical_rol
+    if spec.layer_code is not None and spec.layer_code.strip():
+        params["layerCode"] = spec.layer_code.strip()
     params["labelName"] = (spec.name or "").strip() or default_name
     return GraphNodeSpec(
         node_id=node_id,
@@ -182,6 +220,7 @@ def _default_graph_for_contract(c: ContractCreate, prog_id: str) -> GraphSpec:
         edges=edges,
         content_hash="",
     )
+    ensure_layer_codes(graph, strict=True)
     relabel_graph(graph)
     graph.content_hash = canonical_hash({"nodes": [n.model_dump() for n in nodes], "edges": [e.model_dump() for e in edges]})
     return graph
@@ -190,8 +229,16 @@ def _default_graph_for_contract(c: ContractCreate, prog_id: str) -> GraphSpec:
 def add_layer_to_graph(graph: GraphSpec, spec: ContractLayerSpec, written: float, signed: float) -> str:
     """Add a layer wired like its siblings (same inputs), with its own Pricing Output. A YELT fed by
     every existing layer is the programme total, so the new layer joins it too."""
+    ensure_layer_codes(graph, strict=False)
     layers = [n for n in graph.nodes if n.node_type in _LAYER_TYPES]
     layer_ids = {n.node_id for n in layers}
+    used_codes = {str(n.params.get("layerCode") or "").strip().lower() for n in layers}
+    if spec.layer_code is not None and spec.layer_code.strip():
+        code = spec.layer_code.strip()
+        if code.lower() in used_codes:
+            raise ValueError(f"Layer identifier '{code}' already exists on this programme")
+    else:
+        code = _next_layer_code(used_codes)
     if layers:
         inputs = [(e.source, e.sign, e.weight) for e in graph.edges if e.target == layers[0].node_id]
     else:
@@ -206,7 +253,7 @@ def add_layer_to_graph(graph: GraphSpec, spec: ContractLayerSpec, written: float
     x = layers[0].position.get("x", 600) if layers else 600
     y = max((n.position.get("y", 0) for n in layers), default=-120) + 140
     name = spec.name if (spec.name or "").strip() else _ordinal_name(len(layers) + 1, spec.layer_type)
-    layer = _layer_node(spec.model_copy(update={"name": name}), lyr_id, written, signed, {"x": x, "y": y})
+    layer = _layer_node(spec.model_copy(update={"name": name, "layer_code": code}), lyr_id, written, signed, {"x": x, "y": y})
     graph.nodes.append(layer)
     graph.nodes.append(_pricing_node(lyr_id, layer.params["labelName"], {"x": x + 320, "y": y}))
     for src, sign, weight in inputs:
@@ -342,12 +389,29 @@ def graph_layers(
     """Financial-terms nodes of a programme graph presented as contract layers (limits at 100%).
     Each layer carries its own price, lines, brokerage and technical rate; contract values are defaults."""
     out: list[ContractLayer] = []
+    used_codes: set[str] = set()
+    assigned_codes: dict[str, str] = {}
+    for node in graph.nodes:
+        if node.node_type not in _LAYER_TYPES:
+            continue
+        raw = node.params.get("layerCode")
+        code = str(raw).strip() if raw is not None else ""
+        if code and code.lower() not in used_codes:
+            used_codes.add(code.lower())
+            assigned_codes[node.node_id] = code
+    for node in graph.nodes:
+        if node.node_type not in _LAYER_TYPES or node.node_id in assigned_codes:
+            continue
+        code = _next_layer_code(used_codes)
+        used_codes.add(code.lower())
+        assigned_codes[node.node_id] = code
+
     for node in graph.nodes:
         if node.node_type not in _LAYER_TYPES:
             continue
         p = node.params
         limit_key, attach_key = _LAYER_TYPES[node.node_type]
-        editable = ["label", "depositPremium", "authorizedLine", "writtenLine", "signedLine", "brokeragePct", "technicalRol"]
+        editable = ["layerCode", "label", "depositPremium", "authorizedLine", "writtenLine", "signedLine", "brokeragePct", "technicalRol"]
         if node.node_type == NodeType.CASCADING_TOWER:
             subs = p.get("layers", []) or []
             limit = sum(float(l.get("occLimit", 0) or 0) for l in subs) or None
@@ -375,6 +439,7 @@ def graph_layers(
         out.append(
             ContractLayer(
                 node_id=node.node_id,
+                layer_code=assigned_codes[node.node_id],
                 label=node.label,
                 node_type=node.node_type.value,
                 limit=limit,
@@ -413,6 +478,7 @@ def contract_layers(c: ContractFull) -> list[ContractLayer]:
 
 
 def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) -> GraphSpec:
+    ensure_layer_codes(graph, strict=False)
     nodes = {n.node_id: n for n in graph.nodes}
     for u in updates:
         node = nodes.get(u.node_id)
@@ -431,6 +497,11 @@ def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) ->
             if val is not None and not 0.0 <= val <= 5.0:
                 raise ValueError(f"{node.label}: {name} must be between 0% and 500%")
         p = dict(node.params)
+        if u.layer_code is not None:
+            code = u.layer_code.strip()
+            if not code:
+                raise ValueError(f"{node.label}: layer identifier is required")
+            p["layerCode"] = code
         limit_key, attach_key = _LAYER_TYPES[node.node_type]
         if u.label is not None:
             if p.get("autoLabel") is False:
@@ -472,6 +543,7 @@ def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) ->
             p["technicalRol"] = u.technical_rol
         node.params = p
         node.label = smart_label(node.node_type, p, node.label)
+    ensure_layer_codes(graph, strict=True)
     return graph
 
 
@@ -750,6 +822,8 @@ class ContractStore:
             content_hash=canonical_hash([]),
         )
         graph = payload.graph or _default_graph_for_contract(payload, prog_id)
+        if payload.graph is not None:
+            ensure_layer_codes(graph, strict=True)
         chash = canonical_hash({
             "programme_id": prog_id,
             "limit": payload.limit,
@@ -911,6 +985,7 @@ class ContractStore:
             if not rec:
                 return None
             old_graph = GraphSpec(**json.loads(rec.graph_json))
+            ensure_layer_codes(graph, strict=True)
             relabel_graph(graph)
             graph.version = old_graph.version + 1
             graph.content_hash = canonical_hash({
@@ -1164,6 +1239,7 @@ class ContractStore:
             src_uplift.version = 1
 
             src_graph = GraphSpec(**json.loads(src.graph_json))
+            ensure_layer_codes(src_graph, strict=False)
             src_graph.graph_id = f"grp-{new_id}"
             src_graph.version = 1
             src_graph.content_hash = canonical_hash({

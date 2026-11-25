@@ -65,6 +65,7 @@ def _build_farmers_programme(sim_set_id: str) -> ProgrammeDeal:
             node_type=NodeType.OCC_XL,
             label="1st Cat XL — 50m xs 80m (1@100%)",
             params={
+                "layerCode": "L1",
                 "occLimit": 50.0,
                 "occAttachment": 80.0,
                 "occFranchise": 0.0,
@@ -80,6 +81,7 @@ def _build_farmers_programme(sim_set_id: str) -> ProgrammeDeal:
             node_type=NodeType.AGG_XL,
             label="Annual Agg XL — 35m xs 95m",
             params={
+                "layerCode": "L2",
                 "aggLimit": 35.0,
                 "aggAttachment": 95.0,
                 "perEventFranchise": 10.0,
@@ -178,6 +180,7 @@ def _build_pacific_eq_programme(sim_set_id: str) -> ProgrammeDeal:
             node_type=NodeType.OCC_XL,
             label="Pacific EQ — 45m xs 70m (1@100%)",
             params={
+                "layerCode": "L1",
                 "occLimit": 45.0,
                 "occAttachment": 70.0,
                 "occFranchise": 0.0,
@@ -245,6 +248,7 @@ def _build_eurowind_programme(sim_set_id: str) -> ProgrammeDeal:
             node_type=NodeType.OCC_XL,
             label="EuroWind — 30m xs 45m (1@100%)",
             params={
+                "layerCode": "L1",
                 "occLimit": 30.0,
                 "occAttachment": 45.0,
                 "occFranchise": 0.0,

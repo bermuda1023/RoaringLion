@@ -211,7 +211,7 @@ export function PricingOutputPanel({
             {!layerNodeId && <option value="">First layer</option>}
             {(layersQ.data ?? []).map((l) => (
               <option key={l.nodeId} value={l.nodeId}>
-                {l.label}
+                {l.layerCode ? `${l.layerCode} · ` : ''}{l.label}
               </option>
             ))}
           </select>
@@ -230,7 +230,8 @@ export function PricingOutputPanel({
       ) : (
         <>
           <div className="output-muted">
-            {pricing.source === 'LINKED' ? 'Linked' : 'From upstream'}: <b>{pricing.contractCode}</b> · {pricing.layerLabel}
+            {pricing.source === 'LINKED' ? 'Linked' : 'From upstream'}: <b>{pricing.contractCode}</b>
+            {pricing.layerCode ? <> · <b>{pricing.layerCode}</b></> : null} · {pricing.layerLabel}
           </div>
           <div className="econ-grid">
             <Kv k="Limit / Attach (100%)" v={`${fmtMoneyM(pricing.limit, 1)} xs ${fmtMoneyM(pricing.attachment, 1)}`} />

@@ -4,7 +4,29 @@
 
 export const LABEL_SEP = ' — ';
 export const LABEL_META_KEYS = ['autoLabel', 'labelName'];
+export const LAYER_META_KEYS = ['layerCode'];
 export const OUTPUT_LINK_KEYS = ['view', 'contractId', 'layerNodeId', 'linkedLabel'];
+export const LAYER_NODE_TYPES = [
+  'OCC_XL',
+  'AGG_XL',
+  'QUOTA_SHARE',
+  'AGG_QUOTA_SHARE',
+  'SURPLUS_SHARE',
+  'CASCADING_TOWER',
+  'ILW_OPTION',
+];
+
+export function nextLayerCode(existingCodes: (string | null | undefined)[]): string {
+  const used = new Set(existingCodes.map((c) => (c ?? '').trim().toLowerCase()).filter(Boolean));
+  let maxNum = 0;
+  for (const code of used) {
+    const m = /^l(\d+)$/i.exec(code);
+    if (m) maxNum = Math.max(maxNum, Number(m[1]));
+  }
+  let n = maxNum + 1;
+  while (used.has(`l${n}`)) n += 1;
+  return `L${n}`;
+}
 
 type Params = Record<string, unknown>;
 

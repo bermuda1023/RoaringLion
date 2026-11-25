@@ -26,6 +26,7 @@ def _link_from_layer(source: str, contract: ContractFull, layer: ContractLayer) 
         contract_code=contract.profile.unique_code or contract.programme_id,
         contract_name=f"{contract.cedent_name} — {contract.programme_name}",
         layer_node_id=layer.node_id,
+        layer_code=layer.layer_code,
         layer_label=layer.label,
         limit=layer.limit,
         attachment=layer.attachment,

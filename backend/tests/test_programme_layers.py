@@ -163,3 +163,101 @@ def test_each_layer_has_its_own_price_lines_and_brokerage():
 
     bad = client.put(f"/api/contracts/{pid}/layers", json={"layers": [{"nodeId": high["nodeId"], "brokeragePct": 0.95}]})
     assert bad.status_code == 422
+
+
+def test_unique_layer_identifiers_and_structuring_suggestions():
+    # Creating a multi-layer programme assigns unique layer codes within the programme
+    c = _create(
+        "Suggest",
+        [
+            {"name": "Primary", "limit": 25, "attachment": 25, "depositPremium": 6.0},
+            {"layerCode": "CAT-2", "name": "Second", "limit": 50, "attachment": 50, "depositPremium": 8.0},
+        ],
+    )
+    pid = c["programmeId"]
+    layers = client.get(f"/api/contracts/{pid}/layers").json()
+    assert [l["layerCode"] for l in layers] == ["L1", "CAT-2"]
+
+    # Another programme can reuse the same layer codes independently
+    other = _create("Other", [{"layerCode": "CAT-2", "limit": 20, "attachment": 40, "depositPremium": 3.0}])
+    other_layers = client.get(f"/api/contracts/{other['programmeId']}/layers").json()
+    assert [l["layerCode"] for l in other_layers] == ["CAT-2"]
+
+    # Duplicate layerCode on create_contract is rejected
+    dup_create = client.post(
+        "/api/contracts",
+        json={
+            "cedentName": "Dup Re",
+            "programmeName": "Dup Tower",
+            "regionPerils": ["US-FL-WS"],
+            "perils": ["WS"],
+            "layers": [
+                {"layerCode": "L1", "limit": 20, "attachment": 20},
+                {"layerCode": "l1", "limit": 30, "attachment": 40},
+            ],
+        },
+    )
+    assert dup_create.status_code == 422
+
+    # Adding a new layer auto-assigns a unique layerCode and shows up in Structuring Studio suggestions
+    added = client.post(
+        f"/api/contracts/{pid}/layers",
+        json={"name": "Top Agg", "layerType": "AGG_XL", "limit": 40, "attachment": 100, "depositPremium": 5.0},
+    )
+    assert added.status_code == 200, added.text
+    layers = added.json()
+    assert [l["layerCode"] for l in layers] == ["L1", "CAT-2", "L2"]
+    new_layer = layers[2]
+
+    # Duplicate layerCode on POST /layers is rejected (case-insensitive)
+    dup_add = client.post(
+        f"/api/contracts/{pid}/layers",
+        json={"layerCode": "cat-2", "name": "Collision", "limit": 10, "attachment": 150},
+    )
+    assert dup_add.status_code == 422
+
+    # Structuring Studio suggestions include every layer on the programme, including the newly created one
+    tpls = client.get(f"/api/graph-templates?programmeId={pid}").json()
+    cms_layers = [t for t in tpls if t.get("source") == "CMS" and t["templateId"].startswith(f"cms-layer-{pid}-")]
+    assert [t["layerCode"] for t in cms_layers] == ["L1", "CAT-2", "L2"]
+    top_tpl = next(t for t in cms_layers if t["layerCode"] == new_layer["layerCode"])
+    assert top_tpl["nodeType"] == "AGG_XL"
+    assert top_tpl["label"] == new_layer["label"]
+    assert top_tpl["params"]["layerCode"] == "L2"
+    assert top_tpl["params"]["aggLimit"] == 40
+    assert top_tpl["params"]["aggAttachment"] == 100
+
+    # Updating layerCode validates uniqueness and blank values, supports swapping, and updates suggestions
+    assert client.put(
+        f"/api/contracts/{pid}/layers",
+        json={"layers": [{"nodeId": layers[0]["nodeId"], "layerCode": "   "}]},
+    ).status_code == 422
+    assert client.put(
+        f"/api/contracts/{pid}/layers",
+        json={"layers": [{"nodeId": layers[0]["nodeId"], "layerCode": "cat-2"}]},
+    ).status_code == 422
+    swapped = client.put(
+        f"/api/contracts/{pid}/layers",
+        json={
+            "layers": [
+                {"nodeId": layers[0]["nodeId"], "layerCode": "CAT-2"},
+                {"nodeId": layers[1]["nodeId"], "layerCode": "L1"},
+            ]
+        },
+    )
+    assert swapped.status_code == 200, swapped.text
+    assert [l["layerCode"] for l in swapped.json()] == ["CAT-2", "L1", "L2"]
+
+    # Saving a graph with duplicate layerCode via Structuring Studio is rejected with 422
+    graph = client.get(f"/api/contracts/{pid}/dossier").json()["contract"]["graph"]
+    for n in graph["nodes"]:
+        if n["nodeId"] == layers[1]["nodeId"]:
+            n["params"]["layerCode"] = "L2"
+    assert client.put(f"/api/programmes/{pid}/graph", json=graph).status_code == 422
+
+    # Removing the new layer removes it from Structuring Studio suggestions
+    assert client.delete(f"/api/contracts/{pid}/layers/{new_layer['nodeId']}").status_code == 200
+    tpls_after = client.get(f"/api/graph-templates?programmeId={pid}").json()
+    cms_layers_after = [t for t in tpls_after if t.get("source") == "CMS" and t["templateId"].startswith(f"cms-layer-{pid}-")]
+    assert [t["layerCode"] for t in cms_layers_after] == ["CAT-2", "L1"]
+

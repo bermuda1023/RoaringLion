@@ -122,6 +122,7 @@ export interface PricingEconomics {
   contractCode: string;
   contractName: string;
   layerNodeId: string;
+  layerCode?: string;
   layerLabel: string;
   limit?: number | null;
   attachment?: number | null;

@@ -116,6 +116,7 @@ class RenewProgrammeRequest(CamelModel):
 
 class ContractLayer(CamelModel):
     node_id: str
+    layer_code: str = ""
     label: str
     node_type: str
     limit: float | None = None
@@ -141,6 +142,7 @@ class ContractLayer(CamelModel):
 
 class ContractLayerUpdate(CamelModel):
     node_id: str
+    layer_code: str | None = None
     label: str | None = None
     limit: float | None = None
     attachment: float | None = None
@@ -158,6 +160,7 @@ class ContractLayerUpdate(CamelModel):
 class ContractLayerSpec(CamelModel):
     """A new excess-of-loss layer on a programme (amounts in $M at 100%, lines as 0..1)."""
 
+    layer_code: str | None = None
     name: str | None = None
     layer_type: Literal["OCC_XL", "AGG_XL"] = "OCC_XL"
     limit: float = Field(gt=0, allow_inf_nan=False)

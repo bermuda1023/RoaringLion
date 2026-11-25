@@ -36,6 +36,7 @@ class PricingLink:
     signed_line: float
     brokerage_pct: float
     technical_rol: float | None = None
+    layer_code: str = ""
     warnings: list[str] = field(default_factory=list)
 
 
@@ -126,6 +127,7 @@ def compute_pricing_economics(
         contract_code=link.contract_code,
         contract_name=link.contract_name,
         layer_node_id=link.layer_node_id,
+        layer_code=link.layer_code,
         layer_label=link.layer_label,
         limit=link.limit,
         attachment=link.attachment,

@@ -2,10 +2,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { fetchJson } from '../api/client';
 import { fmtMoneyM, fmtNum, fmtRatioPct } from '../utils/format';
-import { composeLabel, nodeTerms } from '../utils/nodeLabels';
+import { composeLabel, nextLayerCode, nodeTerms } from '../utils/nodeLabels';
 
 export interface ContractLayer {
   nodeId: string;
+  layerCode: string;
   label: string;
   nodeType: string;
   limit: number | null;
@@ -30,6 +31,7 @@ export interface ContractLayer {
 }
 
 type Field =
+  | 'layerCode'
   | 'label'
   | 'limit'
   | 'attachment'
@@ -58,6 +60,7 @@ const PCT_FIELDS: Field[] = ['rol', 'technicalRol', 'ripRate', 'brokeragePct', '
 
 function initialText(layer: ContractLayer, field: Field): string {
   const v = layer[field as keyof ContractLayer] as number | string | null;
+  if (field === 'layerCode') return layer.layerCode ?? '';
   if (field === 'label') return layer.autoLabel ? layer.name : layer.label;
   if (v == null) return '';
   if (PCT_FIELDS.includes(field)) return String(Number(((v as number) * 100).toFixed(4)));
@@ -65,6 +68,7 @@ function initialText(layer: ContractLayer, field: Field): string {
 }
 
 interface NewLayerDraft {
+  layerCode: string;
   name: string;
   layerType: 'OCC_XL' | 'AGG_XL';
   limit: string;
@@ -82,6 +86,7 @@ function blankLayer(layers: ContractLayer[]): NewLayerDraft {
     null,
   );
   return {
+    layerCode: nextLayerCode(layers.map((l) => l.layerCode)),
     name: '',
     layerType: 'OCC_XL',
     limit: top?.limit != null ? String(top.limit) : '',
@@ -196,7 +201,19 @@ export function ContractLayersEditor({
   const dirtyIds = Object.keys(draft).filter((id) => Object.keys(draft[id] ?? {}).length > 0);
 
   const problems: string[] = [];
+  const seenLayerCodes = new Map<string, string>();
   for (const layer of layers) {
+    const code = (draft[layer.nodeId]?.layerCode ?? layer.layerCode ?? '').trim();
+    if (!code) {
+      problems.push(`${layer.label}: Layer ID is required`);
+    } else {
+      const key = code.toLowerCase();
+      if (seenLayerCodes.has(key)) {
+        problems.push(`Duplicate Layer ID "${code}" within this programme`);
+      } else {
+        seenLayerCodes.set(key, code);
+      }
+    }
     const l = live(layer);
     for (const [name, v] of [
       ['Authorised line', l.authorized],
@@ -242,6 +259,7 @@ export function ContractLayersEditor({
       const payload = dirtyIds.map((nodeId) => {
         const d = draft[nodeId] ?? {};
         const out: Record<string, unknown> = { nodeId };
+        if (d.layerCode !== undefined) out.layerCode = d.layerCode;
         if (d.label !== undefined) out.label = d.label;
         for (const f of ['limit', 'attachment', 'depositPremium', 'reinstatements'] as const) {
           if (d[f] !== undefined) out[f] = parseNum(d[f]);
@@ -261,14 +279,18 @@ export function ContractLayersEditor({
     },
     onSuccess: (updated) => {
       qc.setQueryData(['contractLayers', programmeId], updated);
+      qc.invalidateQueries({ queryKey: ['graphTemplates'] });
       setDraft({});
-      setSavedMsg('Layers saved. Pricing, portfolio and optimizer now use the updated terms and lines.');
+      setSavedMsg('Layers saved. Pricing, Structuring Studio suggestions, portfolio and optimizer now use the updated terms and lines.');
       onSaved();
     },
   });
 
   const newLayerProblems: string[] = [];
   if (newLayer) {
+    const nlCode = newLayer.layerCode.trim();
+    if (!nlCode) newLayerProblems.push('Layer ID is required');
+    else if (seenLayerCodes.has(nlCode.toLowerCase())) newLayerProblems.push(`Layer ID "${nlCode}" already exists on this programme`);
     const lim = parseNum(newLayer.limit);
     const att = parseNum(newLayer.attachment);
     const w = parseNum(newLayer.writtenLine);
@@ -288,6 +310,7 @@ export function ContractLayersEditor({
       fetchJson<ContractLayer[]>(`/api/contracts/${programmeId}/layers`, {
         method: 'POST',
         body: JSON.stringify({
+          layerCode: nl.layerCode.trim() || undefined,
           name: nl.name.trim() || undefined,
           layerType: nl.layerType,
           limit: parseNum(nl.limit),
@@ -301,9 +324,12 @@ export function ContractLayersEditor({
       }),
     onSuccess: (updated) => {
       qc.setQueryData(['contractLayers', programmeId], updated);
+      qc.invalidateQueries({ queryKey: ['graphTemplates'] });
       const added = updated[updated.length - 1];
       setNewLayer(null);
-      setSavedMsg(`Added ${added?.label ?? 'layer'}. It is wired into the structure with its own pricing output.`);
+      setSavedMsg(
+        `Added ${added?.layerCode ? `${added.layerCode} · ` : ''}${added?.label ?? 'layer'}. It is wired into the structure and listed as a CMS suggestion in Structuring Studio.`,
+      );
       onSaved();
     },
   });
@@ -313,6 +339,7 @@ export function ContractLayersEditor({
       fetchJson<ContractLayer[]>(`/api/contracts/${programmeId}/layers/${encodeURIComponent(nodeId)}`, { method: 'DELETE' }),
     onSuccess: (updated, nodeId) => {
       qc.setQueryData(['contractLayers', programmeId], updated);
+      qc.invalidateQueries({ queryKey: ['graphTemplates'] });
       setDraft(({ [nodeId]: _removed, ...rest }) => rest);
       setSavedMsg('Layer removed. Programme totals and lines updated.');
       onSaved();
@@ -322,13 +349,13 @@ export function ContractLayersEditor({
   const nlField = (key: keyof NewLayerDraft, opts: { width?: number; step?: string; placeholder?: string } = {}) =>
     newLayer && (
       <input
-        type={key === 'name' ? 'text' : 'number'}
+        type={key === 'name' || key === 'layerCode' ? 'text' : 'number'}
         step={opts.step ?? 'any'}
         placeholder={opts.placeholder}
         value={newLayer[key]}
         onChange={(e) => setNewLayer({ ...newLayer, [key]: e.target.value })}
-        className="cell-input changed"
-        style={{ width: opts.width ?? 86, textAlign: key === 'name' ? 'left' : 'right' }}
+        className={`cell-input changed${key === 'layerCode' ? ' mono' : ''}`}
+        style={{ width: opts.width ?? 86, textAlign: key === 'name' || key === 'layerCode' ? 'left' : 'right' }}
       />
     );
 
@@ -338,14 +365,15 @@ export function ContractLayersEditor({
       return <span style={{ color: 'var(--text-faint)' }}>{v === '' ? '—' : opts.suffix ? `${v}${opts.suffix}` : v}</span>;
     }
     const changed = draft[layer.nodeId]?.[field] !== undefined || (field === 'depositPremium' && repricedByRol(layer));
+    const isText = field === 'label' || field === 'layerCode';
     return (
       <input
-        type={field === 'label' ? 'text' : 'number'}
+        type={isText ? 'text' : 'number'}
         step={opts.step ?? 'any'}
         value={text(layer, field)}
         onChange={(e) => setField(layer.nodeId, field, e.target.value)}
-        className={`cell-input ${changed ? 'changed' : ''}`}
-        style={{ width: opts.width ?? 86, textAlign: field === 'label' ? 'left' : 'right' }}
+        className={`cell-input ${changed ? 'changed' : ''}${field === 'layerCode' ? ' mono' : ''}`}
+        style={{ width: opts.width ?? 86, textAlign: isText ? 'left' : 'right' }}
       />
     );
   };
@@ -406,6 +434,7 @@ export function ContractLayersEditor({
           <table>
             <thead>
               <tr>
+                <th title="Unique identifier within this programme">Layer ID</th>
                 <th>Layer name</th>
                 <th>Type</th>
                 <th className="num">Limit</th>
@@ -431,6 +460,7 @@ export function ContractLayersEditor({
                 const l = live(layer);
                 return (
                   <tr key={layer.nodeId}>
+                    <td>{cell(layer, 'layerCode', { width: 84 })}</td>
                     <td>
                       {cell(layer, 'label', { width: 230 })}
                       {layer.autoLabel && l.terms && (
@@ -514,6 +544,7 @@ export function ContractLayersEditor({
                     : null;
                 return (
                   <tr className="new-layer-row">
+                    <td>{nlField('layerCode', { width: 84, placeholder: 'L1' })}</td>
                     <td>
                       {nlField('name', { width: 230, placeholder: 'Layer name (optional)' })}
                       {terms && <div className="layer-label-preview">{composeLabel(newLayer.name.trim() || 'New layer', terms)}</div>}
@@ -559,6 +590,7 @@ export function ContractLayersEditor({
                 );
               })()}
               <tr className="total-row">
+                <td />
                 <td>Total</td>
                 <td />
                 <td className="num">{fmtMoneyM(totals.limit, 1)}</td>
