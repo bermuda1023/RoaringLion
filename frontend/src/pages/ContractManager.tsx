@@ -15,6 +15,9 @@ interface LedgerColumn {
   get: (c: ContractFull) => string | number | null | undefined;
 }
 
+const LAYER_NODE_TYPES = ['OCC_XL', 'AGG_XL', 'QUOTA_SHARE', 'AGG_QUOTA_SHARE', 'SURPLUS_SHARE', 'CASCADING_TOWER', 'ILW_OPTION'];
+const layerCount = (c: ContractFull) => c.graph?.nodes.filter((n) => LAYER_NODE_TYPES.includes(n.nodeType)).length ?? 0;
+
 // Numeric filters are entered in the units shown: percentages as 0–100, money in $M.
 const LEDGER_COLUMNS: LedgerColumn[] = [
   { key: 'code', label: 'Unique Code', kind: 'text', get: (c) => c.profile?.uniqueCode || c.programmeId },
@@ -25,11 +28,30 @@ const LEDGER_COLUMNS: LedgerColumn[] = [
   { key: 'status', label: 'Status', kind: 'select', get: (c) => String(c.status) },
   { key: 'written', label: 'Written', kind: 'num', get: (c) => c.writtenLine * 100 },
   { key: 'signed', label: 'Signed', kind: 'num', get: (c) => c.signedLine * 100 },
+  { key: 'layers', label: 'Layers', kind: 'num', get: (c) => layerCount(c) },
   { key: 'limit', label: 'Limit ($M)', kind: 'num', get: (c) => c.limit },
   { key: 'prem', label: 'Prem ($M)', kind: 'num', get: (c) => c.depositPremium },
   { key: 'rol', label: 'ROL', kind: 'num', get: (c) => c.rol * 100 },
   { key: 'rarc', label: 'RARC', title: 'Risk-Adjusted Rate Change', kind: 'num', get: (c) => c.profile?.rarcTotalPct ?? 0 },
 ];
+
+interface NewDealLayer {
+  name: string;
+  layerType: 'OCC_XL' | 'AGG_XL';
+  limit: number;
+  attachment: number;
+  rolPct: number;
+}
+
+function nextLayer(prev: NewDealLayer): NewDealLayer {
+  return {
+    name: '',
+    layerType: prev.layerType,
+    limit: prev.limit,
+    attachment: prev.attachment + prev.limit,
+    rolPct: Number(Math.max(prev.rolPct * 0.65, 1).toFixed(2)),
+  };
+}
 
 interface RenewalChainRow {
   programmeId: string;
@@ -112,9 +134,9 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   const [showNew, setShowNew] = useState(false);
   const [cedentName, setCedentName] = useState('Coastal Shield Ins');
   const [programmeName, setProgrammeName] = useState('FL Peak Cat XL 2027');
-  const [limit, setLimit] = useState(25);
-  const [attachment, setAttachment] = useState(90);
-  const [rol, setRol] = useState(0.21);
+  const [newLayers, setNewLayers] = useState<NewDealLayer[]>([
+    { name: '', layerType: 'OCC_XL', limit: 25, attachment: 90, rolPct: 21 },
+  ]);
   const [regionPeril, setRegionPeril] = useState('US-FL-WS');
 
   // Selected programme for 360° Programme Profile & Linkage Dossier
@@ -181,6 +203,15 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
     }
   }, [dossierQ.data?.contract?.programmeId, dossierQ.data?.contract?.version]);
 
+  const newDealTotals = {
+    limit: newLayers.reduce((sum, l) => sum + (l.limit || 0), 0),
+    premium: Number(newLayers.reduce((sum, l) => sum + ((l.limit || 0) * (l.rolPct || 0)) / 100, 0).toFixed(4)),
+    attachment: Math.min(...newLayers.map((l) => l.attachment || 0)),
+  };
+  const newDealValid = newLayers.every((l) => l.limit > 0 && l.attachment >= 0 && l.rolPct >= 0) && cedentName.trim() && programmeName.trim();
+  const setNewLayer = (i: number, patch: Partial<NewDealLayer>) =>
+    setNewLayers((ls) => ls.map((l, j) => (j === i ? { ...l, ...patch } : l)));
+
   const createMut = useMutation({
     mutationFn: () =>
       api.createContract({
@@ -193,12 +224,19 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
         broker: 'Broker A',
         status: 'QUOTED',
         direction: 'ASSUMED',
-        structure: 'OCC_XL',
-        limit,
-        attachment,
-        depositPremium: Number((limit * rol).toFixed(3)),
-        rol,
-        collateralRequired: limit,
+        structure: newLayers[0].layerType,
+        limit: newDealTotals.limit,
+        attachment: newDealTotals.attachment,
+        depositPremium: newDealTotals.premium,
+        rol: newDealTotals.limit ? newDealTotals.premium / newDealTotals.limit : 0,
+        collateralRequired: newDealTotals.limit,
+        layers: newLayers.map((l) => ({
+          name: l.name.trim() || undefined,
+          layerType: l.layerType,
+          limit: l.limit,
+          attachment: l.attachment,
+          depositPremium: Number(((l.limit * l.rolPct) / 100).toFixed(4)),
+        })),
         regionPerils: [regionPeril],
         perils: [regionPeril.endsWith('EQ') ? 'EQ' : 'WS'],
       }),
@@ -358,37 +396,66 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               <option value="JP-KANTO-EQ">JP-KANTO-EQ</option>
               <option value="EU-DE-WS">EU-DE-WS</option>
             </select>
-            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-              Limit ($M)
-              <input
-                type="number"
-                value={limit}
-                onChange={(e) => setLimit(Number(e.target.value))}
-                style={{ width: 65, marginLeft: 4 }}
-              />
-            </label>
-            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-              Xs ($M)
-              <input
-                type="number"
-                value={attachment}
-                onChange={(e) => setAttachment(Number(e.target.value))}
-                style={{ width: 65, marginLeft: 4 }}
-              />
-            </label>
-            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-              ROL (%)
-              <input
-                type="number"
-                step="0.5"
-                value={Number((rol * 100).toFixed(2))}
-                onChange={(e) => setRol(Number(e.target.value) / 100)}
-                style={{ width: 65, marginLeft: 4 }}
-              />
-            </label>
-            <button className="btn" onClick={() => createMut.mutate()}>
-              Save Contract
-            </button>
+            <div className="layer-rows">
+              {newLayers.map((l, i) => (
+                <div className="layer-row" key={i}>
+                  <label>
+                    Layer {i + 1}
+                    <input
+                      value={l.name}
+                      placeholder={`${i + 1}${['st', 'nd', 'rd'][i] ?? 'th'} ${l.layerType === 'AGG_XL' ? 'Agg' : 'Cat'} XL`}
+                      onChange={(e) => setNewLayer(i, { name: e.target.value })}
+                      style={{ width: 150 }}
+                    />
+                  </label>
+                  <label>
+                    Type
+                    <select value={l.layerType} onChange={(e) => setNewLayer(i, { layerType: e.target.value as NewDealLayer['layerType'] })}>
+                      <option value="OCC_XL">Occurrence XL</option>
+                      <option value="AGG_XL">Aggregate XL</option>
+                    </select>
+                  </label>
+                  <label>
+                    Limit ($M)
+                    <input type="number" value={l.limit} onChange={(e) => setNewLayer(i, { limit: Number(e.target.value) })} style={{ width: 72 }} />
+                  </label>
+                  <label>
+                    Xs ($M)
+                    <input type="number" value={l.attachment} onChange={(e) => setNewLayer(i, { attachment: Number(e.target.value) })} style={{ width: 72 }} />
+                  </label>
+                  <label>
+                    ROL (%)
+                    <input type="number" step="0.5" value={l.rolPct} onChange={(e) => setNewLayer(i, { rolPct: Number(e.target.value) })} style={{ width: 64 }} />
+                  </label>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)', paddingBottom: 8, minWidth: 92 }}>
+                    Prem {fmtMoneyM((l.limit * l.rolPct) / 100, 2)}
+                  </span>
+                  <button
+                    className="icon-btn"
+                    style={{ marginBottom: 3 }}
+                    title="Remove layer"
+                    aria-label={`Remove layer ${i + 1}`}
+                    disabled={newLayers.length <= 1}
+                    onClick={() => setNewLayers((ls) => ls.filter((_, j) => j !== i))}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <button className="btn btn-ghost" onClick={() => setNewLayers((ls) => [...ls, nextLayer(ls[ls.length - 1])])}>
+                  + Add layer
+                </button>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  {newLayers.length} layer{newLayers.length > 1 ? 's' : ''} · {fmtMoneyM(newDealTotals.limit, 1)} limit ·{' '}
+                  {fmtMoneyM(newDealTotals.premium, 2)} premium ·{' '}
+                  {newDealTotals.limit ? fmtRatioPct(newDealTotals.premium / newDealTotals.limit, 1) : '—'} ROL
+                </span>
+                <button className="btn" style={{ marginLeft: 'auto' }} onClick={() => createMut.mutate()} disabled={!newDealValid || createMut.isPending}>
+                  {createMut.isPending ? 'Saving…' : 'Save Contract'}
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -476,6 +543,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </td>
                     <td className="num">{fmtRatioPct(c.writtenLine, 1)}</td>
                     <td className="num">{fmtRatioPct(c.signedLine, 1)}</td>
+                    <td className="num">{layerCount(c)}</td>
                     <td className="num">{fmtMoneyM(c.limit, 1)}</td>
                     <td className="num">{fmtMoneyM(c.depositPremium, 2)}</td>
                     <td className="num">{fmtRatioPct(c.rol, 2)}</td>

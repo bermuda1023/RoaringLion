@@ -30,6 +30,7 @@ from app.models.phase1 import (
     ContractCreate,
     ContractFull,
     ContractLayer,
+    ContractLayerSpec,
     ContractLayerUpdate,
     ContractNoteCreate,
     ContractNoteOut,
@@ -45,60 +46,125 @@ from app.services.node_labels import label_name, node_terms, relabel_graph, smar
 from app.services.seed_data import _build_eurowind_programme, _build_farmers_programme, _build_pacific_eq_programme
 
 
+_OUTPUT_TYPES = (NodeType.PRICING_OUTPUT, NodeType.YELT_OUTPUT, NodeType.EP_OUTPUT)
+
+
+def _layer_node(spec: ContractLayerSpec, node_id: str, written: float, signed: float, position: dict) -> GraphNodeSpec:
+    signed_line = spec.signed_line if spec.signed_line is not None else signed
+    if spec.written_line is not None:
+        written_line = spec.written_line
+    elif spec.signed_line is not None:
+        written_line = spec.signed_line
+    else:
+        written_line = max(written, signed_line)
+    if spec.layer_type == "AGG_XL":
+        params: dict = {
+            "aggLimit": spec.limit,
+            "aggAttachment": spec.attachment,
+            "perEventFranchise": 0.0,
+            "depositPremium": spec.deposit_premium,
+            "placedShare": signed_line,
+        }
+        if spec.per_event_cap is not None:
+            params["perEventCap"] = spec.per_event_cap
+        node_type, default_name = NodeType.AGG_XL, "Agg XL"
+    else:
+        params = {
+            "occLimit": spec.limit,
+            "occAttachment": spec.attachment,
+            "occFranchise": 0.0,
+            "reinstatements": spec.reinstatements,
+            "ripRate": spec.rip_rate,
+            "depositPremium": spec.deposit_premium,
+            "placedShare": signed_line,
+        }
+        node_type, default_name = NodeType.OCC_XL, "Cat XL"
+    params["writtenLine"] = written_line
+    params["labelName"] = (spec.name or "").strip() or default_name
+    return GraphNodeSpec(
+        node_id=node_id,
+        node_type=node_type,
+        label=smart_label(node_type, params, params["labelName"]),
+        params=params,
+        position=position,
+    )
+
+
+def _pricing_node(layer_id: str, layer_name: str, position: dict) -> GraphNodeSpec:
+    return GraphNodeSpec(
+        node_id=f"px-{layer_id}",
+        node_type=NodeType.PRICING_OUTPUT,
+        label=f"Pricing · {layer_name}",
+        params={},
+        position=position,
+    )
+
+
+def _ordinal_name(i: int, layer_type: str) -> str:
+    suffix = {1: "st", 2: "nd", 3: "rd"}.get(i if i < 20 else i % 10, "th")
+    return f"{i}{suffix} {'Agg' if layer_type == 'AGG_XL' else 'Cat'} XL"
+
+
+def _contract_layer_specs(c: ContractCreate) -> list[ContractLayerSpec]:
+    if c.layers:
+        return [
+            spec if (spec.name or "").strip() else spec.model_copy(update={"name": _ordinal_name(i + 1, spec.layer_type)})
+            for i, spec in enumerate(c.layers)
+        ]
+    return [
+        ContractLayerSpec(
+            name=c.programme_name,
+            layer_type="AGG_XL" if c.structure == StructureType.AGG_XL else "OCC_XL",
+            limit=c.limit,
+            attachment=c.attachment,
+            deposit_premium=c.deposit_premium,
+            written_line=c.written_line,
+            signed_line=c.signed_line,
+        )
+    ]
+
+
 def _default_graph_for_contract(c: ContractCreate, prog_id: str) -> GraphSpec:
+    """Loss source -> zone/peril filter -> one node per layer, each priced, with a programme-total YELT."""
+    src_id, flt_id, out_id = f"src-{prog_id}", f"flt-{prog_id}", f"out-{prog_id}"
     nodes = [
         GraphNodeSpec(
-            node_id=f"src-{prog_id}",
+            node_id=src_id,
             node_type=NodeType.LOSS_SOURCE,
             label=f"Loss Source ({c.sim_set_id})",
             params={"simSetId": c.sim_set_id},
             position={"x": 40, "y": 100},
         ),
         GraphNodeSpec(
-            node_id=f"flt-{prog_id}",
+            node_id=flt_id,
             node_type=NodeType.REGION_PERIL_FILTER,
             label=f"Zone Peril ({', '.join(c.region_perils)})",
             params={"regionPerils": c.region_perils},
             position={"x": 300, "y": 100},
         ),
+    ]
+    edges = [GraphEdgeSpec(edge_id=f"e1-{prog_id}", source=src_id, target=flt_id, sign=1, weight=1.0)]
+    specs = _contract_layer_specs(c)
+    for i, spec in enumerate(specs):
+        lyr_id = f"lyr-{prog_id}" if i == 0 else f"lyr-{prog_id}-{i + 1}"
+        y = 20 + i * 140
+        layer = _layer_node(spec, lyr_id, c.written_line, c.signed_line, {"x": 600, "y": y})
+        nodes.append(layer)
+        nodes.append(_pricing_node(lyr_id, layer.params["labelName"], {"x": 920, "y": y}))
+        edges += [
+            GraphEdgeSpec(edge_id=f"e-in-{lyr_id}", source=flt_id, target=lyr_id, sign=1, weight=1.0),
+            GraphEdgeSpec(edge_id=f"e-px-{lyr_id}", source=lyr_id, target=f"px-{lyr_id}", sign=1, weight=1.0),
+            GraphEdgeSpec(edge_id=f"e-out-{lyr_id}", source=lyr_id, target=out_id, sign=1, weight=1.0),
+        ]
+    nodes.append(
         GraphNodeSpec(
-            node_id=f"lyr-{prog_id}",
-            node_type=NodeType.AGG_XL if c.structure == StructureType.AGG_XL else NodeType.OCC_XL,
-            label=f"{c.programme_name} — {c.limit:g}m xs {c.attachment:g}m",
-            params=(
-                {
-                    "aggLimit": c.limit,
-                    "aggAttachment": c.attachment,
-                    "perEventFranchise": 0.0,
-                    "depositPremium": c.deposit_premium,
-                    "placedShare": c.signed_line,
-                }
-                if c.structure == StructureType.AGG_XL
-                else {
-                    "occLimit": c.limit,
-                    "occAttachment": c.attachment,
-                    "occFranchise": 0.0,
-                    "reinstatements": 1.0,
-                    "ripRate": 1.0,
-                    "depositPremium": c.deposit_premium,
-                    "placedShare": c.signed_line,
-                }
-            ),
-            position={"x": 600, "y": 100},
-        ),
-        GraphNodeSpec(
-            node_id=f"out-{prog_id}",
+            node_id=out_id,
             node_type=NodeType.YELT_OUTPUT,
-            label="YELT Output",
-            params={},
-            position={"x": 920, "y": 100},
-        ),
-    ]
-    edges = [
-        GraphEdgeSpec(edge_id=f"e1-{prog_id}", source=f"src-{prog_id}", target=f"flt-{prog_id}", sign=1, weight=1.0),
-        GraphEdgeSpec(edge_id=f"e2-{prog_id}", source=f"flt-{prog_id}", target=f"lyr-{prog_id}", sign=1, weight=1.0),
-        GraphEdgeSpec(edge_id=f"e3-{prog_id}", source=f"lyr-{prog_id}", target=f"out-{prog_id}", sign=1, weight=1.0),
-    ]
+            label="Programme YELT",
+            params={"view": "ADJUSTED"},
+            position={"x": 1220, "y": 20 + (len(specs) - 1) * 70},
+        )
+    )
     graph = GraphSpec(
         graph_id=f"grp-{prog_id}",
         name=f"{c.cedent_name} — {c.programme_name}",
@@ -111,6 +177,57 @@ def _default_graph_for_contract(c: ContractCreate, prog_id: str) -> GraphSpec:
     relabel_graph(graph)
     graph.content_hash = canonical_hash({"nodes": [n.model_dump() for n in nodes], "edges": [e.model_dump() for e in edges]})
     return graph
+
+
+def add_layer_to_graph(graph: GraphSpec, spec: ContractLayerSpec, written: float, signed: float) -> str:
+    """Add a layer wired like its siblings (same inputs), with its own Pricing Output. A YELT fed by
+    every existing layer is the programme total, so the new layer joins it too."""
+    layers = [n for n in graph.nodes if n.node_type in _LAYER_TYPES]
+    layer_ids = {n.node_id for n in layers}
+    if layers:
+        inputs = [(e.source, e.sign, e.weight) for e in graph.edges if e.target == layers[0].node_id]
+    else:
+        anchor = next(
+            (n for t in (NodeType.REGION_PERIL_FILTER, NodeType.LOSS_SOURCE) for n in graph.nodes if n.node_type == t),
+            None,
+        )
+        if anchor is None:
+            raise ValueError("Add a loss source to the programme's structure before adding layers")
+        inputs = [(anchor.node_id, 1, 1.0)]
+    lyr_id = f"lyr-{uuid.uuid4().hex[:8]}"
+    x = layers[0].position.get("x", 600) if layers else 600
+    y = max((n.position.get("y", 0) for n in layers), default=-120) + 140
+    name = spec.name if (spec.name or "").strip() else _ordinal_name(len(layers) + 1, spec.layer_type)
+    layer = _layer_node(spec.model_copy(update={"name": name}), lyr_id, written, signed, {"x": x, "y": y})
+    graph.nodes.append(layer)
+    graph.nodes.append(_pricing_node(lyr_id, layer.params["labelName"], {"x": x + 320, "y": y}))
+    for src, sign, weight in inputs:
+        graph.edges.append(GraphEdgeSpec(edge_id=f"e-{uuid.uuid4().hex[:8]}", source=src, target=lyr_id, sign=sign, weight=weight))
+    graph.edges.append(GraphEdgeSpec(edge_id=f"e-px-{lyr_id}", source=lyr_id, target=f"px-{lyr_id}", sign=1, weight=1.0))
+    if layer_ids:
+        for out in graph.nodes:
+            if out.node_type != NodeType.YELT_OUTPUT:
+                continue
+            fed_by = {e.source for e in graph.edges if e.target == out.node_id}
+            if fed_by and fed_by == layer_ids:
+                graph.edges.append(GraphEdgeSpec(edge_id=f"e-{uuid.uuid4().hex[:8]}", source=lyr_id, target=out.node_id, sign=1, weight=1.0))
+    return lyr_id
+
+
+def remove_layer_from_graph(graph: GraphSpec, node_id: str) -> None:
+    """Remove a layer and any output nodes left with nothing feeding them."""
+    node = next((n for n in graph.nodes if n.node_id == node_id), None)
+    if node is None or node.node_type not in _LAYER_TYPES:
+        raise KeyError(f"Layer {node_id} not found on this programme")
+    if sum(1 for n in graph.nodes if n.node_type in _LAYER_TYPES) <= 1:
+        raise ValueError("A programme needs at least one layer")
+    fed = {e.target for e in graph.edges if e.source == node_id}
+    graph.nodes = [n for n in graph.nodes if n.node_id != node_id]
+    graph.edges = [e for e in graph.edges if node_id not in (e.source, e.target)]
+    still_fed = {e.target for e in graph.edges}
+    orphans = {n.node_id for n in graph.nodes if n.node_id in fed and n.node_type in _OUTPUT_TYPES and n.node_id not in still_fed}
+    graph.nodes = [n for n in graph.nodes if n.node_id not in orphans]
+    graph.edges = [e for e in graph.edges if e.source not in orphans and e.target not in orphans]
 
 
 def _record_to_full(r: ContractRecord) -> ContractFull:
@@ -613,6 +730,9 @@ class ContractStore:
             version=1,
             content_hash=chash,
         )
+        if payload.layers and payload.graph is None:
+            _roll_up_layers(rec, graph)
+            rec.collateral_required = rec.limit * rec.signed_line
         with get_session() as db:
             db.add(rec)
             db.commit()
@@ -670,14 +790,30 @@ class ContractStore:
             return _record_to_full(rec)
 
     def update_layers(self, programme_id: str, updates: list[ContractLayerUpdate]) -> ContractFull | None:
+        return self._edit_layers(programme_id, lambda graph, rec: apply_layer_updates(graph, updates))
+
+    def add_layer(self, programme_id: str, spec: ContractLayerSpec) -> ContractFull | None:
+        def edit(graph: GraphSpec, rec: ContractRecord) -> GraphSpec:
+            add_layer_to_graph(graph, spec, rec.written_line, rec.signed_line)
+            return graph
+
+        return self._edit_layers(programme_id, edit)
+
+    def remove_layer(self, programme_id: str, node_id: str) -> ContractFull | None:
+        def edit(graph: GraphSpec, rec: ContractRecord) -> GraphSpec:
+            remove_layer_from_graph(graph, node_id)
+            return graph
+
+        return self._edit_layers(programme_id, edit)
+
+    def _edit_layers(self, programme_id: str, edit) -> ContractFull | None:
         from app.engine.slice_runner import validate_dag_acyclic
 
         with get_session() as db:
             rec = db.get(ContractRecord, programme_id)
             if not rec:
                 return None
-            graph = GraphSpec(**json.loads(rec.graph_json))
-            graph = apply_layer_updates(graph, updates)
+            graph = edit(GraphSpec(**json.loads(rec.graph_json)), rec)
             validate_dag_acyclic(graph)
             graph.version += 1
             graph.content_hash = canonical_hash({

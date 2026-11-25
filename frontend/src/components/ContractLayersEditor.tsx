@@ -47,6 +47,34 @@ function initialText(layer: ContractLayer, field: Field): string {
   return String(Number((v as number).toFixed(6)));
 }
 
+interface NewLayerDraft {
+  name: string;
+  layerType: 'OCC_XL' | 'AGG_XL';
+  limit: string;
+  attachment: string;
+  depositPremium: string;
+  reinstatements: string;
+  writtenLine: string;
+  signedLine: string;
+}
+
+function blankLayer(layers: ContractLayer[]): NewLayerDraft {
+  const top = layers.reduce<ContractLayer | null>(
+    (best, l) => (l.limit != null && l.attachment != null && (!best || l.attachment + l.limit > (best.attachment ?? 0) + (best.limit ?? 0)) ? l : best),
+    null,
+  );
+  return {
+    name: '',
+    layerType: 'OCC_XL',
+    limit: top?.limit != null ? String(top.limit) : '',
+    attachment: top?.limit != null && top.attachment != null ? String(top.attachment + top.limit) : '',
+    depositPremium: '',
+    reinstatements: '1',
+    writtenLine: top ? String(Number((top.writtenLine * 100).toFixed(4))) : '100',
+    signedLine: top ? String(Number((top.signedLine * 100).toFixed(4))) : '100',
+  };
+}
+
 function parseNum(text: string | undefined): number | null {
   if (text == null || text.trim() === '') return null;
   const n = Number(text);
@@ -65,6 +93,7 @@ export function ContractLayersEditor({
   const qc = useQueryClient();
   const [draft, setDraft] = useState<Draft>({});
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [newLayer, setNewLayer] = useState<NewLayerDraft | null>(null);
 
   const layersQ = useQuery({
     queryKey: ['contractLayers', programmeId],
@@ -74,6 +103,7 @@ export function ContractLayersEditor({
   useEffect(() => {
     setDraft({});
     setSavedMsg(null);
+    setNewLayer(null);
   }, [programmeId]);
 
   const text = (layer: ContractLayer, field: Field) => draft[layer.nodeId]?.[field] ?? initialText(layer, field);
@@ -176,6 +206,68 @@ export function ContractLayersEditor({
     },
   });
 
+  const newLayerProblems: string[] = [];
+  if (newLayer) {
+    const lim = parseNum(newLayer.limit);
+    const att = parseNum(newLayer.attachment);
+    const w = parseNum(newLayer.writtenLine);
+    const sg = parseNum(newLayer.signedLine);
+    if (lim == null || lim <= 0) newLayerProblems.push('limit must be greater than 0');
+    if (att == null || att < 0) newLayerProblems.push('attachment must be 0 or more');
+    if ((parseNum(newLayer.depositPremium) ?? 0) < 0) newLayerProblems.push('premium must be 0 or more');
+    for (const [label, v] of [['written', w], ['signed', sg]] as const) {
+      if (v == null || v < 0 || v > 100) newLayerProblems.push(`${label} line must be 0–100%`);
+    }
+  }
+
+  const addMut = useMutation({
+    mutationFn: (nl: NewLayerDraft) =>
+      fetchJson<ContractLayer[]>(`/api/contracts/${programmeId}/layers`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: nl.name.trim() || undefined,
+          layerType: nl.layerType,
+          limit: parseNum(nl.limit),
+          attachment: parseNum(nl.attachment),
+          depositPremium: parseNum(nl.depositPremium) ?? 0,
+          reinstatements: nl.layerType === 'OCC_XL' ? parseNum(nl.reinstatements) : undefined,
+          writtenLine: (parseNum(nl.writtenLine) ?? 100) / 100,
+          signedLine: (parseNum(nl.signedLine) ?? 100) / 100,
+        }),
+      }),
+    onSuccess: (updated) => {
+      qc.setQueryData(['contractLayers', programmeId], updated);
+      const added = updated[updated.length - 1];
+      setNewLayer(null);
+      setSavedMsg(`Added ${added?.label ?? 'layer'}. It is wired into the structure with its own pricing output.`);
+      onSaved();
+    },
+  });
+
+  const removeMut = useMutation({
+    mutationFn: (nodeId: string) =>
+      fetchJson<ContractLayer[]>(`/api/contracts/${programmeId}/layers/${encodeURIComponent(nodeId)}`, { method: 'DELETE' }),
+    onSuccess: (updated, nodeId) => {
+      qc.setQueryData(['contractLayers', programmeId], updated);
+      setDraft(({ [nodeId]: _removed, ...rest }) => rest);
+      setSavedMsg('Layer removed. Programme totals and lines updated.');
+      onSaved();
+    },
+  });
+
+  const nlField = (key: keyof NewLayerDraft, opts: { width?: number; step?: string; placeholder?: string } = {}) =>
+    newLayer && (
+      <input
+        type={key === 'name' ? 'text' : 'number'}
+        step={opts.step ?? 'any'}
+        placeholder={opts.placeholder}
+        value={newLayer[key]}
+        onChange={(e) => setNewLayer({ ...newLayer, [key]: e.target.value })}
+        className="cell-input changed"
+        style={{ width: opts.width ?? 86, textAlign: key === 'name' ? 'left' : 'right' }}
+      />
+    );
+
   const cell = (layer: ContractLayer, field: Field, opts: { width?: number; step?: string; suffix?: string } = {}) => {
     if (!layer.editable.includes(field)) {
       const v = initialText(layer, field);
@@ -209,6 +301,13 @@ export function ContractLayersEditor({
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setNewLayer((nl) => (nl ? null : blankLayer(layers)))}
+            disabled={addMut.isPending}
+          >
+            {newLayer ? 'Cancel new layer' : '+ Add layer'}
+          </button>
           {dirtyIds.length > 0 && (
             <button className="btn btn-ghost" onClick={() => setDraft({})} disabled={saveMut.isPending}>
               Discard changes
@@ -225,12 +324,18 @@ export function ContractLayersEditor({
       </div>
 
       {saveMut.isError && <div className="error-banner">{String((saveMut.error as Error).message)}</div>}
+      {(addMut.error || removeMut.error) && (
+        <div className="error-banner">{String(((addMut.error ?? removeMut.error) as Error).message)}</div>
+      )}
       {problems.length > 0 && <div className="error-banner">{problems.join(' · ')}</div>}
       {warnings.length > 0 && <div className="warning-banner">{warnings.join(' · ')}</div>}
+      {newLayer && newLayerProblems.length > 0 && (
+        <div className="warning-banner">New layer: {newLayerProblems.join(' · ')}</div>
+      )}
       {savedMsg && <div className="success-banner">{savedMsg}</div>}
 
-      {layers.length === 0 ? (
-        <div className="empty-cell">This programme has no layers yet. Add financial-terms nodes in the Structuring Studio.</div>
+      {layers.length === 0 && !newLayer ? (
+        <div className="empty-cell">This programme has no layers yet. Use “+ Add layer” or add financial-terms nodes in the Structuring Studio.</div>
       ) : (
         <div className="table-wrap">
           <table>
@@ -248,6 +353,7 @@ export function ContractLayersEditor({
                 <th className="num">Signed %</th>
                 <th className="num">Our Limit</th>
                 <th className="num">Our Premium</th>
+                <th aria-label="Actions" />
               </tr>
             </thead>
             <tbody>
@@ -278,9 +384,77 @@ export function ContractLayersEditor({
                     <td className="num" style={{ fontWeight: 600 }}>
                       {l.ourPremium == null ? '—' : fmtMoneyM(l.ourPremium, 2)}
                     </td>
+                    <td>
+                      <button
+                        className="icon-btn"
+                        title={layers.length > 1 ? `Remove ${layer.label}` : 'A programme needs at least one layer'}
+                        aria-label={`Remove ${layer.label}`}
+                        disabled={layers.length <= 1 || removeMut.isPending}
+                        onClick={() => {
+                          if (window.confirm(`Remove ${layer.label} from this programme? Its pricing output is removed too.`)) {
+                            removeMut.mutate(layer.nodeId);
+                          }
+                        }}
+                      >
+                        ×
+                      </button>
+                    </td>
                   </tr>
                 );
               })}
+              {newLayer && (() => {
+                const lim = parseNum(newLayer.limit);
+                const prem = parseNum(newLayer.depositPremium) ?? 0;
+                const sg = parseNum(newLayer.signedLine);
+                const att = parseNum(newLayer.attachment);
+                const terms =
+                  lim != null && att != null
+                    ? nodeTerms(newLayer.layerType, {
+                        ...(newLayer.layerType === 'OCC_XL'
+                          ? { occLimit: lim, occAttachment: att, reinstatements: parseNum(newLayer.reinstatements), ripRate: 1 }
+                          : { aggLimit: lim, aggAttachment: att }),
+                        placedShare: sg == null ? 1 : sg / 100,
+                      })
+                    : null;
+                return (
+                  <tr className="new-layer-row">
+                    <td>
+                      {nlField('name', { width: 230, placeholder: 'Layer name (optional)' })}
+                      {terms && <div className="layer-label-preview">{composeLabel(newLayer.name.trim() || 'New layer', terms)}</div>}
+                    </td>
+                    <td>
+                      <select
+                        value={newLayer.layerType}
+                        onChange={(e) => setNewLayer({ ...newLayer, layerType: e.target.value as NewLayerDraft['layerType'] })}
+                        className="cell-input changed"
+                      >
+                        <option value="OCC_XL">Occurrence XL</option>
+                        <option value="AGG_XL">Aggregate XL</option>
+                      </select>
+                    </td>
+                    <td className="num">{nlField('limit', { step: '1' })}</td>
+                    <td className="num">{nlField('attachment', { step: '1' })}</td>
+                    <td className="num">{nlField('depositPremium', { step: '0.1', placeholder: '0' })}</td>
+                    <td className="num">{lim ? fmtRatioPct(prem / lim, 2) : '—'}</td>
+                    <td className="num">{newLayer.layerType === 'OCC_XL' ? nlField('reinstatements', { width: 64, step: '1' }) : '—'}</td>
+                    <td className="num" style={{ color: 'var(--text-faint)' }}>{newLayer.layerType === 'OCC_XL' ? '100%' : '—'}</td>
+                    <td className="num">{nlField('writtenLine', { width: 76, step: '0.5' })}</td>
+                    <td className="num">{nlField('signedLine', { width: 76, step: '0.5' })}</td>
+                    <td className="num">{lim != null && sg != null ? fmtMoneyM((lim * sg) / 100, 2) : '—'}</td>
+                    <td className="num">{sg != null ? fmtMoneyM((prem * sg) / 100, 2) : '—'}</td>
+                    <td>
+                      <button
+                        className="btn"
+                        onClick={() => addMut.mutate(newLayer)}
+                        disabled={newLayerProblems.length > 0 || addMut.isPending}
+                        title={newLayerProblems.join(' · ')}
+                      >
+                        {addMut.isPending ? 'Adding…' : 'Add'}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })()}
               <tr className="total-row">
                 <td>Total</td>
                 <td />
@@ -300,6 +474,7 @@ export function ContractLayersEditor({
                 </td>
                 <td className="num">{fmtMoneyM(totals.ourLimit, 2)}</td>
                 <td className="num">{fmtMoneyM(totals.ourPremium, 2)}</td>
+                <td />
               </tr>
             </tbody>
           </table>

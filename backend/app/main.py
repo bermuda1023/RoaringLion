@@ -35,6 +35,7 @@ from app.models.phase1 import (
     ContractCreate,
     ContractFull,
     ContractLayer,
+    ContractLayerSpec,
     ContractLayersUpdateRequest,
     ContractUpdate,
     EltIngestRequest,
@@ -231,6 +232,32 @@ def get_contract_layers(programme_id: str) -> list[ContractLayer]:
 def update_contract_layers(programme_id: str, payload: ContractLayersUpdateRequest) -> list[ContractLayer]:
     try:
         c = CONTRACT_STORE.update_layers(programme_id, payload.layers)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc).strip("'\"")) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not c:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    _sync_memory_aliases()
+    return graph_layers(c.graph, c.written_line, c.signed_line)
+
+
+@app.post("/api/contracts/{programme_id}/layers", response_model=list[ContractLayer])
+def add_contract_layer(programme_id: str, spec: ContractLayerSpec) -> list[ContractLayer]:
+    try:
+        c = CONTRACT_STORE.add_layer(programme_id, spec)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not c:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    _sync_memory_aliases()
+    return graph_layers(c.graph, c.written_line, c.signed_line)
+
+
+@app.delete("/api/contracts/{programme_id}/layers/{node_id}", response_model=list[ContractLayer])
+def remove_contract_layer(programme_id: str, node_id: str) -> list[ContractLayer]:
+    try:
+        c = CONTRACT_STORE.remove_layer(programme_id, node_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc).strip("'\"")) from exc
     except ValueError as exc:

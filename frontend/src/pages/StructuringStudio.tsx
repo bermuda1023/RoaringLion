@@ -691,6 +691,7 @@ export function StructuringStudio({
           {/* Center React Flow Canvas */}
           <div className="studio-canvas">
             <ReactFlow
+              key={selectedProg.programmeId}
               nodes={rfNodes}
               edges={rfEdges}
               onConnect={onConnect}
@@ -710,6 +711,7 @@ export function StructuringStudio({
                 setDirty(true);
               }}
               fitView
+              fitViewOptions={{ padding: 0.12 }}
               proOptions={{ hideAttribution: true }}
             >
               <Background color="#232b3a" gap={22} />

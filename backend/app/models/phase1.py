@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import Field
 
 from .common import CamelModel
 from .domain import GraphSpec, RunManifest, SimSetSummary, UpliftSet
@@ -144,6 +146,21 @@ class ContractLayerUpdate(CamelModel):
     signed_line: float | None = None
 
 
+class ContractLayerSpec(CamelModel):
+    """A new excess-of-loss layer on a programme (amounts in $M at 100%, lines as 0..1)."""
+
+    name: str | None = None
+    layer_type: Literal["OCC_XL", "AGG_XL"] = "OCC_XL"
+    limit: float = Field(gt=0, allow_inf_nan=False)
+    attachment: float = Field(ge=0, allow_inf_nan=False)
+    deposit_premium: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    reinstatements: float | None = Field(default=1.0, ge=0)
+    rip_rate: float = Field(default=1.0, ge=0, le=5)
+    per_event_cap: float | None = Field(default=None, gt=0)
+    written_line: float | None = Field(default=None, ge=0, le=1)
+    signed_line: float | None = Field(default=None, ge=0, le=1)
+
+
 class ContractLayersUpdateRequest(CamelModel):
     layers: list[ContractLayerUpdate]
 
@@ -211,6 +228,7 @@ class ContractCreate(CamelModel):
     graph: GraphSpec | None = None
     ilw_spec: dict[str, Any] | None = None
     profile: ProgrammeProfile | None = None
+    layers: list[ContractLayerSpec] = []
 
 
 class ContractUpdate(CamelModel):
