@@ -122,3 +122,44 @@ def test_add_and_remove_layers():
     assert client.delete(f"/api/contracts/{pid}/layers/nope").status_code == 404
     bad = client.post(f"/api/contracts/{pid}/layers", json={"limit": 0, "attachment": 10})
     assert bad.status_code == 422
+
+
+def test_each_layer_has_its_own_price_lines_and_brokerage():
+    c = _create(
+        "Priced",
+        [
+            {"limit": 20, "attachment": 30, "rol": 0.25, "authorizedLine": 0.5, "writtenLine": 0.4,
+             "signedLine": 0.3, "brokeragePct": 0.15, "technicalRol": 0.2},
+            {"limit": 40, "attachment": 50, "rol": 0.10, "signedLine": 0.1, "brokeragePct": 0.05},
+        ],
+    )
+    pid = c["programmeId"]
+    low, high = client.get(f"/api/contracts/{pid}/layers").json()
+    assert low["depositPremium"] == 5.0 and abs(low["rol"] - 0.25) < 1e-9
+    assert (low["authorizedLine"], low["writtenLine"], low["signedLine"]) == (0.5, 0.4, 0.3)
+    assert low["brokeragePct"] == 0.15 and low["technicalRol"] == 0.2
+    assert abs(low["priceAdequacy"] - 1.25) < 1e-6
+    assert abs(low["ourNetPremium"] - 5.0 * 0.3 * 0.85) < 1e-6
+    assert high["depositPremium"] == 4.0 and high["technicalRol"] is None and high["priceAdequacy"] is None
+    assert "rol" in low["editable"] and "brokeragePct" in low["editable"]
+
+    assert c["depositPremium"] == 9.0
+    assert abs(c["brokeragePct"] - (5.0 * 0.15 + 4.0 * 0.05) / 9.0) < 1e-6
+    assert abs(c["authorizedLine"] - (20 * 0.5 + 40 * 1.0) / 60) < 1e-6
+
+    priced = _adj(pid)[f"px-{low['nodeId']}"]["pricing"]
+    assert priced["brokeragePct"] == 0.15 and priced["technicalRol"] == 0.2
+
+    res = client.put(
+        f"/api/contracts/{pid}/layers",
+        json={"layers": [{"nodeId": high["nodeId"], "rol": 0.125, "technicalRol": 0.1, "brokeragePct": 0.2}]},
+    )
+    assert res.status_code == 200, res.text
+    high = res.json()[1]
+    assert high["depositPremium"] == 5.0 and abs(high["priceAdequacy"] - 1.25) < 1e-6
+    contract = client.get(f"/api/contracts/{pid}/dossier").json()["contract"]
+    assert contract["depositPremium"] == 10.0
+    assert abs(contract["technicalRol"] - (20 * 0.2 + 40 * 0.1) / 60) < 1e-6
+
+    bad = client.put(f"/api/contracts/{pid}/layers", json={"layers": [{"nodeId": high["nodeId"], "brokeragePct": 0.95}]})
+    assert bad.status_code == 422

@@ -79,7 +79,15 @@ def _layer_node(spec: ContractLayerSpec, node_id: str, written: float, signed: f
             "placedShare": signed_line,
         }
         node_type, default_name = NodeType.OCC_XL, "Cat XL"
+    if spec.rol is not None:
+        params["depositPremium"] = round(spec.rol * spec.limit, 6)
     params["writtenLine"] = written_line
+    if spec.authorized_line is not None:
+        params["authorizedLine"] = max(spec.authorized_line, written_line)
+    if spec.brokerage_pct is not None:
+        params["brokeragePct"] = spec.brokerage_pct
+    if spec.technical_rol is not None:
+        params["technicalRol"] = spec.technical_rol
     params["labelName"] = (spec.name or "").strip() or default_name
     return GraphNodeSpec(
         node_id=node_id,
@@ -322,34 +330,48 @@ def _opt_float(v) -> float | None:
     return None if v is None else float(v)
 
 
-def graph_layers(graph: GraphSpec, default_written: float, default_signed: float) -> list[ContractLayer]:
-    """Financial-terms nodes of a programme graph presented as contract layers (limits at 100%)."""
+def graph_layers(
+    graph: GraphSpec,
+    default_written: float,
+    default_signed: float,
+    *,
+    default_authorized: float = 1.0,
+    default_brokerage: float = 0.10,
+    default_technical_rol: float | None = None,
+) -> list[ContractLayer]:
+    """Financial-terms nodes of a programme graph presented as contract layers (limits at 100%).
+    Each layer carries its own price, lines, brokerage and technical rate; contract values are defaults."""
     out: list[ContractLayer] = []
     for node in graph.nodes:
         if node.node_type not in _LAYER_TYPES:
             continue
         p = node.params
         limit_key, attach_key = _LAYER_TYPES[node.node_type]
-        editable = ["label", "depositPremium", "writtenLine", "signedLine"]
+        editable = ["label", "depositPremium", "authorizedLine", "writtenLine", "signedLine", "brokeragePct", "technicalRol"]
         if node.node_type == NodeType.CASCADING_TOWER:
             subs = p.get("layers", []) or []
             limit = sum(float(l.get("occLimit", 0) or 0) for l in subs) or None
             attachment = min((float(l.get("occAttachment", 0) or 0) for l in subs), default=None)
             premium = sum(float(l.get("depositPremium", 0) or 0) for l in subs)
             signed = float(subs[0].get("placedShare", default_signed)) if subs else default_signed
-            editable = ["label", "writtenLine", "signedLine"]
+            editable = [f for f in editable if f != "depositPremium"]
         else:
             limit = _opt_float(p.get(limit_key)) if limit_key else None
             attachment = _opt_float(p.get(attach_key)) if attach_key else None
             premium = float(p.get("depositPremium", 0.0) or 0.0)
             signed = float(p.get("placedShare", default_signed))
             if limit_key:
-                editable.append("limit")
+                editable += ["limit", "rol"]
             if attach_key:
                 editable.append("attachment")
             if node.node_type == NodeType.OCC_XL:
                 editable += ["reinstatements", "ripRate"]
         written = float(p.get("writtenLine", max(default_written, signed)))
+        authorized = float(p.get("authorizedLine", max(default_authorized, written)))
+        brokerage = float(p.get("brokeragePct", default_brokerage))
+        tech = _opt_float(p.get("technicalRol", default_technical_rol))
+        rol = premium / limit if limit else None
+        our_premium = premium * signed
         out.append(
             ContractLayer(
                 node_id=node.node_id,
@@ -358,13 +380,18 @@ def graph_layers(graph: GraphSpec, default_written: float, default_signed: float
                 limit=limit,
                 attachment=attachment,
                 deposit_premium=round(premium, 6),
-                rol=round(premium / limit, 6) if limit else None,
+                rol=round(rol, 6) if rol is not None else None,
                 reinstatements=_opt_float(p.get("reinstatements")) if node.node_type == NodeType.OCC_XL else None,
                 rip_rate=_opt_float(p.get("ripRate")) if node.node_type == NodeType.OCC_XL else None,
+                authorized_line=authorized,
                 written_line=written,
                 signed_line=signed,
                 our_limit=round(limit * signed, 6) if limit else None,
-                our_premium=round(premium * signed, 6),
+                our_premium=round(our_premium, 6),
+                brokerage_pct=brokerage,
+                our_net_premium=round(our_premium * (1 - brokerage), 6),
+                technical_rol=tech,
+                price_adequacy=round(rol / tech, 6) if rol and tech else None,
                 editable=editable,
                 name=label_name(p, node.label),
                 terms=node_terms(node.node_type, p),
@@ -374,15 +401,35 @@ def graph_layers(graph: GraphSpec, default_written: float, default_signed: float
     return out
 
 
+def contract_layers(c: ContractFull) -> list[ContractLayer]:
+    return graph_layers(
+        c.graph,
+        c.written_line,
+        c.signed_line,
+        default_authorized=c.authorized_line,
+        default_brokerage=c.brokerage_pct,
+        default_technical_rol=c.technical_rol,
+    )
+
+
 def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) -> GraphSpec:
     nodes = {n.node_id: n for n in graph.nodes}
     for u in updates:
         node = nodes.get(u.node_id)
         if node is None or node.node_type not in _LAYER_TYPES:
             raise KeyError(f"Layer {u.node_id} not found on this programme")
-        for name, val in (("writtenLine", u.written_line), ("signedLine", u.signed_line)):
+        for name, val in (
+            ("Authorised line", u.authorized_line),
+            ("Written line", u.written_line),
+            ("Signed line", u.signed_line),
+        ):
             if val is not None and not 0.0 <= val <= 1.0:
                 raise ValueError(f"{node.label}: {name} must be between 0% and 100%")
+        if u.brokerage_pct is not None and not 0.0 <= u.brokerage_pct <= 0.9:
+            raise ValueError(f"{node.label}: brokerage must be between 0% and 90%")
+        for name, val in (("ROL", u.rol), ("Technical ROL", u.technical_rol)):
+            if val is not None and not 0.0 <= val <= 5.0:
+                raise ValueError(f"{node.label}: {name} must be between 0% and 500%")
         p = dict(node.params)
         limit_key, attach_key = _LAYER_TYPES[node.node_type]
         if u.label is not None:
@@ -407,31 +454,58 @@ def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) ->
                 if u.deposit_premium < 0:
                     raise ValueError(f"{node.label}: premium must be 0 or more")
                 p["depositPremium"] = u.deposit_premium
+            elif u.rol is not None and limit_key and p.get(limit_key):
+                p["depositPremium"] = round(u.rol * float(p[limit_key]), 6)
             if u.reinstatements is not None and node.node_type == NodeType.OCC_XL:
                 p["reinstatements"] = u.reinstatements
             if u.rip_rate is not None and node.node_type == NodeType.OCC_XL:
                 p["ripRate"] = u.rip_rate
             if u.signed_line is not None:
                 p["placedShare"] = u.signed_line
+        if u.authorized_line is not None:
+            p["authorizedLine"] = u.authorized_line
         if u.written_line is not None:
             p["writtenLine"] = u.written_line
+        if u.brokerage_pct is not None:
+            p["brokeragePct"] = u.brokerage_pct
+        if u.technical_rol is not None:
+            p["technicalRol"] = u.technical_rol
         node.params = p
         node.label = smart_label(node.node_type, p, node.label)
     return graph
 
 
-
 def _roll_up_layers(rec: ContractRecord, graph: GraphSpec) -> None:
-    """Programme totals follow the layers: summed 100% limit/premium, limit-weighted written/signed lines."""
-    layers = [l for l in graph_layers(graph, rec.written_line, rec.signed_line) if l.limit]
+    """Programme totals follow the layers: summed 100% limit/premium, limit-weighted lines and technical
+    rate, premium-weighted brokerage."""
+    layers = [
+        l for l in graph_layers(
+            graph,
+            rec.written_line,
+            rec.signed_line,
+            default_authorized=rec.authorized_line,
+            default_brokerage=rec.brokerage_pct,
+            default_technical_rol=rec.technical_rol,
+        )
+        if l.limit
+    ]
     total_limit = sum(l.limit or 0.0 for l in layers)
     if total_limit <= 0:
         return
+
+    def by_limit(get) -> float:
+        return round(sum((l.limit or 0) * get(l) for l in layers) / total_limit, 6)
+
     rec.limit = round(total_limit, 6)
     rec.deposit_premium = round(sum(l.deposit_premium for l in layers), 6)
     rec.rol = round(rec.deposit_premium / total_limit, 6)
-    rec.written_line = round(sum((l.limit or 0) * l.written_line for l in layers) / total_limit, 6)
-    rec.signed_line = round(sum((l.limit or 0) * l.signed_line for l in layers) / total_limit, 6)
+    rec.authorized_line = by_limit(lambda l: l.authorized_line)
+    rec.written_line = by_limit(lambda l: l.written_line)
+    rec.signed_line = by_limit(lambda l: l.signed_line)
+    if rec.deposit_premium > 0:
+        rec.brokerage_pct = round(sum(l.deposit_premium * l.brokerage_pct for l in layers) / rec.deposit_premium, 6)
+    if all(l.technical_rol is not None for l in layers):
+        rec.technical_rol = by_limit(lambda l: l.technical_rol)
     attachments = [l.attachment for l in layers if l.attachment is not None]
     if attachments:
         rec.attachment = min(attachments)

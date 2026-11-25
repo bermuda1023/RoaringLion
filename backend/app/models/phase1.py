@@ -124,10 +124,15 @@ class ContractLayer(CamelModel):
     rol: float | None = None
     reinstatements: float | None = None
     rip_rate: float | None = None
+    authorized_line: float = 1.0
     written_line: float
     signed_line: float
     our_limit: float | None = None
     our_premium: float = 0.0
+    brokerage_pct: float = 0.10
+    our_net_premium: float = 0.0
+    technical_rol: float | None = None
+    price_adequacy: float | None = None
     editable: list[str] = []
     name: str = ""
     terms: str | None = None
@@ -142,8 +147,12 @@ class ContractLayerUpdate(CamelModel):
     deposit_premium: float | None = None
     reinstatements: float | None = None
     rip_rate: float | None = None
+    rol: float | None = None
+    authorized_line: float | None = None
     written_line: float | None = None
     signed_line: float | None = None
+    brokerage_pct: float | None = None
+    technical_rol: float | None = None
 
 
 class ContractLayerSpec(CamelModel):
@@ -154,11 +163,15 @@ class ContractLayerSpec(CamelModel):
     limit: float = Field(gt=0, allow_inf_nan=False)
     attachment: float = Field(ge=0, allow_inf_nan=False)
     deposit_premium: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    rol: float | None = Field(default=None, ge=0, le=5, description="Rate on line; sets the premium when given")
     reinstatements: float | None = Field(default=1.0, ge=0)
     rip_rate: float = Field(default=1.0, ge=0, le=5)
     per_event_cap: float | None = Field(default=None, gt=0)
+    authorized_line: float | None = Field(default=None, ge=0, le=1)
     written_line: float | None = Field(default=None, ge=0, le=1)
     signed_line: float | None = Field(default=None, ge=0, le=1)
+    brokerage_pct: float | None = Field(default=None, ge=0, le=0.9)
+    technical_rol: float | None = Field(default=None, ge=0, le=5)
 
 
 class ContractLayersUpdateRequest(CamelModel):

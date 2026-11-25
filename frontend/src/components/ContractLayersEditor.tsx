@@ -14,17 +14,34 @@ export interface ContractLayer {
   rol: number | null;
   reinstatements: number | null;
   ripRate: number | null;
+  authorizedLine: number;
   writtenLine: number;
   signedLine: number;
   ourLimit: number | null;
   ourPremium: number;
+  brokeragePct: number;
+  ourNetPremium: number;
+  technicalRol: number | null;
+  priceAdequacy: number | null;
   editable: string[];
   name: string;
   terms: string | null;
   autoLabel: boolean;
 }
 
-type Field = 'label' | 'limit' | 'attachment' | 'depositPremium' | 'reinstatements' | 'ripRate' | 'writtenLine' | 'signedLine';
+type Field =
+  | 'label'
+  | 'limit'
+  | 'attachment'
+  | 'depositPremium'
+  | 'rol'
+  | 'technicalRol'
+  | 'reinstatements'
+  | 'ripRate'
+  | 'brokeragePct'
+  | 'authorizedLine'
+  | 'writtenLine'
+  | 'signedLine';
 type Draft = Record<string, Partial<Record<Field, string>>>;
 
 const TYPE_LABEL: Record<string, string> = {
@@ -37,7 +54,7 @@ const TYPE_LABEL: Record<string, string> = {
   ILW_OPTION: 'ILW',
 };
 
-const PCT_FIELDS: Field[] = ['writtenLine', 'signedLine', 'ripRate'];
+const PCT_FIELDS: Field[] = ['rol', 'technicalRol', 'ripRate', 'brokeragePct', 'authorizedLine', 'writtenLine', 'signedLine'];
 
 function initialText(layer: ContractLayer, field: Field): string {
   const v = layer[field as keyof ContractLayer] as number | string | null;
@@ -54,6 +71,7 @@ interface NewLayerDraft {
   attachment: string;
   depositPremium: string;
   reinstatements: string;
+  brokeragePct: string;
   writtenLine: string;
   signedLine: string;
 }
@@ -70,6 +88,7 @@ function blankLayer(layers: ContractLayer[]): NewLayerDraft {
     attachment: top?.limit != null && top.attachment != null ? String(top.attachment + top.limit) : '',
     depositPremium: '',
     reinstatements: '1',
+    brokeragePct: top ? String(Number((top.brokeragePct * 100).toFixed(4))) : '10',
     writtenLine: top ? String(Number((top.writtenLine * 100).toFixed(4))) : '100',
     signedLine: top ? String(Number((top.signedLine * 100).toFixed(4))) : '100',
   };
@@ -106,10 +125,19 @@ export function ContractLayersEditor({
     setNewLayer(null);
   }, [programmeId]);
 
-  const text = (layer: ContractLayer, field: Field) => draft[layer.nodeId]?.[field] ?? initialText(layer, field);
+  const repricedByRol = (layer: ContractLayer) => draft[layer.nodeId]?.rol !== undefined;
+  const text = (layer: ContractLayer, field: Field) => {
+    if (field === 'depositPremium' && repricedByRol(layer)) return String(Number(live(layer).premium.toFixed(4)));
+    return draft[layer.nodeId]?.[field] ?? initialText(layer, field);
+  };
   const setField = (nodeId: string, field: Field, value: string) => {
     setSavedMsg(null);
-    setDraft((d) => ({ ...d, [nodeId]: { ...d[nodeId], [field]: value } }));
+    setDraft((d) => {
+      const next = { ...d[nodeId], [field]: value };
+      if (field === 'rol') delete next.depositPremium;
+      if (field === 'depositPremium') delete next.rol;
+      return { ...d, [nodeId]: next };
+    });
   };
 
   const live = (layer: ContractLayer) => {
@@ -118,7 +146,20 @@ export function ContractLayersEditor({
       return t === undefined ? fallback : parseNum(t);
     };
     const limit = layer.editable.includes('limit') ? num('limit', layer.limit) : layer.limit;
-    const premium = layer.editable.includes('depositPremium') ? num('depositPremium', layer.depositPremium) ?? 0 : layer.depositPremium;
+    const rolDraft = draft[layer.nodeId]?.rol;
+    const premium =
+      rolDraft !== undefined && limit != null
+        ? ((parseNum(rolDraft) ?? 0) / 100) * limit
+        : layer.editable.includes('depositPremium')
+          ? num('depositPremium', layer.depositPremium) ?? 0
+          : layer.depositPremium;
+    const pct = (f: Field, base: number | null) => {
+      const v = num(f, base == null ? null : base * 100);
+      return v == null ? null : v / 100;
+    };
+    const authorized = pct('authorizedLine', layer.authorizedLine);
+    const brokerage = pct('brokeragePct', layer.brokeragePct) ?? 0;
+    const tech = pct('technicalRol', layer.technicalRol);
     const writtenPct = num('writtenLine', layer.writtenLine * 100);
     const signedPct = num('signedLine', layer.signedLine * 100);
     const written = writtenPct == null ? null : writtenPct / 100;
@@ -132,15 +173,22 @@ export function ContractLayersEditor({
       ILW_OPTION: { limit, trigger: att, placedShare: signed },
     };
     const terms = liveParams[layer.nodeType] ? nodeTerms(layer.nodeType, liveParams[layer.nodeType]) ?? layer.terms : layer.terms;
+    const rol = limit ? premium / limit : null;
+    const ourPremium = signed != null ? premium * signed : null;
     return {
       terms,
       limit,
       premium,
+      authorized,
       written,
       signed,
-      rol: limit ? premium / limit : null,
+      brokerage,
+      tech,
+      rol,
+      adequacy: rol != null && tech ? rol / tech : null,
       ourLimit: limit != null && signed != null ? limit * signed : null,
-      ourPremium: signed != null ? premium * signed : null,
+      ourPremium,
+      ourNet: ourPremium != null ? ourPremium * (1 - brokerage) : null,
     };
   };
 
@@ -151,18 +199,25 @@ export function ContractLayersEditor({
   for (const layer of layers) {
     const l = live(layer);
     for (const [name, v] of [
+      ['Authorised line', l.authorized],
       ['Written line', l.written],
       ['Signed line', l.signed],
     ] as const) {
       if (v == null) problems.push(`${layer.label}: ${name} is required`);
       else if (v < 0 || v > 1) problems.push(`${layer.label}: ${name} must be between 0% and 100%`);
     }
+    if (l.brokerage < 0 || l.brokerage > 0.9) problems.push(`${layer.label}: brokerage must be between 0% and 90%`);
+    if (l.rol != null && (l.rol < 0 || l.rol > 5)) problems.push(`${layer.label}: ROL must be between 0% and 500%`);
     if (layer.editable.includes('limit') && (l.limit == null || l.limit <= 0)) problems.push(`${layer.label}: limit must be greater than 0`);
   }
-  const warnings = layers
-    .map((layer) => ({ layer, l: live(layer) }))
-    .filter(({ l }) => l.written != null && l.signed != null && l.signed > l.written + 1e-9)
-    .map(({ layer }) => `${layer.label}: signed line is above written line`);
+  const warnings: string[] = [];
+  for (const layer of layers) {
+    const l = live(layer);
+    if (l.written != null && l.signed != null && l.signed > l.written + 1e-9) warnings.push(`${layer.label}: signed line is above written line`);
+    if (l.authorized != null && l.written != null && l.written > l.authorized + 1e-9)
+      warnings.push(`${layer.label}: written line is above authorised line`);
+    if (l.adequacy != null && l.adequacy < 1) warnings.push(`${layer.label}: priced below technical ROL`);
+  }
 
   const totals = layers.reduce(
     (acc, layer) => {
@@ -171,9 +226,15 @@ export function ContractLayersEditor({
       acc.premium += l.premium;
       acc.ourLimit += l.ourLimit ?? 0;
       acc.ourPremium += l.ourPremium ?? 0;
+      acc.ourNet += l.ourNet ?? 0;
+      acc.brokerage += l.premium * l.brokerage;
+      acc.authorized += (l.limit ?? 0) * (l.authorized ?? 0);
+      acc.written += (l.limit ?? 0) * (l.written ?? 0);
+      if (l.tech == null) acc.techComplete = false;
+      else acc.tech += (l.limit ?? 0) * l.tech;
       return acc;
     },
-    { limit: 0, premium: 0, ourLimit: 0, ourPremium: 0 },
+    { limit: 0, premium: 0, ourLimit: 0, ourPremium: 0, ourNet: 0, brokerage: 0, authorized: 0, written: 0, tech: 0, techComplete: layers.length > 0 },
   );
 
   const saveMut = useMutation({
@@ -215,6 +276,8 @@ export function ContractLayersEditor({
     if (lim == null || lim <= 0) newLayerProblems.push('limit must be greater than 0');
     if (att == null || att < 0) newLayerProblems.push('attachment must be 0 or more');
     if ((parseNum(newLayer.depositPremium) ?? 0) < 0) newLayerProblems.push('premium must be 0 or more');
+    const b = parseNum(newLayer.brokeragePct) ?? 10;
+    if (b < 0 || b > 90) newLayerProblems.push('brokerage must be 0–90%');
     for (const [label, v] of [['written', w], ['signed', sg]] as const) {
       if (v == null || v < 0 || v > 100) newLayerProblems.push(`${label} line must be 0–100%`);
     }
@@ -231,6 +294,7 @@ export function ContractLayersEditor({
           attachment: parseNum(nl.attachment),
           depositPremium: parseNum(nl.depositPremium) ?? 0,
           reinstatements: nl.layerType === 'OCC_XL' ? parseNum(nl.reinstatements) : undefined,
+          brokeragePct: (parseNum(nl.brokeragePct) ?? 10) / 100,
           writtenLine: (parseNum(nl.writtenLine) ?? 100) / 100,
           signedLine: (parseNum(nl.signedLine) ?? 100) / 100,
         }),
@@ -273,7 +337,7 @@ export function ContractLayersEditor({
       const v = initialText(layer, field);
       return <span style={{ color: 'var(--text-faint)' }}>{v === '' ? '—' : opts.suffix ? `${v}${opts.suffix}` : v}</span>;
     }
-    const changed = draft[layer.nodeId]?.[field] !== undefined;
+    const changed = draft[layer.nodeId]?.[field] !== undefined || (field === 'depositPremium' && repricedByRol(layer));
     return (
       <input
         type={field === 'label' ? 'text' : 'number'}
@@ -297,7 +361,8 @@ export function ContractLayersEditor({
             Layer Terms &amp; Lines
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            Limits, attachments and premiums at 100% ({currency} M). Lines in %. Our share = 100% amount × signed line.
+            Each layer has its own price, brokerage and lines. Limits, attachments and premiums at 100% ({currency} M); edit
+            premium or ROL. Our share = 100% amount × signed line.
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -346,13 +411,18 @@ export function ContractLayersEditor({
                 <th className="num">Limit</th>
                 <th className="num">Attachment</th>
                 <th className="num">Premium (100%)</th>
-                <th className="num">ROL</th>
+                <th className="num">ROL %</th>
+                <th className="num" title="Technical (modelled) rate on line">Tech ROL %</th>
+                <th className="num" title="ROL ÷ technical ROL">Adequacy</th>
                 <th className="num">Reinst.</th>
                 <th className="num">RIP %</th>
+                <th className="num">Brokerage %</th>
+                <th className="num" title="Authorised line">Auth. %</th>
                 <th className="num">Written %</th>
                 <th className="num">Signed %</th>
                 <th className="num">Our Limit</th>
                 <th className="num">Our Premium</th>
+                <th className="num" title="Our premium net of brokerage">Our Net Prem.</th>
                 <th aria-label="Actions" />
               </tr>
             </thead>
@@ -373,9 +443,34 @@ export function ContractLayersEditor({
                     <td className="num">{cell(layer, 'limit', { step: '1' })}</td>
                     <td className="num">{cell(layer, 'attachment', { step: '1' })}</td>
                     <td className="num">{cell(layer, 'depositPremium', { step: '0.1' })}</td>
-                    <td className="num">{l.rol == null ? '—' : fmtRatioPct(l.rol, 2)}</td>
+                    <td className="num">
+                      {layer.editable.includes('rol') ? (
+                        <input
+                          type="number"
+                          step="0.25"
+                          value={draft[layer.nodeId]?.rol ?? (l.rol == null ? '' : String(Number((l.rol * 100).toFixed(4))))}
+                          onChange={(e) => setField(layer.nodeId, 'rol', e.target.value)}
+                          className={`cell-input ${draft[layer.nodeId]?.rol !== undefined ? 'changed' : ''}`}
+                          style={{ width: 72, textAlign: 'right' }}
+                          title="Edit ROL to reprice the layer; premium follows"
+                        />
+                      ) : l.rol == null ? (
+                        '—'
+                      ) : (
+                        fmtRatioPct(l.rol, 2)
+                      )}
+                    </td>
+                    <td className="num">{cell(layer, 'technicalRol', { width: 72, step: '0.25' })}</td>
+                    <td
+                      className="num"
+                      style={{ color: l.adequacy == null ? undefined : l.adequacy >= 1 ? 'var(--positive)' : 'var(--negative)', fontWeight: 600 }}
+                    >
+                      {l.adequacy == null ? '—' : fmtRatioPct(l.adequacy, 0)}
+                    </td>
                     <td className="num">{cell(layer, 'reinstatements', { width: 64, step: '1' })}</td>
                     <td className="num">{cell(layer, 'ripRate', { width: 72, step: '5', suffix: '%' })}</td>
+                    <td className="num">{cell(layer, 'brokeragePct', { width: 72, step: '0.5' })}</td>
+                    <td className="num">{cell(layer, 'authorizedLine', { width: 72, step: '0.5' })}</td>
                     <td className="num">{cell(layer, 'writtenLine', { width: 76, step: '0.5' })}</td>
                     <td className="num">{cell(layer, 'signedLine', { width: 76, step: '0.5' })}</td>
                     <td className="num" style={{ fontWeight: 600 }}>
@@ -384,6 +479,7 @@ export function ContractLayersEditor({
                     <td className="num" style={{ fontWeight: 600 }}>
                       {l.ourPremium == null ? '—' : fmtMoneyM(l.ourPremium, 2)}
                     </td>
+                    <td className="num">{l.ourNet == null ? '—' : fmtMoneyM(l.ourNet, 2)}</td>
                     <td>
                       <button
                         className="icon-btn"
@@ -436,12 +532,19 @@ export function ContractLayersEditor({
                     <td className="num">{nlField('attachment', { step: '1' })}</td>
                     <td className="num">{nlField('depositPremium', { step: '0.1', placeholder: '0' })}</td>
                     <td className="num">{lim ? fmtRatioPct(prem / lim, 2) : '—'}</td>
+                    <td className="num" style={{ color: 'var(--text-faint)' }}>—</td>
+                    <td className="num" style={{ color: 'var(--text-faint)' }}>—</td>
                     <td className="num">{newLayer.layerType === 'OCC_XL' ? nlField('reinstatements', { width: 64, step: '1' }) : '—'}</td>
                     <td className="num" style={{ color: 'var(--text-faint)' }}>{newLayer.layerType === 'OCC_XL' ? '100%' : '—'}</td>
+                    <td className="num">{nlField('brokeragePct', { width: 72, step: '0.5' })}</td>
+                    <td className="num" style={{ color: 'var(--text-faint)' }}>100%</td>
                     <td className="num">{nlField('writtenLine', { width: 76, step: '0.5' })}</td>
                     <td className="num">{nlField('signedLine', { width: 76, step: '0.5' })}</td>
                     <td className="num">{lim != null && sg != null ? fmtMoneyM((lim * sg) / 100, 2) : '—'}</td>
                     <td className="num">{sg != null ? fmtMoneyM((prem * sg) / 100, 2) : '—'}</td>
+                    <td className="num">
+                      {sg != null ? fmtMoneyM(((prem * sg) / 100) * (1 - (parseNum(newLayer.brokeragePct) ?? 10) / 100), 2) : '—'}
+                    </td>
                     <td>
                       <button
                         className="btn"
@@ -462,18 +565,29 @@ export function ContractLayersEditor({
                 <td />
                 <td className="num">{fmtMoneyM(totals.premium, 2)}</td>
                 <td className="num">{totals.limit ? fmtRatioPct(totals.premium / totals.limit, 2) : '—'}</td>
+                <td className="num" style={{ color: 'var(--text-muted)' }}>
+                  {totals.limit && totals.techComplete ? fmtRatioPct(totals.tech / totals.limit, 2) : '—'}
+                </td>
+                <td className="num" style={{ color: 'var(--text-muted)' }}>
+                  {totals.limit && totals.techComplete && totals.tech ? fmtRatioPct(totals.premium / totals.tech, 0) : '—'}
+                </td>
                 <td />
                 <td />
                 <td className="num" style={{ color: 'var(--text-muted)' }}>
-                  {totals.limit
-                    ? fmtNum(layers.reduce((s, x) => s + (live(x).limit ?? 0) * (live(x).written ?? 0), 0) / totals.limit * 100, 1) + '%'
-                    : '—'}
+                  {totals.premium ? fmtNum((totals.brokerage / totals.premium) * 100, 1) + '%' : '—'}
+                </td>
+                <td className="num" style={{ color: 'var(--text-muted)' }}>
+                  {totals.limit ? fmtNum((totals.authorized / totals.limit) * 100, 1) + '%' : '—'}
+                </td>
+                <td className="num" style={{ color: 'var(--text-muted)' }}>
+                  {totals.limit ? fmtNum((totals.written / totals.limit) * 100, 1) + '%' : '—'}
                 </td>
                 <td className="num" style={{ color: 'var(--text-muted)' }}>
                   {totals.limit ? fmtNum((totals.ourLimit / totals.limit) * 100, 1) + '%' : '—'}
                 </td>
                 <td className="num">{fmtMoneyM(totals.ourLimit, 2)}</td>
                 <td className="num">{fmtMoneyM(totals.ourPremium, 2)}</td>
+                <td className="num">{fmtMoneyM(totals.ourNet, 2)}</td>
                 <td />
               </tr>
             </tbody>
@@ -481,7 +595,7 @@ export function ContractLayersEditor({
         </div>
       )}
       <div style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 8 }}>
-        Programme-level written and signed lines are the limit-weighted average of the layers. Saving creates a new version of the
+        Programme totals roll up from the layers: lines and technical ROL are limit-weighted, brokerage is premium-weighted. Saving creates a new version of the
         programme's structure.
       </div>
     </div>

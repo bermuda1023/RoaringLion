@@ -46,7 +46,7 @@ from app.models.phase1 import (
     StaleManifestInfo,
     YeltFromNodeRequest,
 )
-from app.services.contracts import ContractStore, contract_to_programme_deal, graph_layers
+from app.services.contracts import ContractStore, contract_layers, contract_to_programme_deal
 from app.services.lineage import LineageRegistry
 from app.services.node_outputs import node_yelt_table, resolve_pricing_links, yelt_export_bytes, yelt_summary
 from app.services.sim_sets import SimSetStore
@@ -225,7 +225,7 @@ def get_contract_layers(programme_id: str) -> list[ContractLayer]:
     c = CONTRACT_STORE.get_contract(programme_id)
     if not c:
         raise HTTPException(status_code=404, detail="Contract not found")
-    return graph_layers(c.graph, c.written_line, c.signed_line)
+    return contract_layers(c)
 
 
 @app.put("/api/contracts/{programme_id}/layers", response_model=list[ContractLayer])
@@ -239,7 +239,7 @@ def update_contract_layers(programme_id: str, payload: ContractLayersUpdateReque
     if not c:
         raise HTTPException(status_code=404, detail="Contract not found")
     _sync_memory_aliases()
-    return graph_layers(c.graph, c.written_line, c.signed_line)
+    return contract_layers(c)
 
 
 @app.post("/api/contracts/{programme_id}/layers", response_model=list[ContractLayer])
@@ -251,7 +251,7 @@ def add_contract_layer(programme_id: str, spec: ContractLayerSpec) -> list[Contr
     if not c:
         raise HTTPException(status_code=404, detail="Contract not found")
     _sync_memory_aliases()
-    return graph_layers(c.graph, c.written_line, c.signed_line)
+    return contract_layers(c)
 
 
 @app.delete("/api/contracts/{programme_id}/layers/{node_id}", response_model=list[ContractLayer])
@@ -265,7 +265,7 @@ def remove_contract_layer(programme_id: str, node_id: str) -> list[ContractLayer
     if not c:
         raise HTTPException(status_code=404, detail="Contract not found")
     _sync_memory_aliases()
-    return graph_layers(c.graph, c.written_line, c.signed_line)
+    return contract_layers(c)
 
 
 @app.get("/api/programmes", response_model=list[ProgrammeDeal])

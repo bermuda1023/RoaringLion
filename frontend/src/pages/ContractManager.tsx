@@ -41,6 +41,9 @@ interface NewDealLayer {
   limit: number;
   attachment: number;
   rolPct: number;
+  brokeragePct: number;
+  writtenPct: number;
+  signedPct: number;
 }
 
 function nextLayer(prev: NewDealLayer): NewDealLayer {
@@ -50,6 +53,9 @@ function nextLayer(prev: NewDealLayer): NewDealLayer {
     limit: prev.limit,
     attachment: prev.attachment + prev.limit,
     rolPct: Number(Math.max(prev.rolPct * 0.65, 1).toFixed(2)),
+    brokeragePct: prev.brokeragePct,
+    writtenPct: prev.writtenPct,
+    signedPct: prev.signedPct,
   };
 }
 
@@ -135,7 +141,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   const [cedentName, setCedentName] = useState('Coastal Shield Ins');
   const [programmeName, setProgrammeName] = useState('FL Peak Cat XL 2027');
   const [newLayers, setNewLayers] = useState<NewDealLayer[]>([
-    { name: '', layerType: 'OCC_XL', limit: 25, attachment: 90, rolPct: 21 },
+    { name: '', layerType: 'OCC_XL', limit: 25, attachment: 90, rolPct: 21, brokeragePct: 10, writtenPct: 15, signedPct: 10 },
   ]);
   const [regionPeril, setRegionPeril] = useState('US-FL-WS');
 
@@ -208,7 +214,13 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
     premium: Number(newLayers.reduce((sum, l) => sum + ((l.limit || 0) * (l.rolPct || 0)) / 100, 0).toFixed(4)),
     attachment: Math.min(...newLayers.map((l) => l.attachment || 0)),
   };
-  const newDealValid = newLayers.every((l) => l.limit > 0 && l.attachment >= 0 && l.rolPct >= 0) && cedentName.trim() && programmeName.trim();
+  const pctOk = (v: number, max = 100) => Number.isFinite(v) && v >= 0 && v <= max;
+  const newDealValid =
+    newLayers.every(
+      (l) => l.limit > 0 && l.attachment >= 0 && l.rolPct >= 0 && pctOk(l.brokeragePct, 90) && pctOk(l.writtenPct) && pctOk(l.signedPct),
+    ) &&
+    cedentName.trim() &&
+    programmeName.trim();
   const setNewLayer = (i: number, patch: Partial<NewDealLayer>) =>
     setNewLayers((ls) => ls.map((l, j) => (j === i ? { ...l, ...patch } : l)));
 
@@ -236,6 +248,9 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
           limit: l.limit,
           attachment: l.attachment,
           depositPremium: Number(((l.limit * l.rolPct) / 100).toFixed(4)),
+          brokeragePct: l.brokeragePct / 100,
+          writtenLine: l.writtenPct / 100,
+          signedLine: l.signedPct / 100,
         })),
         regionPerils: [regionPeril],
         perils: [regionPeril.endsWith('EQ') ? 'EQ' : 'WS'],
@@ -427,8 +442,23 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     ROL (%)
                     <input type="number" step="0.5" value={l.rolPct} onChange={(e) => setNewLayer(i, { rolPct: Number(e.target.value) })} style={{ width: 64 }} />
                   </label>
-                  <span style={{ fontSize: 11, color: 'var(--text-muted)', paddingBottom: 8, minWidth: 92 }}>
+                  <label>
+                    Brokerage (%)
+                    <input type="number" step="0.5" value={l.brokeragePct} onChange={(e) => setNewLayer(i, { brokeragePct: Number(e.target.value) })} style={{ width: 64 }} />
+                  </label>
+                  <label>
+                    Written (%)
+                    <input type="number" step="0.5" value={l.writtenPct} onChange={(e) => setNewLayer(i, { writtenPct: Number(e.target.value) })} style={{ width: 64 }} />
+                  </label>
+                  <label>
+                    Signed (%)
+                    <input type="number" step="0.5" value={l.signedPct} onChange={(e) => setNewLayer(i, { signedPct: Number(e.target.value) })} style={{ width: 64 }} />
+                  </label>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)', paddingBottom: 8, minWidth: 120, lineHeight: 1.4 }}>
                     Prem {fmtMoneyM((l.limit * l.rolPct) / 100, 2)}
+                    <br />
+                    Our {fmtMoneyM((l.limit * l.rolPct * l.signedPct) / 10000, 2)}
+                    {l.signedPct > l.writtenPct && <span style={{ color: 'var(--warning, #e0a43a)' }}> · signed &gt; written</span>}
                   </span>
                   <button
                     className="icon-btn"

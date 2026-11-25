@@ -15,7 +15,7 @@ from app.engine.sim_generator import REGION_PERILS, YeltTable
 from app.models.domain import GraphSpec
 from app.models.enums import NodeType
 from app.models.phase1 import ContractFull, ContractLayer
-from app.services.contracts import graph_layers
+from app.services.contracts import contract_layers
 from app.services.lineage import canonical_hash
 
 
@@ -32,8 +32,8 @@ def _link_from_layer(source: str, contract: ContractFull, layer: ContractLayer) 
         premium=layer.deposit_premium,
         written_line=layer.written_line,
         signed_line=layer.signed_line,
-        brokerage_pct=contract.brokerage_pct,
-        technical_rol=contract.technical_rol,
+        brokerage_pct=layer.brokerage_pct,
+        technical_rol=layer.technical_rol,
     )
 
 
@@ -54,7 +54,7 @@ def resolve_pricing_links(
             contract = current if current and current.programme_id == contract_id else get_contract(str(contract_id))
             if contract is None:
                 continue
-            layers = graph_layers(contract.graph, contract.written_line, contract.signed_line)
+            layers = contract_layers(contract)
             if not layers:
                 continue
             wanted = node.params.get("layerNodeId")
@@ -69,7 +69,7 @@ def resolve_pricing_links(
         ]
         if not upstream:
             continue
-        layers = {l.node_id: l for l in graph_layers(graph, current.written_line, current.signed_line)}
+        layers = {l.node_id: l for l in contract_layers(current.model_copy(update={"graph": graph}))}
         if upstream[0] in layers:
             links[node.node_id] = _link_from_layer("UPSTREAM", current, layers[upstream[0]])
     return links
