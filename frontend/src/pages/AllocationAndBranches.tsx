@@ -131,7 +131,7 @@ export function AllocationAndBranches() {
                 <div className="kpi-val">{alloc.retroCostConservationError.toExponential(1)}</div>
               </div>
             </div>
-            <table>
+            <div className="table-wrap"><table>
               <thead>
                 <tr>
                   <th>Cedent</th>
@@ -160,7 +160,7 @@ export function AllocationAndBranches() {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           </>
         )}
       </div>

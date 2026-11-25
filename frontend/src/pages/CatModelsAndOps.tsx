@@ -68,7 +68,7 @@ export function CatModelsAndOps() {
               </button>
             </div>
           </div>
-          <table>
+          <div className="table-wrap"><table>
             <thead>
               <tr>
                 <th>Job ID</th>
@@ -96,14 +96,14 @@ export function CatModelsAndOps() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         </div>
 
         <div className="card">
           <div className="card-title">
             <span>ExposureEclipse Bridge</span>
           </div>
-          <table>
+          <div className="table-wrap"><table>
             <thead>
               <tr>
                 <th>Cedent</th>
@@ -118,13 +118,13 @@ export function CatModelsAndOps() {
                   <td style={{ fontWeight: 600 }}>{p.cedentName}</td>
                   <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{p.edmDatabaseName}</td>
                   <td className="num">{fmtMoneyM(p.totalTivM, 0)}</td>
-                  <td style={{ fontSize: 11, color: 'var(--accent-soft)' }}>
+                  <td className="wrap" style={{ fontSize: 11, color: 'var(--accent-soft)' }}>
                     {Object.entries(p.granularTivM).map(([k, v]) => `${k}: ${fmtMoneyM(Number(v), 0)}`).join(' · ')}
                   </td>
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         </div>
       </div>
 
@@ -133,7 +133,7 @@ export function CatModelsAndOps() {
           <div className="card-title">
             <span>Fund Operations · NAV & Side Pockets</span>
           </div>
-          <table>
+          <div className="table-wrap"><table>
             <thead>
               <tr>
                 <th>Series</th>
@@ -154,7 +154,7 @@ export function CatModelsAndOps() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
           <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
             Market Marks: {marksQ.data?.map((m) => `${m.name} (${fmtPct(m.indicativeSpreadPct, 2)})`).join(' | ')}
           </div>

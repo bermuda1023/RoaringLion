@@ -662,7 +662,7 @@ export function StructuringStudio({
             {dagEvalQ.data?.cacheMisses ?? 0} misses
           </span>
         </div>
-        <table>
+        <div className="table-wrap"><table>
           <thead>
             <tr>
               <th>Node</th>
@@ -698,7 +698,7 @@ export function StructuringStudio({
               );
             })}
           </tbody>
-        </table>
+        </table></div>
       </div>
     </>
   );

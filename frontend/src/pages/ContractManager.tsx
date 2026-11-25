@@ -329,7 +329,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
           </div>
         )}
 
-        <table>
+        <div className="table-wrap"><table>
           <thead>
             <tr>
               <th>Unique Code</th>
@@ -404,7 +404,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               );
             })}
           </tbody>
-        </table>
+        </table></div>
       </div>
 
       {/* ══════════════════ 360° PROGRAMME PROFILE & LINKAGE DOSSIER ══════════════════ */}
@@ -687,7 +687,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </label>
                   </div>
 
-                  <table>
+                  <div className="table-wrap"><table>
                     <thead>
                       <tr>
                         <th>Underwriting Year</th>
@@ -721,7 +721,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         <td className="num" style={{ fontWeight: 600 }}>{(d.contract.signedLine * 100).toFixed(0)}%</td>
                       </tr>
                     </tbody>
-                  </table>
+                  </table></div>
 
                   {d.relatedProgrammes.length > 0 && (
                     <div style={{ marginTop: 10 }}>
@@ -760,10 +760,13 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                   <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
                     Year-over-Year Renewal Chain ({d.renewalChain?.length ?? 0} linked underwriting years)
                   </span>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                    <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', minWidth: 0, maxWidth: '100%' }}>
+                    <label
+                      style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, maxWidth: '100%' }}
+                    >
                       Prior Year Link:
                       <select
+                        style={{ flex: '1 1 auto', minWidth: 0, width: 260, maxWidth: '100%' }}
                         value={d.contract.priorContractId ?? ''}
                         onChange={(e) => linkPriorMut.mutate(e.target.value || null)}
                         disabled={linkPriorMut.isPending}
@@ -788,7 +791,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </button>
                   </div>
                 </div>
-                <table>
+                <div className="table-wrap"><table>
                   <thead>
                     <tr>
                       <th>UY</th>
@@ -834,7 +837,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </table></div>
               </div>
             </>
           )}
@@ -961,7 +964,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </a>
                   </div>
                 </div>
-                <table>
+                <div className="table-wrap"><table>
                   <thead>
                     <tr>
                       <th>Layer</th>
@@ -990,7 +993,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       );
                     })}
                   </tbody>
-                </table>
+                </table></div>
               </div>
 
               <div className="panel">
@@ -1059,7 +1062,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     No vendor API runs triggered for this programme yet. Use &quot;Trigger Model Run&quot; above.
                   </div>
                 ) : (
-                  <table>
+                  <div className="table-wrap"><table>
                     <thead>
                       <tr>
                         <th>Job</th>
@@ -1082,7 +1085,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                  </table></div>
                 )}
               </div>
             </div>
@@ -1121,7 +1124,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       <strong>Total TIV:</strong> {fmtMoneyB(d.exposureLink.totalTivM / 1000, 2)} ·{' '}
                       <span style={{ color: 'var(--text-muted)' }}>Server: {d.exposureLink.serverName}</span>
                     </div>
-                    <table>
+                    <div className="table-wrap"><table>
                       <thead>
                         <tr>
                           <th>Region-Peril</th>
@@ -1140,7 +1143,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                           </tr>
                         ))}
                       </tbody>
-                    </table>
+                    </table></div>
                   </>
                 ) : (
                   <div style={{ color: 'var(--text-faint)', fontSize: 12 }}>
@@ -1158,7 +1161,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     No persisted run manifests for this programme yet — evaluate in DAG Studio or Burn &amp; Claims.
                   </div>
                 ) : (
-                  <table>
+                  <div className="table-wrap"><table>
                     <thead>
                       <tr>
                         <th>Manifest ID</th>
@@ -1179,7 +1182,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                  </table></div>
                 )}
               </div>
             </div>

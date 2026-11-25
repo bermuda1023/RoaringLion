@@ -136,7 +136,7 @@ export function BurnAndClaims({ programme }: { programme: ProgrammeDeal }) {
             + Log Claim Advice
           </button>
         </div>
-        <table>
+        <div className="table-wrap"><table>
           <thead>
             <tr>
               <th>Claim No</th>
@@ -159,7 +159,7 @@ export function BurnAndClaims({ programme }: { programme: ProgrammeDeal }) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
         {evalClaimsMut.data && (
           <div style={{ marginTop: 10, color: 'var(--teal)', fontSize: 12 }}>
             Live Claims Evaluated: Ground-Up {fmtMoneyM(evalClaimsMut.data.totalGroundUp, 2)} → Ceded Recovery{' '}

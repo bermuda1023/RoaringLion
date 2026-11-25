@@ -55,7 +55,7 @@ export function SimSetCatalog() {
             Simulate Sample ELT → 50k YELT
           </button>
         </div>
-        <table>
+        <div className="table-wrap"><table>
           <thead>
             <tr>
               <th>Sim Set ID</th>
@@ -87,12 +87,12 @@ export function SimSetCatalog() {
                       : `$${s.expectedAnnualLoss.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}m`
                     : '—'}
                 </td>
-                <td style={{ fontSize: 11, color: 'var(--accent-soft)' }}>{s.regionPerils.join(', ')}</td>
+                <td className="wrap" style={{ fontSize: 11, color: 'var(--accent-soft)' }}>{s.regionPerils.join(', ')}</td>
                 <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>#{s.contentHash.slice(0, 8)}</td>
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </div>
 
       <div className="card">

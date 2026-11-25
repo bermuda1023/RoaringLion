@@ -328,7 +328,7 @@ export function App() {
                 </div>
                 <div>
                   <div style={{ fontWeight: 600, marginBottom: 8 }}>Risk Appetite Guidelines</div>
-                  <table>
+                  <div className="table-wrap"><table>
                     <thead>
                       <tr>
                         <th>Percentile</th>
@@ -347,7 +347,7 @@ export function App() {
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                  </table></div>
                 </div>
               </div>
               <div style={{ marginTop: 10 }}>
@@ -359,7 +359,7 @@ export function App() {
               <div className="card-title">
                 <span>Euler Capital Allocation · Co-TVaR 1-in-250</span>
               </div>
-              <table>
+              <div className="table-wrap"><table>
                 <thead>
                   <tr>
                     <th>Cedent</th>
@@ -392,7 +392,7 @@ export function App() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
             </div>
           </>
         )}
@@ -412,7 +412,7 @@ export function App() {
                   </button>
                 </div>
               </div>
-              <table>
+              <div className="table-wrap"><table>
                 <thead>
                   <tr>
                     <th>ID</th>
@@ -444,7 +444,7 @@ export function App() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
             </div>
 
             {detMut.data && (
@@ -461,7 +461,7 @@ export function App() {
                       {stmt.layerName} ({stmt.layerType}) — Ceded: {fmtMoneyM(stmt.totalCededLoss, 2)} | RIP:{' '}
                       {fmtMoneyM(stmt.totalRipDue, 2)}
                     </div>
-                    <table>
+                    <div className="table-wrap"><table>
                       <thead>
                         <tr>
                           <th>Event</th>
@@ -492,7 +492,7 @@ export function App() {
                           </tr>
                         ))}
                       </tbody>
-                    </table>
+                    </table></div>
                   </div>
                 ))}
                 <BreadcrumbBar manifest={detMut.data.manifest} />
@@ -515,7 +515,7 @@ export function App() {
               <div className="card-title">
                 <span>Run Manifests · Staleness Audit ({manifestsQ.data?.length ?? 0})</span>
               </div>
-              <table>
+              <div className="table-wrap"><table>
                 <thead>
                   <tr>
                     <th>Manifest ID</th>
@@ -542,14 +542,14 @@ export function App() {
                           )}
                         </td>
                         <td style={{ fontFamily: 'var(--mono)' }}>#{m.outputHash}</td>
-                        <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        <td className="wrap" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                           {m.breadcrumb.map((b) => `${b.entityType}:${b.entityId}`).join(' › ')}
                         </td>
                       </tr>
                     );
                   })}
                 </tbody>
-              </table>
+              </table></div>
             </div>
           </>
         )}

@@ -754,7 +754,7 @@ export function PortfolioOptimizer() {
                   </button>
                 </div>
               </div>
-              <table>
+              <div className="table-wrap"><table>
                 <thead>
                   <tr>
                     <th>Layer</th>
@@ -833,7 +833,7 @@ export function PortfolioOptimizer() {
                     );
                   })}
                 </tbody>
-              </table>
+              </table></div>
             </div>
           </div>
         )}
@@ -970,7 +970,7 @@ export function PortfolioOptimizer() {
                     <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 8 }}>
                       Share Summary — Proposed vs Initial (Δ)
                     </div>
-                    <table>
+                    <div className="table-wrap"><table>
                       <thead>
                         <tr>
                           <th>Layer</th>
@@ -994,7 +994,7 @@ export function PortfolioOptimizer() {
                           </tr>
                         ))}
                       </tbody>
-                    </table>
+                    </table></div>
                   </div>
                 </div>
 
@@ -1004,7 +1004,7 @@ export function PortfolioOptimizer() {
                     <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 8 }}>
                       Portfolio Summary — Initial vs Proposed
                     </div>
-                    <table>
+                    <div className="table-wrap"><table>
                       <thead>
                         <tr>
                           <th>Metric</th>
@@ -1047,7 +1047,7 @@ export function PortfolioOptimizer() {
                           );
                         })}
                       </tbody>
-                    </table>
+                    </table></div>
                   </div>
 
                   <div className="panel">
@@ -1063,7 +1063,7 @@ export function PortfolioOptimizer() {
                   <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 8 }}>
                     Constraint Diagnostics &amp; Shadow Prices (Duals)
                   </div>
-                  <table>
+                  <div className="table-wrap"><table>
                     <thead>
                       <tr>
                         <th>Constraint</th>
@@ -1088,7 +1088,7 @@ export function PortfolioOptimizer() {
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                  </table></div>
                 </div>
               </>
             )}
@@ -1103,7 +1103,7 @@ export function PortfolioOptimizer() {
                 Layer Summary — Frontier Point #{activePoint.pointIndex + 1} (TVaR 250: $
                 {activePoint.metrics.tvar250M.toFixed(1)}m · Exp Return: ${activePoint.metrics.expectedProfitM.toFixed(2)}m)
               </div>
-              <table>
+              <div className="table-wrap"><table>
                 <thead>
                   <tr>
                     <th>Layer</th>
@@ -1139,7 +1139,7 @@ export function PortfolioOptimizer() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
             </div>
 
             {/* 2x2 ECharts Contribution Analytics (Analyze Re Portfolio Dashboard) */}
