@@ -1,6 +1,7 @@
 import {
   Background,
   Controls,
+  Position,
   ReactFlow,
   type Connection,
   type Edge,
@@ -139,8 +140,13 @@ export function StructuringStudio({
   const rfNodes: Node[] = draftGraph.nodes.map((n) => {
     const u = unadjById[n.nodeId];
     const a = adjById[n.nodeId];
+    const isSource = n.nodeType === 'LOSS_SOURCE' || n.nodeType === 'INDUSTRY_INDEX_SOURCE';
+    const isOutput = n.nodeType === 'PRICING_OUTPUT' || n.nodeType === 'YELT_OUTPUT' || n.nodeType === 'EP_OUTPUT';
     return {
       id: n.nodeId,
+      type: isSource ? 'input' : isOutput ? 'output' : 'default',
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
       position: n.position,
       style: nodeStyle(n.nodeType, n.nodeId === selectedNodeId),
       data: {
