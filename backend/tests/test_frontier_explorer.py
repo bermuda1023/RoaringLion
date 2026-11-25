@@ -119,3 +119,31 @@ def test_cms_profile_notes_and_360_dossier():
     assert dos["exposureLink"] is not None
     assert dos["exposureLink"]["edmDatabaseName"] == "EDM_FARMERS_2027_Q1"
     assert dos["modelingLink"]["simSet"] is not None
+
+
+def test_yoy_programme_renewal_chain_and_cycle_guard():
+    # Farmers 2027 is seeded linked to Farmers 2026 (EXPIRED)
+    r_chain = client.get("/api/contracts/prog-farmers-us-27/chain")
+    assert r_chain.status_code == 200
+    chain = r_chain.json()
+    assert [row["treatyYear"] for row in chain] == [2027, 2026]
+    assert chain[0]["yoyLimitDeltaM"] == 5.0  # 85m - 80m
+
+    # Self-link and cycle link must be rejected with 422
+    assert client.post("/api/contracts/prog-farmers-us-27/link-prior", json={"priorContractId": "prog-farmers-us-27"}).status_code == 422
+    assert client.post("/api/contracts/prog-farmers-us-26/link-prior", json={"priorContractId": "prog-farmers-us-27"}).status_code == 422
+
+    # One-click Renew into 2028 clones DAG + uplifts and extends the chain to 3 years (2028 -> 2027 -> 2026)
+    r_ren = client.post(
+        "/api/contracts/prog-farmers-us-27/renew",
+        json={"treatyYear": 2028, "limit": 90.0, "rol": 0.24, "rarcTotalPct": 5.5},
+    )
+    assert r_ren.status_code == 200
+    new_28 = r_ren.json()
+    assert new_28["treatyYear"] == 2028
+    assert new_28["priorContractId"] == "prog-farmers-us-27"
+    assert new_28["profile"]["priorYearLimitM"] == 85.0
+
+    r_chain3 = client.get(f"/api/contracts/{new_28['programmeId']}/chain")
+    assert r_chain3.status_code == 200
+    assert [row["treatyYear"] for row in r_chain3.json()] == [2028, 2027, 2026]

@@ -98,6 +98,40 @@ class ContractNoteOut(CamelModel):
     created_at: datetime
 
 
+class LinkPriorRequest(CamelModel):
+    prior_contract_id: str | None = None
+
+
+class RenewProgrammeRequest(CamelModel):
+    treaty_year: int | None = None
+    renewal_period: str | None = None
+    limit: float | None = None
+    attachment: float | None = None
+    rol: float | None = None
+    signed_line: float | None = None
+    rarc_total_pct: float | None = None
+
+
+class RenewalChainRow(CamelModel):
+    programme_id: str
+    unique_code: str
+    programme_name: str
+    treaty_year: int
+    renewal_period: str
+    status: str
+    prior_contract_id: str | None = None
+    limit: float
+    attachment: float
+    deposit_premium: float
+    rol_pct: float
+    signed_line: float
+    rarc_total_pct: float
+    yoy_limit_delta_m: float | None = None
+    yoy_rol_delta_pts: float | None = None
+    yoy_premium_delta_m: float | None = None
+    is_current: bool = False
+
+
 class ContractCreate(CamelModel):
     programme_id: str | None = None
     chain_id: str = ""
@@ -163,6 +197,8 @@ class ContractUpdate(CamelModel):
     renewal_period: str | None = None
     custom_tags: list[str] | None = None
     exposure_eclipse_programme_id: str | None = None
+    prior_contract_id: str | None = None
+    chain_id: str | None = None
     profile: ProgrammeProfile | None = None
 
 

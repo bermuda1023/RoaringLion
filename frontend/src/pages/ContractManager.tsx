@@ -4,6 +4,26 @@ import { api, apiUrl, fetchJson, postJson, type ProgrammeProfile } from '../api/
 
 type DossierTab = 'profile' | 'notes' | 'pricing' | 'exposure';
 
+interface RenewalChainRow {
+  programmeId: string;
+  uniqueCode: string;
+  programmeName: string;
+  treatyYear: number;
+  renewalPeriod: string;
+  status: string;
+  priorContractId?: string | null;
+  limit: number;
+  attachment: number;
+  depositPremium: number;
+  rolPct: number;
+  signedLine: number;
+  rarcTotalPct: number;
+  yoyLimitDeltaM?: number | null;
+  yoyRolDeltaPts?: number | null;
+  yoyPremiumDeltaM?: number | null;
+  isCurrent: boolean;
+}
+
 interface ContractDossier {
   contract: any;
   relatedProgrammes: {
@@ -16,6 +36,7 @@ interface ContractDossier {
     limit: number;
     rol: number;
   }[];
+  renewalChain: RenewalChainRow[];
   notes: {
     noteId: string;
     programmeId: string;
@@ -179,6 +200,28 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
     mutationFn: () => postJson(`/api/integrations/exposure-eclipse/sync-bound/${activeId}`),
   });
 
+  const linkPriorMut = useMutation({
+    mutationFn: (priorContractId: string | null) =>
+      postJson(`/api/contracts/${activeId}/link-prior`, { priorContractId }),
+    onSuccess: () => {
+      setSavedMsg('Year-over-year renewal link updated.');
+      qc.invalidateQueries({ queryKey: ['contracts'] });
+      qc.invalidateQueries({ queryKey: ['contractDossier', activeId] });
+    },
+  });
+
+  const renewMut = useMutation({
+    mutationFn: () => postJson<any>(`/api/contracts/${activeId}/renew`, {}),
+    onSuccess: (created) => {
+      qc.invalidateQueries({ queryKey: ['contracts'] });
+      qc.invalidateQueries({ queryKey: ['programmes'] });
+      if (created?.programmeId) {
+        setActiveId(created.programmeId);
+        setSavedMsg(`Renewed into ${created.treatyYear} (${created.profile?.uniqueCode || created.programmeId}) and linked YoY.`);
+      }
+    },
+  });
+
   const d = dossierQ.data;
   const visibleNotes =
     d?.notes.filter((n) => (noteScope === 'cedent' ? true : n.programmeId === activeId)) ?? [];
@@ -214,9 +257,12 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
           </div>
         </div>
 
-        {(createMut.error || saveProfileMut.error || addNoteMut.error) && (
+        {(createMut.error || saveProfileMut.error || addNoteMut.error || linkPriorMut.error || renewMut.error) && (
           <div className="error-banner">
-            {String(((createMut.error ?? saveProfileMut.error ?? addNoteMut.error) as Error).message)}
+            {String(
+              ((createMut.error ?? saveProfileMut.error ?? addNoteMut.error ?? linkPriorMut.error ?? renewMut.error) as Error)
+                .message,
+            )}
           </div>
         )}
 
@@ -698,6 +744,98 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </div>
                   )}
                 </div>
+              </div>
+
+              {/* Full Year-over-Year Renewal Chain Panel */}
+              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                    gap: 8,
+                    marginBottom: 10,
+                  }}
+                >
+                  <span style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd' }}>
+                    Year-over-Year Renewal Chain ({d.renewalChain?.length ?? 0} linked underwriting years)
+                  </span>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <label style={{ fontSize: 11, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      Prior Year Link:
+                      <select
+                        value={d.contract.priorContractId ?? ''}
+                        onChange={(e) => linkPriorMut.mutate(e.target.value || null)}
+                        disabled={linkPriorMut.isPending}
+                      >
+                        <option value="">None (Start of Chain)</option>
+                        {(contractsQ.data ?? [])
+                          .filter((other) => other.programmeId !== activeId)
+                          .map((other) => (
+                            <option key={other.programmeId} value={other.programmeId}>
+                              {other.treatyYear} · {other.profile?.uniqueCode || other.programmeId} — {other.cedentName} ({other.status})
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                    <button
+                      className="btn"
+                      style={{ background: '#0f766e' }}
+                      onClick={() => renewMut.mutate()}
+                      disabled={renewMut.isPending}
+                    >
+                      {renewMut.isPending ? 'Renewing…' : `Renew → ${d.contract.treatyYear + 1}`}
+                    </button>
+                  </div>
+                </div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>UY</th>
+                      <th>Unique Code</th>
+                      <th>Programme</th>
+                      <th>Status</th>
+                      <th className="num">Limit ($M)</th>
+                      <th className="num">YoY Lim Δ</th>
+                      <th className="num">GWP ($M)</th>
+                      <th className="num">ROL</th>
+                      <th className="num">YoY ROL Δ</th>
+                      <th className="num">Signed</th>
+                      <th className="num">RARC</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(d.renewalChain ?? []).map((row) => (
+                      <tr
+                        key={row.programmeId}
+                        onClick={() => setActiveId(row.programmeId)}
+                        style={{
+                          cursor: 'pointer',
+                          background: row.isCurrent ? 'rgba(56, 189, 248, 0.10)' : undefined,
+                        }}
+                      >
+                        <td style={{ fontWeight: 700 }}>{row.treatyYear} ({row.renewalPeriod})</td>
+                        <td style={{ fontFamily: 'monospace', fontSize: 11, color: '#93c5fd' }}>{row.uniqueCode}</td>
+                        <td>{row.programmeName}</td>
+                        <td><span className="badge">{row.status}</span></td>
+                        <td className="num">${row.limit.toFixed(1)}m</td>
+                        <td className="num" style={{ color: row.yoyLimitDeltaM == null ? '#64748b' : row.yoyLimitDeltaM >= 0 ? '#4ade80' : '#f87171' }}>
+                          {row.yoyLimitDeltaM == null ? '—' : `${row.yoyLimitDeltaM >= 0 ? '+' : ''}$${row.yoyLimitDeltaM.toFixed(1)}m`}
+                        </td>
+                        <td className="num">${row.depositPremium.toFixed(2)}m</td>
+                        <td className="num">{row.rolPct.toFixed(2)}%</td>
+                        <td className="num" style={{ color: row.yoyRolDeltaPts == null ? '#64748b' : row.yoyRolDeltaPts >= 0 ? '#4ade80' : '#f87171' }}>
+                          {row.yoyRolDeltaPts == null ? '—' : `${row.yoyRolDeltaPts >= 0 ? '+' : ''}${row.yoyRolDeltaPts.toFixed(2)} pts`}
+                        </td>
+                        <td className="num">{(row.signedLine * 100).toFixed(0)}%</td>
+                        <td className="num" style={{ color: row.rarcTotalPct >= 0 ? '#4ade80' : '#f87171', fontWeight: 600 }}>
+                          {row.rarcTotalPct >= 0 ? '+' : ''}{row.rarcTotalPct.toFixed(1)}%
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </>
           )}

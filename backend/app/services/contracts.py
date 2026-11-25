@@ -34,6 +34,8 @@ from app.models.phase1 import (
     ContractUpdate,
     IlwPriceRequest,
     ProgrammeProfile,
+    RenewalChainRow,
+    RenewProgrammeRequest,
     SliceRollupRequest,
 )
 from app.services.lineage import LineageRegistry, canonical_hash
@@ -233,9 +235,12 @@ class ContractStore:
                     prior_year_signed_line=prog.signed_line,
                 )
                 chash = canonical_hash(prog.model_dump())
+                chain_key = "chain-prog-farmers-us" if is_farmers else f"chain-{prog.programme_id}"
+                prior_id = "prog-farmers-us-26" if is_farmers else None
                 rec = ContractRecord(
                     programme_id=prog.programme_id,
-                    chain_id=f"chain-{prog.programme_id}",
+                    chain_id=chain_key,
+                    prior_contract_id=prior_id,
                     cedent_name=prog.cedent_name,
                     programme_name=prog.programme_name,
                     treaty_year=prog.treaty_year,
@@ -278,6 +283,83 @@ class ContractStore:
                 )
                 db.add(rec)
                 if is_farmers:
+                    prior_profile = ProgrammeProfile(
+                        unique_code="RL-2026-001",
+                        program_code="PGM-001",
+                        legal_entity="RoaringLion Re Transformer",
+                        trading_unit="N.A. Property",
+                        planning_class="Property CAT",
+                        new_or_renewal="RENEWAL",
+                        written_date="2025-11-20",
+                        cedent_group=prog.cedent_name,
+                        cedent_country="USA",
+                        cedent_credit_rating="AM Best A",
+                        broker_group=prog.broker,
+                        closing_broker=prog.broker,
+                        broker_contact="Lead Treaty Desk",
+                        pricing_analyst="Cat Modeling Desk",
+                        offered_line=1.0,
+                        estimated_signed_pct=1.0,
+                        limit_basis="UNL",
+                        claim_trigger="LOSSES_OCCURRING",
+                        loss_event_type="1ST_LOSS",
+                        reinstatement_basis="PRO_RATA_AMOUNT",
+                        inuring_note="Underlying QS inures prior to 1st Cat XL",
+                        economic_inflation_pct=3.0,
+                        rarc_total_pct=4.5,
+                    )
+                    prior_uplift = prog.uplift_set.model_copy(
+                        update={"uplift_set_id": "upl-farmers-us-26", "name": "Farmers US 2026 House Uplift"}
+                    )
+                    prior_graph = prog.graph.model_copy(
+                        update={"graph_id": "grp-farmers-us-26", "name": "Farmers US Wind Tower 2026"}
+                    )
+                    db.add(
+                        ContractRecord(
+                            programme_id="prog-farmers-us-26",
+                            chain_id="chain-prog-farmers-us",
+                            prior_contract_id=None,
+                            cedent_name=prog.cedent_name,
+                            programme_name="US Wind Occ + Agg Tower (2026 Expiring)",
+                            treaty_year=2026,
+                            renewal_period="J26",
+                            office=prog.office,
+                            underwriter=prog.underwriter,
+                            broker=prog.broker,
+                            fronting_carrier="RoaringLion Re Transformer",
+                            collateral_cell="Cell-J26",
+                            status=ProgrammeStatus.EXPIRED.value,
+                            direction=ContractDirection.ASSUMED.value,
+                            structure=StructureType.OCC_XL.value,
+                            instrument=InstrumentType.UNL.value,
+                            placement=PlacementType.OPEN_MARKET.value,
+                            inception_date="2026-01-01",
+                            expiry_date="2026-12-31",
+                            hours_clause=72,
+                            authorized_line=1.0,
+                            written_line=1.0,
+                            signed_line=1.0,
+                            limit=80.0,
+                            attachment=75.0,
+                            deposit_premium=17.6,
+                            rol=0.22,
+                            technical_rol=0.202,
+                            brokerage_pct=0.10,
+                            fronting_fee_pct=0.02,
+                            collateral_required=80.0,
+                            currency=prog.currency,
+                            sim_set_id=prog.sim_set_id,
+                            exposure_eclipse_programme_id=ee_id,
+                            region_perils_json=json.dumps(prog.region_perils),
+                            perils_json=json.dumps([p.value for p in prog.perils]),
+                            custom_tags_json=json.dumps(["Peak", "Expiring"]),
+                            uplift_set_json=prior_uplift.model_dump_json(),
+                            graph_json=prior_graph.model_dump_json(),
+                            profile_json=prior_profile.model_dump_json(),
+                            version=1,
+                            content_hash=canonical_hash({"id": "prog-farmers-us-26", "year": 2026}),
+                        )
+                    )
                     db.add(
                         ContractNoteRecord(
                             note_id="note-seed-farmers-1",
@@ -595,6 +677,242 @@ class ContractStore:
                 body=note.body,
                 created_at=note.created_at,
             )
+
+    def link_prior_programme(
+        self,
+        programme_id: str,
+        prior_contract_id: str | None,
+        lineage: LineageRegistry,
+    ) -> ContractFull | None:
+        """Link or unlink a programme to its prior underwriting year, unifying chain_id and copying prior-year metrics."""
+        with get_session() as db:
+            rec = db.get(ContractRecord, programme_id)
+            if not rec:
+                return None
+
+            if prior_contract_id is None or prior_contract_id == "":
+                rec.prior_contract_id = None
+                rec.version += 1
+                rec.updated_at = datetime.now(timezone.utc)
+                db.commit()
+                db.refresh(rec)
+                return _record_to_full(rec)
+
+            if prior_contract_id == programme_id:
+                raise ValueError("A programme cannot link to itself as prior year")
+
+            prior = db.get(ContractRecord, prior_contract_id)
+            if not prior:
+                raise KeyError(f"Prior programme not found: {prior_contract_id}")
+
+            # Cycle check: walk prior's ancestors to ensure programme_id is not already an ancestor
+            cursor = prior.prior_contract_id
+            seen = {programme_id, prior_contract_id}
+            while cursor:
+                if cursor in seen:
+                    raise ValueError("Linking these programmes would create a renewal cycle")
+                seen.add(cursor)
+                anc = db.get(ContractRecord, cursor)
+                cursor = anc.prior_contract_id if anc else None
+
+            old_chain = rec.chain_id
+            target_chain = prior.chain_id or f"chain-{prior.programme_id}"
+            prior.chain_id = target_chain
+            rec.prior_contract_id = prior_contract_id
+            rec.chain_id = target_chain
+
+            # Also bring any descendants of rec onto the unified chain_id
+            if old_chain and old_chain != target_chain:
+                for desc in db.query(ContractRecord).filter(ContractRecord.chain_id == old_chain).all():
+                    desc.chain_id = target_chain
+
+            prof = ProgrammeProfile(**json.loads(rec.profile_json)) if rec.profile_json else ProgrammeProfile()
+            prof.prior_year_limit_m = prior.limit
+            prof.prior_year_premium_m = prior.deposit_premium
+            prof.prior_year_rol_pct = round(prior.rol * 100.0, 2)
+            prof.prior_year_signed_line = prior.signed_line
+            rec.profile_json = prof.model_dump_json()
+
+            rec.version += 1
+            rec.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            db.refresh(rec)
+            out = _record_to_full(rec)
+
+        lineage.add_link(programme_id, prior_contract_id, LinkType.SUPERSEDES)
+        return out
+
+    def renew_programme(
+        self,
+        programme_id: str,
+        req: RenewProgrammeRequest,
+        lineage: LineageRegistry,
+    ) -> ContractFull | None:
+        """Clone an existing programme into the next underwriting year, linked via prior_contract_id + shared chain_id."""
+        with get_session() as db:
+            src = db.get(ContractRecord, programme_id)
+            if not src:
+                return None
+
+            next_year = req.treaty_year or (src.treaty_year + 1)
+            next_period = req.renewal_period
+            if not next_period:
+                yr_short = str(next_year)[-2:]
+                prefix = "".join(ch for ch in src.renewal_period if ch.isalpha()) or "J"
+                next_period = f"{prefix}{yr_short}"
+
+            new_id = f"prog-{uuid.uuid4().hex[:8]}"
+            chain_id = src.chain_id or f"chain-{src.programme_id}"
+            src.chain_id = chain_id
+
+            new_limit = req.limit if req.limit is not None else src.limit
+            new_att = req.attachment if req.attachment is not None else src.attachment
+            new_rol = req.rol if req.rol is not None else src.rol
+            new_signed = req.signed_line if req.signed_line is not None else src.signed_line
+            new_prem = round(new_limit * new_rol, 4)
+
+            src_prof = ProgrammeProfile(**json.loads(src.profile_json)) if src.profile_json else ProgrammeProfile()
+            new_prof = src_prof.model_copy(
+                update={
+                    "unique_code": f"RL-{next_year}-{new_id[-4:].upper()}",
+                    "new_or_renewal": "RENEWAL",
+                    "prior_year_limit_m": src.limit,
+                    "prior_year_premium_m": src.deposit_premium,
+                    "prior_year_rol_pct": round(src.rol * 100.0, 2),
+                    "prior_year_signed_line": src.signed_line,
+                    "rarc_total_pct": req.rarc_total_pct if req.rarc_total_pct is not None else src_prof.rarc_total_pct,
+                }
+            )
+
+            src_uplift = UpliftSet(**json.loads(src.uplift_set_json))
+            src_uplift.uplift_set_id = f"upl-{new_id}"
+            src_uplift.version = 1
+
+            src_graph = GraphSpec(**json.loads(src.graph_json))
+            src_graph.graph_id = f"grp-{new_id}"
+            src_graph.version = 1
+            src_graph.content_hash = canonical_hash({
+                "nodes": [n.model_dump() for n in src_graph.nodes],
+                "edges": [e.model_dump() for e in src_graph.edges],
+            })
+
+            base_name = src.programme_name.replace(f" ({src.treaty_year} Expiring)", "").strip()
+            rec = ContractRecord(
+                programme_id=new_id,
+                chain_id=chain_id,
+                prior_contract_id=src.programme_id,
+                cedent_name=src.cedent_name,
+                programme_name=base_name,
+                treaty_year=next_year,
+                renewal_period=next_period,
+                office=src.office,
+                underwriter=src.underwriter,
+                secondary_underwriter=src.secondary_underwriter,
+                broker=src.broker,
+                fronting_carrier=src.fronting_carrier,
+                collateral_cell=f"Cell-{next_period}",
+                status=ProgrammeStatus.QUOTED.value,
+                direction=src.direction,
+                structure=src.structure,
+                instrument=src.instrument,
+                placement=src.placement,
+                inception_date=f"{next_year}-01-01",
+                expiry_date=f"{next_year}-12-31",
+                hours_clause=src.hours_clause,
+                authorized_line=src.authorized_line,
+                written_line=new_signed,
+                signed_line=new_signed,
+                limit=new_limit,
+                attachment=new_att,
+                deposit_premium=new_prem,
+                rol=new_rol,
+                technical_rol=src.technical_rol,
+                brokerage_pct=src.brokerage_pct,
+                fronting_fee_pct=src.fronting_fee_pct,
+                collateral_required=new_limit,
+                currency=src.currency,
+                sim_set_id=src.sim_set_id,
+                exposure_eclipse_programme_id=src.exposure_eclipse_programme_id,
+                region_perils_json=src.region_perils_json,
+                perils_json=src.perils_json,
+                custom_tags_json=src.custom_tags_json,
+                uplift_set_json=src_uplift.model_dump_json(),
+                graph_json=src_graph.model_dump_json(),
+                ilw_spec_json=src.ilw_spec_json,
+                profile_json=new_prof.model_dump_json(),
+                version=1,
+                content_hash=canonical_hash({"id": new_id, "prior": src.programme_id, "year": next_year}),
+            )
+            db.add(rec)
+            db.commit()
+            db.refresh(rec)
+            out = _record_to_full(rec)
+
+        lineage.add_link(new_id, programme_id, LinkType.SUPERSEDES)
+        lineage.add_link(new_id, out.sim_set_id, LinkType.USES_LOSSES)
+        lineage.add_link(new_id, out.graph.graph_id, LinkType.USES_STRUCTURE)
+        return out
+
+    def get_renewal_chain(self, programme_id: str) -> list[RenewalChainRow]:
+        """Return all programmes in the YoY renewal chain ordered newest year first, with YoY deltas."""
+        with get_session() as db:
+            target = db.get(ContractRecord, programme_id)
+            if not target:
+                return []
+
+            # Collect every record sharing chain_id OR connected via prior_contract_id links
+            chain_recs: dict[str, ContractRecord] = {target.programme_id: target}
+            if target.chain_id:
+                for r in db.query(ContractRecord).filter(ContractRecord.chain_id == target.chain_id).all():
+                    chain_recs[r.programme_id] = r
+
+            # Walk backward and forward links defensively
+            changed = True
+            while changed:
+                changed = False
+                for r in list(chain_recs.values()):
+                    if r.prior_contract_id and r.prior_contract_id not in chain_recs:
+                        p = db.get(ContractRecord, r.prior_contract_id)
+                        if p:
+                            chain_recs[p.programme_id] = p
+                            changed = True
+                for child in db.query(ContractRecord).filter(ContractRecord.prior_contract_id.in_(list(chain_recs.keys()))).all():
+                    if child.programme_id not in chain_recs:
+                        chain_recs[child.programme_id] = child
+                        changed = True
+
+            ordered_asc = sorted(chain_recs.values(), key=lambda r: (r.treaty_year, r.programme_id))
+            by_id = {r.programme_id: r for r in ordered_asc}
+
+            rows: list[RenewalChainRow] = []
+            for idx, r in enumerate(ordered_asc):
+                prof = ProgrammeProfile(**json.loads(r.profile_json)) if r.profile_json else ProgrammeProfile()
+                prior_rec = by_id.get(r.prior_contract_id) if r.prior_contract_id else (ordered_asc[idx - 1] if idx > 0 else None)
+                yoy_lim = round(r.limit - prior_rec.limit, 2) if prior_rec else None
+                yoy_rol = round((r.rol - prior_rec.rol) * 100.0, 2) if prior_rec else None
+                yoy_prem = round(r.deposit_premium - prior_rec.deposit_premium, 2) if prior_rec else None
+                rows.append(
+                    RenewalChainRow(
+                        programme_id=r.programme_id,
+                        unique_code=prof.unique_code or r.programme_id,
+                        programme_name=r.programme_name,
+                        treaty_year=r.treaty_year,
+                        renewal_period=r.renewal_period,
+                        status=r.status,
+                        prior_contract_id=r.prior_contract_id,
+                        limit=r.limit,
+                        attachment=r.attachment,
+                        deposit_premium=r.deposit_premium,
+                        rol_pct=round(r.rol * 100.0, 2),
+                        signed_line=r.signed_line,
+                        rarc_total_pct=prof.rarc_total_pct,
+                        yoy_limit_delta_m=yoy_lim,
+                        yoy_rol_delta_pts=yoy_rol,
+                        yoy_premium_delta_m=yoy_prem,
+                        is_current=(r.programme_id == programme_id),
+                    )
+                )
+            return list(reversed(rows))
 
     def current_entity_hashes(self) -> dict[str, str]:
         hashes: dict[str, str] = {}

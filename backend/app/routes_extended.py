@@ -46,7 +46,15 @@ from app.engine.slice_runner import evaluate_portfolio_rollup, evaluate_programm
 from app.engine.synthetic import SyntheticLossRequest, generate_synthetic_freq_sev
 from app.models.domain import DeterministicRunResponse
 from app.models.enums import ProgrammeStatus, StructureType, ViewOfRisk
-from app.models.phase1 import ContractNoteCreate, ContractNoteOut, SimSetDetail
+from app.models.phase1 import (
+    ContractFull,
+    ContractNoteCreate,
+    ContractNoteOut,
+    LinkPriorRequest,
+    RenewalChainRow,
+    RenewProgrammeRequest,
+    SimSetDetail,
+)
 from app.services.branching import BranchCreate, BranchDiffResponse, BranchOut, BranchService
 from app.services.claims import ClaimCreate, ClaimOut, ClaimRevision, ClaimsService
 from app.services.contracts import ContractStore, contract_to_programme_deal
@@ -98,10 +106,11 @@ def create_extended_router(
         ]
 
     def _all_non_ilw_deals():
+        inactive = {ProgrammeStatus.EXPIRED, ProgrammeStatus.DECLINED, ProgrammeStatus.NTU}
         return [
             contract_to_programme_deal(c)
             for c in contract_store.list_contracts()
-            if c.structure != StructureType.ILW
+            if c.structure != StructureType.ILW and c.status not in inactive
         ]
 
     # ── Phase 2b: Burn Cost & Live Claims ──
@@ -523,6 +532,7 @@ def create_extended_router(
         return {
             "contract": c.model_dump(by_alias=True),
             "relatedProgrammes": related,
+            "renewalChain": [r.model_dump(by_alias=True) for r in contract_store.get_renewal_chain(programme_id)],
             "notes": [n.model_dump(by_alias=True) for n in contract_store.list_notes(programme_id, scope="cedent")],
             "pricingLink": {
                 "graphId": dag_eval.graph_id,
@@ -540,5 +550,30 @@ def create_extended_router(
             "claimsCount": len(claims),
             "recentManifests": manifests,
         }
+
+    @router.get("/api/contracts/{programme_id}/chain", response_model=list[RenewalChainRow])
+    def get_contract_renewal_chain(programme_id: str) -> list[RenewalChainRow]:
+        if not contract_store.get_contract(programme_id):
+            raise HTTPException(status_code=404, detail="Contract not found")
+        return contract_store.get_renewal_chain(programme_id)
+
+    @router.post("/api/contracts/{programme_id}/link-prior", response_model=ContractFull)
+    def link_prior_contract(programme_id: str, payload: LinkPriorRequest) -> ContractFull:
+        try:
+            out = contract_store.link_prior_programme(programme_id, payload.prior_contract_id, lineage)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not out:
+            raise HTTPException(status_code=404, detail="Contract not found")
+        return out
+
+    @router.post("/api/contracts/{programme_id}/renew", response_model=ContractFull)
+    def renew_contract_next_year(programme_id: str, payload: RenewProgrammeRequest) -> ContractFull:
+        out = contract_store.renew_programme(programme_id, payload, lineage)
+        if not out:
+            raise HTTPException(status_code=404, detail="Contract not found")
+        return out
 
     return router
