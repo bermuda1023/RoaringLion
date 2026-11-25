@@ -237,7 +237,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
     <>
       <div className="card">
         <div className="card-title">
-          <span>Contract Management System (CMS) — Persistent Underwriting Ledger</span>
+          <span>Programme Ledger</span>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <input
               placeholder="Search cedent, deal, broker..."
@@ -274,10 +274,10 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               gap: 8,
               flexWrap: 'wrap',
               padding: 10,
-              background: '#0d1422',
+              background: 'var(--surface-sunken)',
               borderRadius: 6,
               marginBottom: 12,
-              border: '1px solid #26324a',
+              border: '1px solid var(--border-strong)',
             }}
           >
             <input value={cedentName} onChange={(e) => setCedentName(e.target.value)} placeholder="Cedent" />
@@ -295,7 +295,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               <option value="JP-KANTO-EQ">JP-KANTO-EQ</option>
               <option value="EU-DE-WS">EU-DE-WS</option>
             </select>
-            <label style={{ fontSize: 11, color: '#94a3b8' }}>
+            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
               Limit ($M)
               <input
                 type="number"
@@ -304,7 +304,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                 style={{ width: 65, marginLeft: 4 }}
               />
             </label>
-            <label style={{ fontSize: 11, color: '#94a3b8' }}>
+            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
               Xs ($M)
               <input
                 type="number"
@@ -313,7 +313,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                 style={{ width: 65, marginLeft: 4 }}
               />
             </label>
-            <label style={{ fontSize: 11, color: '#94a3b8' }}>
+            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
               ROL (%)
               <input
                 type="number"
@@ -359,23 +359,23 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     background: isSelected ? 'rgba(56, 189, 248, 0.08)' : undefined,
                   }}
                 >
-                  <td style={{ fontFamily: 'monospace', fontSize: 11, color: '#93c5fd' }}>
+                  <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--accent-soft)' }}>
                     {c.profile?.uniqueCode || c.programmeId}
                   </td>
                   <td style={{ fontWeight: 600 }}>{c.cedentName}</td>
                   <td>{c.programmeName}</td>
                   <td>{c.renewalPeriod}</td>
-                  <td style={{ color: '#94a3b8' }}>
+                  <td style={{ color: 'var(--text-muted)' }}>
                     {c.underwriter} ({c.office})
                   </td>
                   <td>
-                    <span className="badge">{c.status}</span>
+                    <span className={`badge status-${String(c.status).toLowerCase()}`}>{c.status}</span>
                   </td>
                   <td className="num">{fmtRatioPct(c.signedLine, 1)}</td>
                   <td className="num">{fmtMoneyM(c.limit, 1)}</td>
                   <td className="num">{fmtMoneyM(c.depositPremium, 2)}</td>
                   <td className="num">{fmtRatioPct(c.rol, 2)}</td>
-                  <td className="num" style={{ color: rarc >= 0 ? '#4ade80' : '#f87171', fontWeight: 600 }}>
+                  <td className="num" style={{ color: rarc >= 0 ? 'var(--positive)' : 'var(--negative)', fontWeight: 600 }}>
                     {fmtPct(rarc, 1, { signed: true })}
                   </td>
                   <td
@@ -412,14 +412,14 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
         <div className="card">
           <div className="card-title">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ fontFamily: 'monospace', color: '#38bdf8' }}>
+              <span style={{ fontFamily: 'var(--mono)', color: 'var(--accent)' }}>
                 {draftProfile.uniqueCode || d.contract.programmeId}
               </span>
               <span>
                 {d.contract.cedentName} — {d.contract.programmeName}
               </span>
-              <span className="badge">{d.contract.status}</span>
-              <span style={{ fontSize: 11, color: '#94a3b8' }}>
+              <span className={`badge status-${String(d.contract.status).toLowerCase()}`}>{d.contract.status}</span>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                 {draftProfile.tradingUnit} · {draftProfile.planningClass} · {draftProfile.cedentCreditRating}
               </span>
             </div>
@@ -470,13 +470,13 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
             </div>
             <div className="kpi">
               <div className="kpi-label">Risk-Adj Rate Change (RARC)</div>
-              <div className="kpi-val" style={{ color: draftProfile.rarcTotalPct >= 0 ? '#22c55e' : '#ef4444' }}>
+              <div className="kpi-val" style={{ color: draftProfile.rarcTotalPct >= 0 ? 'var(--positive)' : 'var(--negative)' }}>
                 {fmtPct(draftProfile.rarcTotalPct, 2, { signed: true })}
               </div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Modelled EL (Adj)</div>
-              <div className="kpi-val" style={{ color: '#38bdf8' }}>
+              <div className="kpi-val" style={{ color: 'var(--accent)' }}>
                 {fmtMoneyM(totalAdjEl, 2)}
               </div>
             </div>
@@ -496,7 +496,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                   style={{
                     background: 'rgba(34, 197, 94, 0.12)',
                     border: '1px solid rgba(34, 197, 94, 0.4)',
-                    color: '#86efac',
+                    color: '#7fe0a9',
                     borderRadius: 6,
                     padding: '6px 10px',
                     fontSize: 12,
@@ -507,12 +507,12 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                 </div>
               )}
               <div className="grid-2" style={{ marginBottom: 12 }}>
-                <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
-                  <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 10 }}>
+                <div className="panel">
+                  <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 10 }}>
                     Programme Identification, Counterparty &amp; Team
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(145px, 1fr))', gap: 8 }}>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Unique Code
                       <input
                         value={draftProfile.uniqueCode}
@@ -520,7 +520,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Program Code
                       <input
                         value={draftProfile.programCode}
@@ -528,7 +528,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Credit Rating
                       <input
                         value={draftProfile.cedentCreditRating}
@@ -536,7 +536,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Trading Unit
                       <input
                         value={draftProfile.tradingUnit}
@@ -544,7 +544,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Closing Broker
                       <input
                         value={draftProfile.closingBroker ?? ''}
@@ -552,7 +552,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Broker Contact
                       <input
                         value={draftProfile.brokerContact ?? ''}
@@ -560,7 +560,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Pricing Analyst
                       <input
                         value={draftProfile.pricingAnalyst ?? ''}
@@ -568,7 +568,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Claim Trigger
                       <select
                         value={draftProfile.claimTrigger}
@@ -579,7 +579,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         <option value="RISK_ATTACHING">Risk Attaching</option>
                       </select>
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Reinstatement Basis
                       <select
                         value={draftProfile.reinstatementBasis}
@@ -592,7 +592,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       </select>
                     </label>
                   </div>
-                  <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginTop: 8 }}>
+                  <label style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
                     Inuring / Wording Summary
                     <input
                       value={draftProfile.inuringNote ?? ''}
@@ -600,7 +600,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       style={{ width: '100%', marginTop: 3 }}
                     />
                   </label>
-                  <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginTop: 8 }}>
+                  <label style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
                     External Slip / Document Folder Path
                     <input
                       value={draftProfile.externalFilePath ?? ''}
@@ -611,9 +611,9 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                 </div>
 
                 {/* Right: Risk-Adjusted Rate Change (RARC) & Prior UY Comparison */}
-                <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
+                <div className="panel">
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                    <span style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd' }}>
+                    <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
                       Risk-Adjusted Rate Change (RARC) &amp; YoY Renewal Comparison
                     </span>
                     <button
@@ -625,7 +625,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </button>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 8, marginBottom: 12 }}>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Econ Inflation %
                       <input
                         type="number"
@@ -635,7 +635,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Social Inflation %
                       <input
                         type="number"
@@ -645,7 +645,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Gearing Effect %
                       <input
                         type="number"
@@ -655,7 +655,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Exposure Δ %
                       <input
                         type="number"
@@ -665,7 +665,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Layer Δ %
                       <input
                         type="number"
@@ -675,7 +675,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         style={{ width: '100%', marginTop: 3 }}
                       />
                     </label>
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       RARC Total %
                       <input
                         type="number"
@@ -699,7 +699,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </thead>
                     <tbody>
                       <tr>
-                        <td style={{ color: '#94a3b8' }}>Previous UY ({d.contract.treatyYear - 1})</td>
+                        <td style={{ color: 'var(--text-muted)' }}>Previous UY ({d.contract.treatyYear - 1})</td>
                         <td className="num">
                           {draftProfile.priorYearLimitM != null ? `$${draftProfile.priorYearLimitM.toFixed(1)}m` : '—'}
                         </td>
@@ -725,7 +725,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
 
                   {d.relatedProgrammes.length > 0 && (
                     <div style={{ marginTop: 10 }}>
-                      <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
                         Other Programmes for {d.contract.cedentName}:
                       </div>
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -746,7 +746,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               </div>
 
               {/* Full Year-over-Year Renewal Chain Panel */}
-              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
+              <div className="panel">
                 <div
                   style={{
                     display: 'flex',
@@ -757,11 +757,11 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     marginBottom: 10,
                   }}
                 >
-                  <span style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd' }}>
+                  <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
                     Year-over-Year Renewal Chain ({d.renewalChain?.length ?? 0} linked underwriting years)
                   </span>
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                    <label style={{ fontSize: 11, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6 }}>
                       Prior Year Link:
                       <select
                         value={d.contract.priorContractId ?? ''}
@@ -780,7 +780,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </label>
                     <button
                       className="btn"
-                      style={{ background: '#0f766e' }}
+                      style={{ background: 'var(--teal-strong)' }}
                       onClick={() => renewMut.mutate()}
                       disabled={renewMut.isPending}
                     >
@@ -815,20 +815,20 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         }}
                       >
                         <td style={{ fontWeight: 700 }}>{row.treatyYear} ({row.renewalPeriod})</td>
-                        <td style={{ fontFamily: 'monospace', fontSize: 11, color: '#93c5fd' }}>{row.uniqueCode}</td>
+                        <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--accent-soft)' }}>{row.uniqueCode}</td>
                         <td>{row.programmeName}</td>
-                        <td><span className="badge">{row.status}</span></td>
+                        <td><span className={`badge status-${String(row.status).toLowerCase()}`}>{row.status}</span></td>
                         <td className="num">{fmtMoneyM(row.limit, 1)}</td>
-                        <td className="num" style={{ color: row.yoyLimitDeltaM == null ? '#64748b' : row.yoyLimitDeltaM >= 0 ? '#4ade80' : '#f87171' }}>
+                        <td className="num" style={{ color: row.yoyLimitDeltaM == null ? 'var(--text-faint)' : row.yoyLimitDeltaM >= 0 ? 'var(--positive)' : 'var(--negative)' }}>
                           {fmtMoneyM(row.yoyLimitDeltaM, 1, { signed: true })}
                         </td>
                         <td className="num">{fmtMoneyM(row.depositPremium, 2)}</td>
                         <td className="num">{fmtPct(row.rolPct, 2)}</td>
-                        <td className="num" style={{ color: row.yoyRolDeltaPts == null ? '#64748b' : row.yoyRolDeltaPts >= 0 ? '#4ade80' : '#f87171' }}>
+                        <td className="num" style={{ color: row.yoyRolDeltaPts == null ? 'var(--text-faint)' : row.yoyRolDeltaPts >= 0 ? 'var(--positive)' : 'var(--negative)' }}>
                           {fmtPts(row.yoyRolDeltaPts, 2)}
                         </td>
                         <td className="num">{fmtRatioPct(row.signedLine, 1)}</td>
-                        <td className="num" style={{ color: row.rarcTotalPct >= 0 ? '#4ade80' : '#f87171', fontWeight: 600 }}>
+                        <td className="num" style={{ color: row.rarcTotalPct >= 0 ? 'var(--positive)' : 'var(--negative)', fontWeight: 600 }}>
                           {fmtPct(row.rarcTotalPct, 1, { signed: true })}
                         </td>
                       </tr>
@@ -842,8 +842,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
           {/* ── Sub-tab 2: Underwriting & Discussion Notes ── */}
           {dossierTab === 'notes' && (
             <div className="grid-2">
-              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
-                <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 8 }}>
+              <div className="panel">
+                <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 8 }}>
                   Add Underwriting / Pricing / Broker Note
                 </div>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
@@ -877,9 +877,9 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                 </button>
               </div>
 
-              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
+              <div className="panel">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                  <span style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd' }}>Discussion Trail</span>
+                  <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>Discussion Trail</span>
                   <div style={{ display: 'flex', gap: 6 }}>
                     <button
                       className={`tab ${noteScope === 'programme' ? 'active' : ''}`}
@@ -896,15 +896,15 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                   </div>
                 </div>
                 {visibleNotes.length === 0 ? (
-                  <div style={{ color: '#64748b', fontSize: 12 }}>No notes recorded yet.</div>
+                  <div style={{ color: 'var(--text-faint)', fontSize: 12 }}>No notes recorded yet.</div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {visibleNotes.map((n) => (
                       <div
                         key={n.noteId}
                         style={{
-                          background: '#131a29',
-                          border: '1px solid #26324a',
+                          background: 'var(--surface)',
+                          border: '1px solid var(--border-strong)',
                           borderRadius: 6,
                           padding: 10,
                         }}
@@ -916,7 +916,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                             </span>
                             <strong>{n.author}</strong>
                           </span>
-                          <span style={{ color: '#64748b' }}>
+                          <span style={{ color: 'var(--text-faint)' }}>
                             {new Date(n.createdAt).toLocaleString()}
                           </span>
                         </div>
@@ -932,7 +932,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
           {/* ── Sub-tab 3: Live Pricing & Modeling Linkage ── */}
           {dossierTab === 'pricing' && (
             <div className="grid-2">
-              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
+              <div className="panel">
                 <div
                   style={{
                     display: 'flex',
@@ -943,7 +943,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     marginBottom: 8,
                   }}
                 >
-                  <span style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd' }}>
+                  <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
                     Linked Pricing DAG ({d.pricingLink.graphId} v{d.pricingLink.graphVersion})
                   </span>
                   <div style={{ display: 'flex', gap: 6 }}>
@@ -980,7 +980,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                         <tr key={a.nodeId}>
                           <td style={{ fontWeight: 600 }}>{a.nodeLabel}</td>
                           <td className="num">{fmtMoneyM(u?.el ?? 0, 3)}</td>
-                          <td className="num" style={{ color: '#38bdf8', fontWeight: 600 }}>
+                          <td className="num" style={{ color: 'var(--accent)', fontWeight: 600 }}>
                             {fmtMoneyM(a.el, 3)}
                           </td>
                           <td className="num">{fmtMoneyM(a.expectedRip, 3)}</td>
@@ -993,7 +993,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                 </table>
               </div>
 
-              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
+              <div className="panel">
                 <div
                   style={{
                     display: 'flex',
@@ -1004,7 +1004,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     marginBottom: 10,
                   }}
                 >
-                  <span style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd' }}>
+                  <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
                     Linked Simulation Set, Uplifts &amp; Cat Model Runs
                   </span>
                   <div style={{ display: 'flex', gap: 6 }}>
@@ -1027,8 +1027,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                 {d.modelingLink.simSet && (
                   <div
                     style={{
-                      background: '#131a29',
-                      border: '1px solid #26324a',
+                      background: 'var(--surface)',
+                      border: '1px solid var(--border-strong)',
                       borderRadius: 6,
                       padding: 10,
                       marginBottom: 10,
@@ -1037,14 +1037,14 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                   >
                     <div>
                       <strong>SimSet:</strong> {d.modelingLink.simSet.name}{' '}
-                      <code style={{ color: '#5eead4' }}>#{d.modelingLink.simSet.contentHash?.slice(0, 8)}</code>
+                      <code style={{ color: 'var(--teal)' }}>#{d.modelingLink.simSet.contentHash?.slice(0, 8)}</code>
                     </div>
-                    <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 3 }}>
+                    <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 3 }}>
                       Catalog: {d.modelingLink.simSet.eventCatalogId} ·{' '}
                       {fmtInt(d.modelingLink.simSet.numTrials)} trials ·{' '}
                       {fmtInt(d.modelingLink.simSet.totalEvents)} events
                     </div>
-                    <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 3 }}>
+                    <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 3 }}>
                       <strong>House Uplift Set:</strong> {d.modelingLink.upliftSet.name} (v
                       {d.modelingLink.upliftSet.version}) —{' '}
                       {d.modelingLink.upliftSet.rules
@@ -1055,7 +1055,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                 )}
 
                 {d.modelingLink.modelRuns.length === 0 ? (
-                  <div style={{ color: '#64748b', fontSize: 12 }}>
+                  <div style={{ color: 'var(--text-faint)', fontSize: 12 }}>
                     No vendor API runs triggered for this programme yet. Use &quot;Trigger Model Run&quot; above.
                   </div>
                 ) : (
@@ -1072,13 +1072,13 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     <tbody>
                       {d.modelingLink.modelRuns.map((j) => (
                         <tr key={j.jobId}>
-                          <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{j.jobId}</td>
+                          <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{j.jobId}</td>
                           <td>
                             {j.vendor} {j.modelVersion}
                           </td>
-                          <td style={{ color: '#94a3b8' }}>{j.edmDatabaseName}</td>
+                          <td style={{ color: 'var(--text-muted)' }}>{j.edmDatabaseName}</td>
                           <td className="pass">{j.status}</td>
-                          <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{j.simSetId}</td>
+                          <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{j.simSetId}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1091,7 +1091,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
           {/* ── Sub-tab 4: ExposureEclipse & Audit Linkage ── */}
           {dossierTab === 'exposure' && (
             <div className="grid-2">
-              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
+              <div className="panel">
                 <div
                   style={{
                     display: 'flex',
@@ -1102,12 +1102,12 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     marginBottom: 10,
                   }}
                 >
-                  <span style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd' }}>
+                  <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
                     ExposureEclipse (Peril Vista) Linkage
                   </span>
                   <button
                     className="btn"
-                    style={{ background: '#0f766e' }}
+                    style={{ background: 'var(--teal-strong)' }}
                     onClick={() => syncEeMut.mutate()}
                     disabled={syncEeMut.isPending}
                   >
@@ -1119,7 +1119,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     <div style={{ fontSize: 12, marginBottom: 8 }}>
                       <strong>EDM:</strong> <code>{d.exposureLink.edmDatabaseName}</code> ·{' '}
                       <strong>Total TIV:</strong> {fmtMoneyB(d.exposureLink.totalTivM / 1000, 2)} ·{' '}
-                      <span style={{ color: '#94a3b8' }}>Server: {d.exposureLink.serverName}</span>
+                      <span style={{ color: 'var(--text-muted)' }}>Server: {d.exposureLink.serverName}</span>
                     </div>
                     <table>
                       <thead>
@@ -1132,7 +1132,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       <tbody>
                         {Object.entries(d.exposureLink.granularTivM ?? {}).map(([rp, tiv]) => (
                           <tr key={rp}>
-                            <td style={{ color: '#93c5fd', fontWeight: 600 }}>{rp}</td>
+                            <td style={{ color: 'var(--accent-soft)', fontWeight: 600 }}>{rp}</td>
                             <td className="num">{fmtMoneyM(Number(tiv), 0)}</td>
                             <td className="num">
                               {fmtPct((Number(tiv) / Math.max(d.exposureLink!.totalTivM, 1)) * 100, 1)}
@@ -1143,18 +1143,18 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </table>
                   </>
                 ) : (
-                  <div style={{ color: '#64748b', fontSize: 12 }}>
+                  <div style={{ color: 'var(--text-faint)', fontSize: 12 }}>
                     No ExposureEclipse programme linked yet. Link an EDM via <code>exposureEclipseProgrammeId</code>.
                   </div>
                 )}
               </div>
 
-              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
-                <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 10 }}>
+              <div className="panel">
+                <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 10 }}>
                   Audit Trail, Claims ({d.claimsCount}) &amp; Breadcrumb Manifests
                 </div>
                 {d.recentManifests.length === 0 ? (
-                  <div style={{ color: '#64748b', fontSize: 12 }}>
+                  <div style={{ color: 'var(--text-faint)', fontSize: 12 }}>
                     No persisted run manifests for this programme yet — evaluate in DAG Studio or Burn &amp; Claims.
                   </div>
                 ) : (
@@ -1170,9 +1170,9 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     <tbody>
                       {d.recentManifests.map((m) => (
                         <tr key={m.manifestId}>
-                          <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{m.manifestId}</td>
+                          <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{m.manifestId}</td>
                           <td>{m.runType}</td>
-                          <td style={{ fontFamily: 'monospace', fontSize: 11, color: '#94a3b8' }}>
+                          <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>
                             #{m.outputHash.slice(0, 10)}
                           </td>
                           <td className={`num ${m.isStale ? 'fail' : 'pass'}`}>{m.isStale ? 'STALE' : 'FRESH'}</td>

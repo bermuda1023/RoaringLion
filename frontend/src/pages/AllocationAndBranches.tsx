@@ -78,14 +78,14 @@ export function AllocationAndBranches() {
     <>
       <div className="card">
         <div className="card-title">
-          <span>Gross vs Net Retro Cost & Benefit Allocation + Collateralized Fund IRR Waterfall</span>
+          <span>Retro Allocation & Fund Waterfall</span>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <select value={allocMethod} onChange={(e) => setAllocMethod(e.target.value)}>
               <option value="TAIL_RELIEF_COTVAR">Tail Relief (Co-TVaR)</option>
               <option value="EXPECTED_RECOVERY">Expected Recovery Share</option>
               <option value="HYBRID_RECOVERY_TAIL">Hybrid (70% Tail / 30% Rec)</option>
             </select>
-            <label style={{ fontSize: 11, color: '#94a3b8' }}>
+            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
               Retro ILW Limit ($M)
               <input type="number" value={retroLimit} onChange={(e) => setRetroLimit(Number(e.target.value))} style={{ width: 65, marginLeft: 4 }} />
             </label>
@@ -114,7 +114,7 @@ export function AllocationAndBranches() {
               </div>
               <div className="kpi">
                 <div className="kpi-label">Net Effective IRR</div>
-                <div className="kpi-val" style={{ color: '#38bdf8' }}>{fmtPct(alloc.waterfall.netEffectiveIrrPct, 2)}</div>
+                <div className="kpi-val" style={{ color: 'var(--accent)' }}>{fmtPct(alloc.waterfall.netEffectiveIrrPct, 2)}</div>
               </div>
               <div className="kpi">
                 <div className="kpi-label">Exp Trapped Collat</div>
@@ -122,7 +122,7 @@ export function AllocationAndBranches() {
               </div>
               <div className="kpi">
                 <div className="kpi-label">Gross → Net TVaR 250</div>
-                <div className="kpi-val" style={{ color: '#22c55e' }}>
+                <div className="kpi-val" style={{ color: 'var(--positive)' }}>
                   {fmtMoneyM(alloc.waterfall.grossTvar250, 1)} → {fmtMoneyM(alloc.waterfall.netTvar250, 1)}
                 </div>
               </div>
@@ -154,9 +154,9 @@ export function AllocationAndBranches() {
                     <td className="num">{fmtPct(l.grossMrocPct, 1)}</td>
                     <td className="num">{fmtMoneyM(l.allocatedRetroCost, 2)}</td>
                     <td className="num">{fmtMoneyM(l.allocatedRetroRecovery, 2)}</td>
-                    <td className="num" style={{ color: '#22c55e' }}>{fmtMoneyM(l.retroTvarRelief, 2)}</td>
+                    <td className="num" style={{ color: 'var(--positive)' }}>{fmtMoneyM(l.retroTvarRelief, 2)}</td>
                     <td className="num">{fmtMoneyM(l.netCotvar250, 2)}</td>
-                    <td className="num" style={{ color: '#38bdf8', fontWeight: 600 }}>{fmtPct(l.netMrocPct, 1)}</td>
+                    <td className="num" style={{ color: 'var(--accent)', fontWeight: 600 }}>{fmtPct(l.netMrocPct, 1)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -168,11 +168,11 @@ export function AllocationAndBranches() {
       <div className="grid-2">
         <div className="card">
           <div className="card-title">
-            <span>Versioned Portfolio Branching & All-Direction Backtest (1990–2025)</span>
+            <span>Portfolio Branches & Backtest · 1990–2025</span>
           </div>
           <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
             <input value={branchName} onChange={(e) => setBranchName(e.target.value)} style={{ width: 160 }} />
-            <label style={{ fontSize: 11, color: '#94a3b8' }}>
+            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
               Farmers Share (%)
               <input
                 type="number"
@@ -187,7 +187,7 @@ export function AllocationAndBranches() {
             </button>
           </div>
           {diffMut.data && (
-            <div style={{ padding: 8, background: '#0d1422', borderRadius: 6, marginBottom: 8, fontSize: 12 }}>
+            <div style={{ padding: 8, background: 'var(--surface-sunken)', borderRadius: 6, marginBottom: 8, fontSize: 12 }}>
               <strong>Branch Diff ({diffMut.data.branchName}):</strong> Mean ROC {fmtPct(diffMut.data.baselineMeanRocPct, 2)} →{' '}
               {fmtPct(diffMut.data.branchMeanRocPct, 2)} ({fmtPct(diffMut.data.deltaMeanRocPct, 2, { signed: true })}) | TVaR 250{' '}
               {fmtMoneyM(diffMut.data.baselineTvar250, 1)} → {fmtMoneyM(diffMut.data.branchTvar250, 1)} (
@@ -195,29 +195,29 @@ export function AllocationAndBranches() {
             </div>
           )}
           {btMut.data && (
-            <div style={{ fontSize: 12, color: '#94a3b8' }}>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
               Historical Backtest (1990–2025 Trended As-Is): Baseline Avg ROC{' '}
-              <strong style={{ color: '#e6edf7' }}>{btMut.data.baselineAvgRocPct}%</strong>
+              <strong style={{ color: 'var(--text)' }}>{btMut.data.baselineAvgRocPct}%</strong>
               {btMut.data.branchAvgRocPct != null && (
                 <>
                   {' '}
-                  | Branch Avg ROC <strong style={{ color: '#38bdf8' }}>{btMut.data.branchAvgRocPct}%</strong>
+                  | Branch Avg ROC <strong style={{ color: 'var(--accent)' }}>{btMut.data.branchAvgRocPct}%</strong>
                 </>
               )}{' '}
               | Worst Year: <strong>{btMut.data.worstYearBaseline}</strong> ({btMut.data.worstYearRocPct}%)
             </div>
           )}
-          <div style={{ marginTop: 8, fontSize: 11, color: '#64748b' }}>
+          <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-faint)' }}>
             Saved branches: {branchesQ.data?.length ?? 0}
           </div>
         </div>
 
         <div className="card">
           <div className="card-title">
-            <span>Scenario Forge — Reverse Stress Testing</span>
+            <span>Reverse Stress Testing</span>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
-            <label style={{ fontSize: 11, color: '#94a3b8' }}>
+            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
               Target Breach ROC (%)
               <input type="number" step="5" value={targetRoc} onChange={(e) => setTargetRoc(Number(e.target.value))} style={{ width: 70, marginLeft: 4 }} />
             </label>
@@ -226,12 +226,12 @@ export function AllocationAndBranches() {
             </button>
           </div>
           {reverseMut.data && (
-            <div style={{ padding: 10, background: '#0d1422', borderRadius: 6, fontSize: 12 }}>
+            <div style={{ padding: 10, background: 'var(--surface-sunken)', borderRadius: 6, fontSize: 12 }}>
               <div>
                 <span className="badge">{reverseMut.data.scenario.provenanceTag}</span>{' '}
                 <strong>{reverseMut.data.scenario.name}</strong>
               </div>
-              <div style={{ marginTop: 6, color: '#93c5fd' }}>
+              <div style={{ marginTop: 6, color: 'var(--accent-soft)' }}>
                 Required FL Ground-Up Loss: <strong>${reverseMut.data.requiredGroundUpM.toFixed(2)}m</strong> (×
                 {reverseMut.data.requiredMultiplier}) → Fund Loss ${reverseMut.data.resultingPortfolioLossM.toFixed(2)}m →
                 ROC <strong>{reverseMut.data.resultingRocPct}%</strong>

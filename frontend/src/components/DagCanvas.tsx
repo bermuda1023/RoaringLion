@@ -3,21 +3,27 @@ import '@xyflow/react/dist/style.css';
 import type { GraphSpec, NodeViewMetrics } from '../types/contracts';
 
 function nodeStyle(nodeType: string): React.CSSProperties {
-  const base: React.CSSProperties = {
-    borderRadius: 6,
+  const accent =
+    nodeType === 'LOSS_SOURCE'
+      ? '#4c9dff'
+      : nodeType === 'REGION_PERIL_FILTER' || nodeType === 'COMBINATION'
+        ? '#8b95a8'
+        : nodeType === 'OCC_XL' || nodeType === 'AGG_XL'
+          ? '#f2b544'
+          : '#3cc9b0';
+  return {
+    borderRadius: 8,
     padding: '8px 12px',
     fontSize: 12,
-    fontWeight: 600,
-    color: '#f8fafc',
-    border: '1px solid rgba(255,255,255,0.2)',
+    fontWeight: 500,
+    color: 'var(--text)',
+    background: 'var(--surface-2)',
+    border: '1px solid var(--border-strong)',
+    borderLeft: `3px solid ${accent}`,
+    boxShadow: '0 6px 16px rgba(0, 0, 0, 0.35)',
     minWidth: 195,
-    textAlign: 'center',
+    textAlign: 'left',
   };
-  if (nodeType === 'LOSS_SOURCE') return { ...base, background: '#1d4ed8' };
-  if (nodeType === 'REGION_PERIL_FILTER' || nodeType === 'COMBINATION')
-    return { ...base, background: '#475569' };
-  if (nodeType === 'OCC_XL' || nodeType === 'AGG_XL') return { ...base, background: '#9f2b4b' };
-  return { ...base, background: '#0f766e' };
 }
 
 export function DagCanvas({
@@ -65,16 +71,16 @@ export function DagCanvas({
     target: e.target,
     animated: false,
     style: {
-      stroke: e.sign < 0 ? '#f59e0b' : '#94a3b8',
+      stroke: e.sign < 0 ? 'var(--warning)' : 'var(--text-muted)',
       strokeWidth: 2,
       strokeDasharray: e.sign < 0 ? '6 4' : undefined,
     },
   }));
 
   return (
-    <div style={{ height: 360, background: '#0a0f18', borderRadius: 6, border: '1px solid #26324a' }}>
+    <div style={{ height: 360, background: 'var(--surface-sunken)', borderRadius: 6, border: '1px solid var(--border-strong)' }}>
       <ReactFlow nodes={nodes} edges={edges} fitView proOptions={{ hideAttribution: true }}>
-        <Background color="#1e293b" gap={18} />
+        <Background color="#232b3a" gap={22} />
         <Controls />
       </ReactFlow>
     </div>

@@ -52,7 +52,7 @@ export function CatModelsAndOps() {
       <div className="grid-2">
         <div className="card">
           <div className="card-title">
-            <span>Automated Cat Model API Orchestrator (RMS · AIR · KCC · Oasis)</span>
+            <span>Cat Model Orchestrator</span>
             <div style={{ display: 'flex', gap: 8 }}>
               <select value={vendor} onChange={(e) => setVendor(e.target.value)}>
                 <option value="RMS">Moody&apos;s RMS IRP</option>
@@ -79,13 +79,20 @@ export function CatModelsAndOps() {
               </tr>
             </thead>
             <tbody>
+              {jobsQ.data?.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="empty-cell">
+                    No model runs yet. Trigger an API run to queue one.
+                  </td>
+                </tr>
+              )}
               {jobsQ.data?.map((j) => (
                 <tr key={j.jobId}>
-                  <td style={{ fontFamily: 'monospace' }}>{j.jobId}</td>
+                  <td style={{ fontFamily: 'var(--mono)' }}>{j.jobId}</td>
                   <td>{j.vendor} {j.modelVersion}</td>
                   <td>{j.edmDatabaseName}</td>
                   <td><span className="pass">{j.status}</span> ({j.mode})</td>
-                  <td style={{ fontFamily: 'monospace', color: '#5eead4' }}>{j.simSetId}</td>
+                  <td style={{ fontFamily: 'var(--mono)', color: 'var(--teal)' }}>{j.simSetId}</td>
                 </tr>
               ))}
             </tbody>
@@ -94,7 +101,7 @@ export function CatModelsAndOps() {
 
         <div className="card">
           <div className="card-title">
-            <span>ExposureEclipse (Peril Vista) Bridge — EDMRef & Granular TIV</span>
+            <span>ExposureEclipse Bridge</span>
           </div>
           <table>
             <thead>
@@ -109,9 +116,9 @@ export function CatModelsAndOps() {
               {eeQ.data?.map((p) => (
                 <tr key={p.programmeId}>
                   <td style={{ fontWeight: 600 }}>{p.cedentName}</td>
-                  <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{p.edmDatabaseName}</td>
+                  <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{p.edmDatabaseName}</td>
                   <td className="num">{fmtMoneyM(p.totalTivM, 0)}</td>
-                  <td style={{ fontSize: 11, color: '#93c5fd' }}>
+                  <td style={{ fontSize: 11, color: 'var(--accent-soft)' }}>
                     {Object.entries(p.granularTivM).map(([k, v]) => `${k}: ${fmtMoneyM(Number(v), 0)}`).join(' · ')}
                   </td>
                 </tr>
@@ -124,7 +131,7 @@ export function CatModelsAndOps() {
       <div className="grid-2">
         <div className="card">
           <div className="card-title">
-            <span>Fund Operations — Investor Series NAV, Side Pockets & Market Marks</span>
+            <span>Fund Operations · NAV & Side Pockets</span>
           </div>
           <table>
             <thead>
@@ -139,7 +146,7 @@ export function CatModelsAndOps() {
             <tbody>
               {invQ.data?.map((inv) => (
                 <tr key={inv.seriesId}>
-                  <td style={{ fontFamily: 'monospace' }}>{inv.seriesId}</td>
+                  <td style={{ fontFamily: 'var(--mono)' }}>{inv.seriesId}</td>
                   <td>{inv.investorName}</td>
                   <td><span className="badge">{inv.shareClass}</span></td>
                   <td className="num">{fmtMoneyM(inv.navM, 1)}</td>
@@ -148,14 +155,14 @@ export function CatModelsAndOps() {
               ))}
             </tbody>
           </table>
-          <div style={{ marginTop: 10, fontSize: 11, color: '#94a3b8' }}>
+          <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
             Market Marks: {marksQ.data?.map((m) => `${m.name} (${fmtPct(m.indicativeSpreadPct, 2)})`).join(' | ')}
           </div>
         </div>
 
         <div className="card">
           <div className="card-title">
-            <span>Slip Intake Draft Extractor (Human Confirmation Required)</span>
+            <span>Slip Intake</span>
             <button className="btn" onClick={() => slipMut.mutate()}>
               Extract Draft Terms
             </button>
@@ -164,10 +171,10 @@ export function CatModelsAndOps() {
             value={slipText}
             onChange={(e) => setSlipText(e.target.value)}
             rows={3}
-            style={{ width: '100%', background: '#0d1422', color: '#e6edf7', border: '1px solid #26324a', borderRadius: 6, padding: 8, fontSize: 12 }}
+            style={{ width: '100%', background: 'var(--surface-sunken)', color: 'var(--text)', border: '1px solid var(--border-strong)', borderRadius: 6, padding: 8, fontSize: 12 }}
           />
           {slipMut.data && (
-            <div style={{ marginTop: 8, padding: 8, background: '#0d1422', borderRadius: 6, fontSize: 12, color: '#5eead4' }}>
+            <div style={{ marginTop: 8, padding: 8, background: 'var(--surface-sunken)', borderRadius: 6, fontSize: 12, color: 'var(--teal)' }}>
               Extracted Draft: <strong>{slipMut.data.cedentName}</strong> · {fmtMoneyM(slipMut.data.limitM, 1)} xs {fmtMoneyM(slipMut.data.attachmentM, 1)} · ROL {fmtRatioPct(slipMut.data.rol, 1)} · {slipMut.data.hoursClause}h · {slipMut.data.regionPerils.join(', ')}
             </div>
           )}

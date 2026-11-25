@@ -22,20 +22,9 @@ const AVAILABLE_PERILS = [
 ];
 const AVAILABLE_REGION_PERILS = ['US-FL-WS', 'US-TX-WS', 'US-SE-WS', 'US-CA-EQ', 'JP-KANTO-EQ', 'EU-DE-WS'];
 
-function nodeStyle(nodeType: string, selected: boolean): React.CSSProperties {
-  const base: React.CSSProperties = {
-    borderRadius: 6,
-    padding: '8px 12px',
-    fontSize: 11,
-    fontWeight: 600,
-    color: '#f8fafc',
-    border: selected ? '2px solid #38bdf8' : '1px solid rgba(255,255,255,0.2)',
-    minWidth: 185,
-    textAlign: 'center',
-  };
-  if (nodeType === 'LOSS_SOURCE' || nodeType === 'INDUSTRY_INDEX_SOURCE') return { ...base, background: '#1d4ed8' };
-  if (nodeType.includes('FILTER') || nodeType === 'COMBINATION' || nodeType === 'UPLIFT')
-    return { ...base, background: '#475569' };
+function nodeAccent(nodeType: string): string {
+  if (nodeType === 'LOSS_SOURCE' || nodeType === 'INDUSTRY_INDEX_SOURCE') return '#4c9dff';
+  if (nodeType.includes('FILTER') || nodeType === 'COMBINATION' || nodeType === 'UPLIFT') return '#8b95a8';
   if (
     nodeType === 'OCC_XL' ||
     nodeType === 'AGG_XL' ||
@@ -44,10 +33,26 @@ function nodeStyle(nodeType: string, selected: boolean): React.CSSProperties {
     nodeType === 'SURPLUS_SHARE' ||
     nodeType === 'CASCADING_TOWER' ||
     nodeType === 'ILW_OPTION'
-  ) {
-    return { ...base, background: '#9f2b4b' };
-  }
-  return { ...base, background: '#0f766e' };
+  )
+    return '#f2b544';
+  return '#3cc9b0';
+}
+
+function nodeStyle(nodeType: string, selected: boolean): React.CSSProperties {
+  const accent = nodeAccent(nodeType);
+  return {
+    borderRadius: 8,
+    padding: '8px 12px',
+    fontSize: 11,
+    fontWeight: 500,
+    color: 'var(--text)',
+    background: 'var(--surface-2)',
+    border: `1px solid ${selected ? 'var(--accent)' : 'var(--border-strong)'}`,
+    borderLeft: `3px solid ${accent}`,
+    boxShadow: selected ? '0 0 0 3px rgba(76, 157, 255, 0.22)' : '0 6px 16px rgba(0, 0, 0, 0.35)',
+    minWidth: 185,
+    textAlign: 'left',
+  };
 }
 
 export function StructuringStudio({
@@ -177,10 +182,10 @@ export function StructuringStudio({
     source: e.source,
     target: e.target,
     label: e.sign < 0 ? `−${e.weight}` : e.weight !== 1 ? `×${e.weight}` : undefined,
-    labelStyle: { fill: '#f8fafc', fontSize: 10 },
-    labelBgStyle: { fill: '#1e293b' },
+    labelStyle: { fill: 'var(--text-strong)', fontSize: 10 },
+    labelBgStyle: { fill: 'var(--surface-3)' },
     style: {
-      stroke: e.edgeId === selectedEdgeId ? '#38bdf8' : e.sign < 0 ? '#f59e0b' : '#94a3b8',
+      stroke: e.edgeId === selectedEdgeId ? 'var(--accent)' : e.sign < 0 ? 'var(--warning)' : 'var(--text-muted)',
       strokeWidth: e.edgeId === selectedEdgeId ? 3 : 2,
       strokeDasharray: e.sign < 0 ? '6 4' : undefined,
     },
@@ -243,8 +248,8 @@ export function StructuringStudio({
       <div className="card">
         <div className="card-title">
           <span>
-            Interactive DAG Structuring Studio — v{selectedProg.graph.version}{' '}
-            {dirty && <span style={{ color: '#f59e0b', marginLeft: 6 }}>(Unsaved edits)</span>}
+            Calculation Graph <span className="badge">v{selectedProg.graph.version}</span>
+            {dirty && <span style={{ color: 'var(--warning)', marginLeft: 6 }}>Unsaved changes</span>}
           </span>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <select
@@ -258,7 +263,7 @@ export function StructuringStudio({
                 </option>
               ))}
             </select>
-            <label style={{ color: '#94a3b8', fontSize: 11 }}>
+            <label style={{ color: 'var(--text-muted)', fontSize: 11 }}>
               Uplift ×
               <input
                 type="number"
@@ -279,7 +284,7 @@ export function StructuringStudio({
             </button>
             <button
               className="btn"
-              style={{ background: '#0f766e' }}
+              style={{ background: 'var(--teal-strong)' }}
               onClick={() => bindMut.mutate()}
               disabled={bindMut.isPending}
             >
@@ -311,16 +316,16 @@ export function StructuringStudio({
 
         <div className="studio-layout">
           {/* Left Inspector */}
-          <div className="studio-panel" style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 10 }}>
-            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: '#93c5fd' }}>
+          <div className="studio-panel panel" style={{ padding: 10 }}>
+            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: 'var(--accent-soft)' }}>
               Node / Edge Properties
             </div>
             {selectedNode ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>
+                <div style={{ fontSize: 10, color: 'var(--text-faint)', fontFamily: 'var(--mono)' }}>
                   ID: {selectedNode.nodeId} ({selectedNode.nodeType})
                 </div>
-                <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                   Label
                   <input
                     value={selectedNode.label}
@@ -353,20 +358,20 @@ export function StructuringStudio({
                     padding: '3px 7px',
                     borderRadius: 4,
                     cursor: 'pointer',
-                    border: active ? '1px solid #38bdf8' : '1px solid #334155',
-                    background: active ? 'rgba(56, 189, 248, 0.22)' : '#131a29',
-                    color: active ? '#e0f2fe' : '#94a3b8',
+                    border: active ? '1px solid var(--accent)' : '1px solid var(--border-strong)',
+                    background: active ? 'rgba(56, 189, 248, 0.22)' : 'var(--surface)',
+                    color: active ? 'var(--accent-soft)' : 'var(--text-muted)',
                     fontWeight: active ? 600 : 400,
                   });
 
                   return (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
                       <div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#94a3b8', marginBottom: 4 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--text-muted)', marginBottom: 4 }}>
                           <span>ZONES (OR)</span>
                           {selZones.length > 0 && (
                             <button
-                              style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: 10, cursor: 'pointer', padding: 0 }}
+                              style={{ background: 'none', border: 'none', color: 'var(--accent)', fontSize: 10, cursor: 'pointer', padding: 0 }}
                               onClick={() => updateSelectedNodeParam('zones', [])}
                             >
                               Clear
@@ -383,11 +388,11 @@ export function StructuringStudio({
                       </div>
 
                       <div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#94a3b8', marginBottom: 4 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--text-muted)', marginBottom: 4 }}>
                           <span>PERILS (AND/OR)</span>
                           {selPerils.length > 0 && (
                             <button
-                              style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: 10, cursor: 'pointer', padding: 0 }}
+                              style={{ background: 'none', border: 'none', color: 'var(--accent)', fontSize: 10, cursor: 'pointer', padding: 0 }}
                               onClick={() => updateSelectedNodeParam('perils', [])}
                             >
                               Clear
@@ -404,11 +409,11 @@ export function StructuringStudio({
                       </div>
 
                       <div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#94a3b8', marginBottom: 4 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--text-muted)', marginBottom: 4 }}>
                           <span>SPECIFIC ZONE-PERILS</span>
                           {selRps.length > 0 && (
                             <button
-                              style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: 10, cursor: 'pointer', padding: 0 }}
+                              style={{ background: 'none', border: 'none', color: 'var(--accent)', fontSize: 10, cursor: 'pointer', padding: 0 }}
                               onClick={() => updateSelectedNodeParam('regionPerils', [])}
                             >
                               Clear
@@ -424,7 +429,7 @@ export function StructuringStudio({
                         </div>
                       </div>
 
-                      <div style={{ fontSize: 10, color: '#5eead4', background: '#131a29', border: '1px solid #26324a', borderRadius: 4, padding: '5px 7px' }}>
+                      <div style={{ fontSize: 10, color: 'var(--teal)', background: 'var(--surface)', border: '1px solid var(--border-strong)', borderRadius: 4, padding: '5px 7px' }}>
                         {selZones.length === 0 && selPerils.length === 0 && selRps.length === 0
                           ? 'Filter: All zones & perils (unfiltered)'
                           : `Active: ${[
@@ -478,14 +483,14 @@ export function StructuringStudio({
                                 : fmtNum(numericVal, numericVal % 1 === 0 ? 0 : 2);
 
                     return (
-                      <label key={k} style={{ fontSize: 11, color: '#94a3b8' }}>
+                      <label key={k} style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 6 }}>
                           <span>
                             {meta?.label ?? k}
                             {meta?.unit ? ` (${meta.unit})` : ''}
                           </span>
                           {formattedHint && (
-                            <span style={{ fontSize: 10, color: '#38bdf8', fontVariantNumeric: 'tabular-nums' }}>
+                            <span style={{ fontSize: 10, color: 'var(--accent)', fontVariantNumeric: 'tabular-nums' }}>
                               {formattedHint}
                             </span>
                           )}
@@ -523,10 +528,10 @@ export function StructuringStudio({
               </div>
             ) : selectedEdge ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                   Edge: {selectedEdge.source} → {selectedEdge.target}
                 </div>
-                <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                   Flow Polarity
                   <select
                     value={selectedEdge.sign}
@@ -544,7 +549,7 @@ export function StructuringStudio({
                     <option value={-1}>−1 Dashed (Subtractive / Inuring)</option>
                   </select>
                 </label>
-                <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                   Edge Weight / Load
                   <input
                     type="number"
@@ -577,7 +582,7 @@ export function StructuringStudio({
                 </button>
               </div>
             ) : (
-              <div style={{ fontSize: 11, color: '#64748b' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-faint)' }}>
                 Click any node or edge on the canvas to edit parameters, toggle solid (+) vs dashed (−) inuring edges, or connect ports.
               </div>
             )}
@@ -607,53 +612,37 @@ export function StructuringStudio({
               fitView
               proOptions={{ hideAttribution: true }}
             >
-              <Background color="#1e293b" gap={18} />
+              <Background color="#232b3a" gap={22} />
               <Controls />
             </ReactFlow>
           </div>
 
           {/* Right Rail: CMS Suggestions & Blank-Canvas Node Palette */}
-          <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 10, overflowY: 'auto', maxHeight: 400 }}>
-            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: '#5eead4' }}>
+          <div className="panel" style={{ padding: 10, overflowY: 'auto', maxHeight: 400 }}>
+            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: 'var(--teal)' }}>
               Suggested from CMS
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
               {(templatesQ.data ?? [])
                 .filter((tpl) => tpl.source === 'CMS')
                 .map((tpl) => (
-                  <button
-                    key={tpl.templateId}
-                    className="btn btn-ghost"
-                    style={{
-                      textAlign: 'left',
-                      fontSize: 11,
-                      padding: '6px 8px',
-                      borderColor: 'rgba(56, 189, 248, 0.35)',
-                      background: 'rgba(56, 189, 248, 0.08)',
-                    }}
-                    onClick={() => addTemplateNode(tpl)}
-                  >
-                    <div style={{ color: '#38bdf8', fontSize: 9, textTransform: 'uppercase' }}>{tpl.category}</div>
-                    <div>+ {tpl.label}</div>
+                  <button key={tpl.templateId} className="palette-item suggested" onClick={() => addTemplateNode(tpl)}>
+                    <span className="palette-cat">{tpl.category}</span>
+                    <span className="palette-label">{tpl.label}</span>
                   </button>
                 ))}
             </div>
 
-            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: '#94a3b8' }}>
+            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: 'var(--text-muted)' }}>
               Blank Canvas Nodes
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {(templatesQ.data ?? [])
                 .filter((tpl) => tpl.source !== 'CMS')
                 .map((tpl) => (
-                  <button
-                    key={tpl.templateId}
-                    className="btn btn-ghost"
-                    style={{ textAlign: 'left', fontSize: 11, padding: '6px 8px' }}
-                    onClick={() => addTemplateNode(tpl)}
-                  >
-                    <div style={{ color: '#94a3b8', fontSize: 9, textTransform: 'uppercase' }}>{tpl.category}</div>
-                    <div>+ {tpl.label}</div>
+                  <button key={tpl.templateId} className="palette-item" onClick={() => addTemplateNode(tpl)}>
+                    <span className="palette-cat">{tpl.category}</span>
+                    <span className="palette-label">{tpl.label}</span>
                   </button>
                 ))}
             </div>
@@ -667,8 +656,8 @@ export function StructuringStudio({
 
       <div className="card">
         <div className="card-title">
-          <span>Review Stats — Unadjusted vs Adjusted ({selectedProg.currency} $M)</span>
-          <span style={{ color: '#94a3b8', fontSize: 11 }}>
+          <span>Review Statistics · Unadjusted vs Adjusted ({selectedProg.currency} M)</span>
+          <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
             Rust Kernel: {dagEvalQ.data?.computeMs ?? '—'} ms · Cache: {dagEvalQ.data?.cacheHits ?? 0} hits /{' '}
             {dagEvalQ.data?.cacheMisses ?? 0} misses
           </span>
@@ -695,10 +684,10 @@ export function StructuringStudio({
               return (
                 <tr key={u.nodeId} onClick={() => setSelectedNodeId(u.nodeId)} style={{ cursor: 'pointer' }}>
                   <td style={{ fontWeight: u.nodeId === selectedNodeId ? 700 : 400 }}>{u.nodeLabel}</td>
-                  <td style={{ color: '#94a3b8' }}>{u.nodeType}</td>
+                  <td style={{ color: 'var(--text-muted)' }}>{u.nodeType}</td>
                   <td className="num">{fmtMoneyM(u.el, 3)}</td>
                   <td className="num" style={{ fontWeight: 600 }}>{fmtMoneyM(a.el, 3)}</td>
-                  <td className="num" style={{ color: deltaPct > 0 ? '#f59e0b' : '#94a3b8' }}>
+                  <td className="num" style={{ color: deltaPct > 0 ? 'var(--warning)' : 'var(--text-muted)' }}>
                     {fmtPct(deltaPct, 1, { signed: true })}
                   </td>
                   <td className="num">{fmtMoneyM(a.sd, 3)}</td>

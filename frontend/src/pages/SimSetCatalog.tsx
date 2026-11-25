@@ -50,7 +50,7 @@ export function SimSetCatalog() {
     <>
       <div className="card">
         <div className="card-title">
-          <span>Registered Simulation Sets (Canonical Zstd Parquet — Indemnity & Industry Catalogs)</span>
+          <span>Registered Simulation Sets</span>
           <button className="btn" onClick={() => sampleEltMut.mutate()}>
             Simulate Sample ELT → 50k YELT
           </button>
@@ -72,12 +72,12 @@ export function SimSetCatalog() {
           <tbody>
             {simSetsQ.data?.map((s) => (
               <tr key={s.simSetId}>
-                <td style={{ fontFamily: 'monospace', color: '#5eead4' }}>{s.simSetId}</td>
+                <td style={{ fontFamily: 'var(--mono)', color: 'var(--teal)' }}>{s.simSetId}</td>
                 <td style={{ fontWeight: 600 }}>{s.name}</td>
                 <td>
                   <span className="badge">{s.isIndustryCatalog ? 'INDUSTRY ($B)' : s.sourceFormat}</span>
                 </td>
-                <td style={{ color: '#94a3b8' }}>{s.eventCatalogId}</td>
+                <td style={{ color: 'var(--text-muted)' }}>{s.eventCatalogId}</td>
                 <td className="num">{s.numTrials.toLocaleString('en-US')}</td>
                 <td className="num">{s.totalEvents.toLocaleString('en-US')}</td>
                 <td className="num">
@@ -87,8 +87,8 @@ export function SimSetCatalog() {
                       : `$${s.expectedAnnualLoss.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}m`
                     : '—'}
                 </td>
-                <td style={{ fontSize: 11, color: '#93c5fd' }}>{s.regionPerils.join(', ')}</td>
-                <td style={{ fontFamily: 'monospace', fontSize: 11 }}>#{s.contentHash.slice(0, 8)}</td>
+                <td style={{ fontSize: 11, color: 'var(--accent-soft)' }}>{s.regionPerils.join(', ')}</td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>#{s.contentHash.slice(0, 8)}</td>
               </tr>
             ))}
           </tbody>
@@ -97,7 +97,7 @@ export function SimSetCatalog() {
 
       <div className="card">
         <div className="card-title">
-          <span>Upload User-Supplied YELT (CSV or Parquet) with Column Mapper</span>
+          <span>Upload Event Loss Table</span>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <input type="file" accept=".csv,.parquet" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />

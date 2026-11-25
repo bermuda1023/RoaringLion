@@ -68,7 +68,7 @@ function DeltaBar({ deltaShare, maxAbsDelta }: { deltaShare: number; maxAbsDelta
   const widthPct = Math.min(100, (absPct / scale) * 100);
 
   if (absPct < 0.05) {
-    return <span style={{ color: '#64748b', fontSize: 11 }}>No Change</span>;
+    return <span style={{ color: 'var(--text-faint)', fontSize: 11 }}>No Change</span>;
   }
 
   const isPos = pct > 0;
@@ -82,12 +82,12 @@ function DeltaBar({ deltaShare, maxAbsDelta }: { deltaShare: number; maxAbsDelta
                 width: `${widthPct}%`,
                 height: 11,
                 borderRadius: '3px 0 0 3px',
-                background: 'linear-gradient(90deg, #ef4444, #dc2626)',
+                background: 'linear-gradient(90deg, var(--negative), var(--negative))',
               }}
             />
           )}
         </div>
-        <div style={{ width: 1, height: 16, background: '#475569' }} />
+        <div style={{ width: 1, height: 16, background: 'var(--text-faint)' }} />
         <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-start', paddingLeft: 2 }}>
           {isPos && (
             <div
@@ -95,7 +95,7 @@ function DeltaBar({ deltaShare, maxAbsDelta }: { deltaShare: number; maxAbsDelta
                 width: `${widthPct}%`,
                 height: 11,
                 borderRadius: '0 3px 3px 0',
-                background: 'linear-gradient(90deg, #16a34a, #22c55e)',
+                background: 'linear-gradient(90deg, var(--positive), var(--positive))',
               }}
             />
           )}
@@ -107,7 +107,7 @@ function DeltaBar({ deltaShare, maxAbsDelta }: { deltaShare: number; maxAbsDelta
           textAlign: 'right',
           fontSize: 11,
           fontWeight: 600,
-          color: isPos ? '#4ade80' : '#f87171',
+          color: isPos ? 'var(--positive)' : 'var(--negative)',
         }}
       >
         {isPos ? '+' : ''}
@@ -320,8 +320,8 @@ export function PortfolioOptimizer() {
       <div className="card">
         <div className="card-title">
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <span>Optimization Frontier Explorer</span>
-            <span className="badge">Layer-Level HiGHS LP/MILP · Interactive Pareto Frontier</span>
+            <span>Frontier Explorer</span>
+            <span className="badge">HiGHS LP / MILP</span>
           </div>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             <button
@@ -366,7 +366,7 @@ export function PortfolioOptimizer() {
             style={{
               background: 'rgba(34, 197, 94, 0.12)',
               border: '1px solid rgba(34, 197, 94, 0.4)',
-              color: '#86efac',
+              color: '#7fe0a9',
               borderRadius: 6,
               padding: '8px 10px',
               fontSize: 12,
@@ -383,19 +383,13 @@ export function PortfolioOptimizer() {
             {/* Left: Objectives & Dynamic Constraints */}
             <div>
               <div
-                style={{
-                  background: '#0d1422',
-                  border: '1px solid #26324a',
-                  borderRadius: 6,
-                  padding: 12,
-                  marginBottom: 12,
-                }}
+                className="panel" style={{ marginBottom: 12 }}
               >
-                <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 10 }}>
+                <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 10 }}>
                   Objectives & Solver Settings
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
-                  <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     Primary Objective
                     <select
                       value={objective}
@@ -407,7 +401,7 @@ export function PortfolioOptimizer() {
                       <option value="MIN_TVAR_250">Min 1-in-250 TVaR</option>
                     </select>
                   </label>
-                  <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     Horizon Mode
                     <select
                       value={mode}
@@ -418,7 +412,7 @@ export function PortfolioOptimizer() {
                       <option value="CURRENT">Current Portfolio Rebalance</option>
                     </select>
                   </label>
-                  <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     View of Risk
                     <select
                       value={view}
@@ -429,7 +423,7 @@ export function PortfolioOptimizer() {
                       <option value="UNADJUSTED">UNADJUSTED (Raw Model)</option>
                     </select>
                   </label>
-                  <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     Fund Capital ($M)
                     <input
                       type="number"
@@ -438,7 +432,7 @@ export function PortfolioOptimizer() {
                       style={{ width: '100%', marginTop: 4 }}
                     />
                   </label>
-                  <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     Max Deployed Collateral ($M)
                     <input
                       type="number"
@@ -447,7 +441,7 @@ export function PortfolioOptimizer() {
                       style={{ width: '100%', marginTop: 4 }}
                     />
                   </label>
-                  <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     Target 1-in-250 TVaR ($M)
                     <input
                       type="number"
@@ -456,7 +450,7 @@ export function PortfolioOptimizer() {
                       style={{ width: '100%', marginTop: 4 }}
                     />
                   </label>
-                  <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     Max 1-in-100 TVaR ($M)
                     <input
                       type="number"
@@ -465,7 +459,7 @@ export function PortfolioOptimizer() {
                       style={{ width: '100%', marginTop: 4 }}
                     />
                   </label>
-                  <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     Min Line Share % (MILP &gt; 0)
                     <input
                       type="number"
@@ -477,7 +471,7 @@ export function PortfolioOptimizer() {
                       style={{ width: '100%', marginTop: 4 }}
                     />
                   </label>
-                  <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     Frontier Points ({numPoints})
                     <input
                       type="range"
@@ -489,7 +483,7 @@ export function PortfolioOptimizer() {
                     />
                   </label>
                   {objective === 'MAX_RISK_ADJUSTED_RETURN' && (
-                    <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Risk Aversion λ
                       <input
                         type="number"
@@ -510,7 +504,7 @@ export function PortfolioOptimizer() {
                     alignItems: 'center',
                     marginTop: 12,
                     paddingTop: 10,
-                    borderTop: '1px solid #1e293b',
+                    borderTop: '1px solid var(--surface-3)',
                   }}
                 >
                   <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -523,7 +517,7 @@ export function PortfolioOptimizer() {
                   </label>
                   {includeRetro && (
                     <>
-                      <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                      <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                         Limit ($M)
                         <input
                           type="number"
@@ -532,7 +526,7 @@ export function PortfolioOptimizer() {
                           style={{ width: 65, marginLeft: 4 }}
                         />
                       </label>
-                      <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                      <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                         Trigger ($B)
                         <input
                           type="number"
@@ -547,7 +541,7 @@ export function PortfolioOptimizer() {
               </div>
 
               {/* Dynamic Constraints Builder */}
-              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
+              <div className="panel">
                 <div
                   style={{
                     display: 'flex',
@@ -558,7 +552,7 @@ export function PortfolioOptimizer() {
                     marginBottom: 10,
                   }}
                 >
-                  <span style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd' }}>
+                  <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
                     Dynamic Portfolio Constraints ({constraints.length})
                   </span>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -578,7 +572,7 @@ export function PortfolioOptimizer() {
                 </div>
 
                 {constraints.length === 0 ? (
-                  <div style={{ color: '#64748b', fontSize: 12 }}>
+                  <div style={{ color: 'var(--text-faint)', fontSize: 12 }}>
                     No extra constraints added (base collateral &amp; 1-in-100 / 1-in-250 TVaR still apply).
                   </div>
                 ) : (
@@ -591,13 +585,13 @@ export function PortfolioOptimizer() {
                           gap: 8,
                           flexWrap: 'wrap',
                           alignItems: 'center',
-                          background: '#131a29',
-                          border: '1px solid #26324a',
+                          background: 'var(--surface)',
+                          border: '1px solid var(--border-strong)',
                           borderRadius: 6,
                           padding: '7px 10px',
                         }}
                       >
-                        <span style={{ fontSize: 11, fontWeight: 600, color: '#38bdf8', minWidth: 96 }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--accent)', minWidth: 96 }}>
                           {c.kind === 'TVAR'
                             ? 'Tail VaR'
                             : c.kind === 'RP_CAP'
@@ -638,7 +632,7 @@ export function PortfolioOptimizer() {
                                 </option>
                               ))}
                             </select>
-                            <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                               Max $M
                               <input
                                 type="number"
@@ -670,7 +664,7 @@ export function PortfolioOptimizer() {
                                 </option>
                               ))}
                             </select>
-                            <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                               Max Limit $M
                               <input
                                 type="number"
@@ -687,7 +681,7 @@ export function PortfolioOptimizer() {
                         )}
 
                         {c.kind === 'EL_CAP' && (
-                          <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                          <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                             Max Ratio
                             <input
                               type="number"
@@ -704,7 +698,7 @@ export function PortfolioOptimizer() {
                         )}
 
                         {c.kind === 'CEDENT_CAP' && (
-                          <label style={{ fontSize: 11, color: '#94a3b8' }}>
+                          <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                             Max Limit $M
                             <input
                               type="number"
@@ -721,7 +715,7 @@ export function PortfolioOptimizer() {
 
                         <button
                           className="btn btn-ghost"
-                          style={{ marginLeft: 'auto', color: '#fca5a5', padding: '3px 8px' }}
+                          style={{ marginLeft: 'auto', color: '#f7a3a1', padding: '3px 8px' }}
                           onClick={() => setConstraints((cs) => cs.filter((x) => x.id !== c.id))}
                         >
                           Remove
@@ -734,7 +728,7 @@ export function PortfolioOptimizer() {
             </div>
 
             {/* Right: Layer Participation Constraints Table (Analyze Re-style) */}
-            <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
+            <div className="panel">
               <div
                 style={{
                   display: 'flex',
@@ -745,7 +739,7 @@ export function PortfolioOptimizer() {
                   marginBottom: 10,
                 }}
               >
-                <span style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd' }}>
+                <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
                   Layer Participation Constraints (Min % / Max % / Lock)
                 </span>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -781,7 +775,7 @@ export function PortfolioOptimizer() {
                       <tr key={l.layerKey}>
                         <td>
                           <div style={{ fontWeight: 600, fontSize: 12 }}>{l.cedentName}</div>
-                          <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                             {l.layerName} · ${l.limit1xM.toFixed(0)}m lim · EL ${l.el1xM.toFixed(2)}m
                           </div>
                         </td>
@@ -799,7 +793,7 @@ export function PortfolioOptimizer() {
                                 [l.layerKey]: { ...b, minPct: Number(e.target.value) },
                               }))
                             }
-                            style={{ width: 58, textAlign: 'right', color: b.minPct > 0 ? '#f87171' : '#e6edf7' }}
+                            style={{ width: 58, textAlign: 'right', color: b.minPct > 0 ? 'var(--negative)' : 'var(--text)' }}
                           />
                         </td>
                         <td className="num">
@@ -848,7 +842,7 @@ export function PortfolioOptimizer() {
         {subTab === 'results' && (
           <>
             {exploreMut.isPending && !data && (
-              <div style={{ color: '#94a3b8', fontSize: 12, padding: 12 }}>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: 12 }}>
                 Sweeping layer-level Pareto Frontier via HiGHS…
               </div>
             )}
@@ -863,15 +857,15 @@ export function PortfolioOptimizer() {
                     gap: 12,
                     alignItems: 'center',
                     justifyContent: 'space-between',
-                    background: '#0d1422',
-                    border: '1px solid #26324a',
+                    background: 'var(--surface-sunken)',
+                    border: '1px solid var(--border-strong)',
                     borderRadius: 6,
                     padding: '9px 12px',
                     marginBottom: 14,
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: '#f59e0b' }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--warning)' }}>
                       Point #{activePoint.pointIndex + 1} / {data.frontier.length}
                     </span>
                     <input
@@ -882,7 +876,7 @@ export function PortfolioOptimizer() {
                       onChange={(e) => setSelectedIdx(Number(e.target.value))}
                       style={{ width: 170 }}
                     />
-                    <span style={{ fontSize: 11, color: '#94a3b8' }}>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       {activePoint.solver} · {activePoint.status} · {data.computeMs} ms total ({data.frontier.length}{' '}
                       solves)
                     </span>
@@ -890,7 +884,7 @@ export function PortfolioOptimizer() {
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     <button
                       className="btn"
-                      style={{ background: '#0f766e' }}
+                      style={{ background: 'var(--teal-strong)' }}
                       onClick={() => forkBranchMut.mutate()}
                       disabled={forkBranchMut.isPending}
                     >
@@ -903,7 +897,7 @@ export function PortfolioOptimizer() {
                 <div className="grid-kpi">
                   <div className="kpi">
                     <div className="kpi-label">Expected Return</div>
-                    <div className="kpi-val" style={{ color: '#22c55e' }}>
+                    <div className="kpi-val" style={{ color: 'var(--positive)' }}>
                       {fmtMoneyM(activePoint.metrics.expectedProfitM, 2)}
                     </div>
                   </div>
@@ -917,7 +911,7 @@ export function PortfolioOptimizer() {
                   </div>
                   <div className="kpi">
                     <div className="kpi-label">1-in-250 TVaR</div>
-                    <div className="kpi-val" style={{ color: '#38bdf8' }}>
+                    <div className="kpi-val" style={{ color: 'var(--accent)' }}>
                       {fmtMoneyM(activePoint.metrics.tvar250M, 1)}
                     </div>
                   </div>
@@ -933,7 +927,7 @@ export function PortfolioOptimizer() {
 
                 {/* Row 1: Pareto Frontier + Diverging Share Summary */}
                 <div className="grid-2" style={{ marginBottom: 14 }}>
-                  <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
+                  <div className="panel">
                     <div
                       style={{
                         display: 'flex',
@@ -944,7 +938,7 @@ export function PortfolioOptimizer() {
                         marginBottom: 8,
                       }}
                     >
-                      <span style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd' }}>
+                      <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
                         Pareto Frontier (Click any dot to inspect)
                       </span>
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -972,8 +966,8 @@ export function PortfolioOptimizer() {
                   </div>
 
                   {/* Diverging Share Summary */}
-                  <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 8 }}>
+                  <div className="panel">
+                    <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 8 }}>
                       Share Summary — Proposed vs Initial (Δ)
                     </div>
                     <table>
@@ -989,9 +983,9 @@ export function PortfolioOptimizer() {
                           <tr key={r.layerKey}>
                             <td>
                               <div style={{ fontWeight: 600, fontSize: 12 }}>{r.cedentName}</div>
-                              <div style={{ fontSize: 10, color: '#94a3b8' }}>{r.layerName}</div>
+                              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{r.layerName}</div>
                             </td>
-                            <td className="num" style={{ fontWeight: 700, color: '#38bdf8' }}>
+                            <td className="num" style={{ fontWeight: 700, color: 'var(--accent)' }}>
                               {(r.optimalShare * 100).toFixed(1)}%
                             </td>
                             <td>
@@ -1006,8 +1000,8 @@ export function PortfolioOptimizer() {
 
                 {/* Row 2: Portfolio Summary Comparison + 6-Axis Radar */}
                 <div className="grid-2" style={{ marginBottom: 14 }}>
-                  <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 8 }}>
+                  <div className="panel">
+                    <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 8 }}>
                       Portfolio Summary — Initial vs Proposed
                     </div>
                     <table>
@@ -1041,11 +1035,11 @@ export function PortfolioOptimizer() {
                               <td className="num" style={{ fontWeight: 700 }}>
                                 {row.b.toFixed(2)}
                               </td>
-                              <td className="num" style={{ color: improved ? '#4ade80' : '#f59e0b' }}>
+                              <td className="num" style={{ color: improved ? 'var(--positive)' : 'var(--warning)' }}>
                                 {diff >= 0 ? '+' : ''}
                                 {diff.toFixed(2)}
                               </td>
-                              <td className="num" style={{ color: improved ? '#4ade80' : '#f59e0b' }}>
+                              <td className="num" style={{ color: improved ? 'var(--positive)' : 'var(--warning)' }}>
                                 {pct >= 0 ? '+' : ''}
                                 {pct.toFixed(1)}%
                               </td>
@@ -1056,8 +1050,8 @@ export function PortfolioOptimizer() {
                     </table>
                   </div>
 
-                  <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 4 }}>
+                  <div className="panel">
+                    <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 4 }}>
                       Multi-Metric Risk/Return Radar (% Δ vs Initial)
                     </div>
                     <PortfolioRadarChart initial={data.initialPortfolio} proposed={activePoint.metrics} />
@@ -1065,8 +1059,8 @@ export function PortfolioOptimizer() {
                 </div>
 
                 {/* Row 3: Constraint Diagnostics & LP Shadow Prices */}
-                <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
-                  <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 8 }}>
+                <div className="panel">
+                  <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 8 }}>
                     Constraint Diagnostics &amp; Shadow Prices (Duals)
                   </div>
                   <table>
@@ -1087,7 +1081,7 @@ export function PortfolioOptimizer() {
                           <td className="num">{c.limitValue.toFixed(2)}</td>
                           <td className="num">{c.actualValue.toFixed(2)}</td>
                           <td className="num">{c.slack.toFixed(2)}</td>
-                          <td className="num" style={{ color: '#f59e0b', fontWeight: 600 }}>
+                          <td className="num" style={{ color: 'var(--warning)', fontWeight: 600 }}>
                             {c.shadowPrice != null ? `$${c.shadowPrice.toFixed(4)}m` : '—'}
                           </td>
                           <td className={`num ${c.binding ? 'fail' : 'pass'}`}>{c.binding ? 'BINDING' : 'SLACK'}</td>
@@ -1104,8 +1098,8 @@ export function PortfolioOptimizer() {
         {/* ══════════════════ TAB 3: PORTFOLIO DASHBOARD (LAYER CONTRIBUTION DEEP-DIVE) ══════════════════ */}
         {subTab === 'portfolio' && data && activePoint && (
           <>
-            <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12, marginBottom: 14 }}>
-              <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 8 }}>
+            <div className="panel" style={{ marginBottom: 14 }}>
+              <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 8 }}>
                 Layer Summary — Frontier Point #{activePoint.pointIndex + 1} (TVaR 250: $
                 {activePoint.metrics.tvar250M.toFixed(1)}m · Exp Return: ${activePoint.metrics.expectedProfitM.toFixed(2)}m)
               </div>
@@ -1128,9 +1122,9 @@ export function PortfolioOptimizer() {
                     <tr key={r.layerKey}>
                       <td>
                         <div style={{ fontWeight: 600, fontSize: 12 }}>{r.cedentName}</div>
-                        <div style={{ fontSize: 10, color: '#94a3b8' }}>{r.layerName}</div>
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{r.layerName}</div>
                       </td>
-                      <td className="num" style={{ fontWeight: 700, color: '#38bdf8' }}>
+                      <td className="num" style={{ fontWeight: 700, color: 'var(--accent)' }}>
                         {fmtRatioPct(r.optimalShare, 1)}
                       </td>
                       <td>
@@ -1150,15 +1144,15 @@ export function PortfolioOptimizer() {
 
             {/* 2x2 ECharts Contribution Analytics (Analyze Re Portfolio Dashboard) */}
             <div className="grid-2" style={{ marginBottom: 14 }}>
-              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
-                <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 6 }}>
+              <div className="panel">
+                <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 6 }}>
                   Top Layers: Euler Contribution to Return Period (1-in-2 → 1-in-1000)
                 </div>
                 <ReturnPeriodStackChart rows={activePoint.returnPeriodContributions} />
               </div>
 
-              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
-                <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 6 }}>
+              <div className="panel">
+                <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 6 }}>
                   Top Layers by Expected Loss ($M)
                 </div>
                 <LayerContributionBarChart
@@ -1169,14 +1163,14 @@ export function PortfolioOptimizer() {
                     .sort((a, b) => b.optimalElM - a.optimalElM)
                     .map((l) => Number(l.optimalElM.toFixed(3)))}
                   unit="$M"
-                  color="#38bdf8"
+                  color="var(--accent)"
                 />
               </div>
             </div>
 
             <div className="grid-2">
-              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
-                <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 6 }}>
+              <div className="panel">
+                <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 6 }}>
                   Top Contributing Layers: 1-in-250 TVaR (%)
                 </div>
                 <LayerContributionBarChart
@@ -1191,8 +1185,8 @@ export function PortfolioOptimizer() {
                 />
               </div>
 
-              <div style={{ background: '#0d1422', border: '1px solid #26324a', borderRadius: 6, padding: 12 }}>
-                <div style={{ fontWeight: 600, fontSize: 12, color: '#93c5fd', marginBottom: 6 }}>
+              <div className="panel">
+                <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 6 }}>
                   Top Contributing Layers: 1-in-250 VaR (%)
                 </div>
                 <LayerContributionBarChart
@@ -1203,7 +1197,7 @@ export function PortfolioOptimizer() {
                     .sort((a, b) => b.coVar250Pct - a.coVar250Pct)
                     .map((l) => l.coVar250Pct)}
                   unit="%"
-                  color="#22c55e"
+                  color="var(--positive)"
                 />
               </div>
             </div>

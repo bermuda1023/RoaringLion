@@ -35,7 +35,7 @@ export function IlwWorkbench() {
   return (
     <div className="card">
       <div className="card-title">
-        <span>Instant ILW Pricing & Portfolio Hedge-Effectiveness Workbench (Background Industry YELT)</span>
+        <span>ILW Pricing & Hedge Effectiveness</span>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn" onClick={() => priceMut.mutate()}>
             Price ILW & Hedge Impact
@@ -46,7 +46,7 @@ export function IlwWorkbench() {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14, padding: 10, background: '#0d1422', borderRadius: 6, border: '1px solid #26324a' }}>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14, padding: 10, background: 'var(--surface-sunken)', borderRadius: 6, border: '1px solid var(--border-strong)' }}>
         <input value={req.name} onChange={(e) => setReq({ ...req, name: e.target.value })} style={{ width: 220 }} />
         <select
           value={req.regionPerils[0]}
@@ -75,15 +75,15 @@ export function IlwWorkbench() {
           <option value="EXTERNAL_RETRO">CEDED / RETRO HEDGE</option>
           <option value="ASSUMED">ASSUMED (Write ILW)</option>
         </select>
-        <label style={{ fontSize: 11, color: '#94a3b8' }}>
+        <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           Trigger ($B)
           <input type="number" value={req.triggerBn} onChange={(e) => setReq({ ...req, triggerBn: Number(e.target.value) })} style={{ width: 65, marginLeft: 4 }} />
         </label>
-        <label style={{ fontSize: 11, color: '#94a3b8' }}>
+        <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           Limit ($M)
           <input type="number" value={req.limitM} onChange={(e) => setReq({ ...req, limitM: Number(e.target.value) })} style={{ width: 65, marginLeft: 4 }} />
         </label>
-        <label style={{ fontSize: 11, color: '#94a3b8' }}>
+        <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           ROL (%)
           <input
             type="number"
@@ -110,11 +110,11 @@ export function IlwWorkbench() {
             </div>
             <div className="kpi">
               <div className="kpi-label">Indemnity–Index Corr</div>
-              <div className="kpi-val" style={{ color: '#38bdf8' }}>{fmtNum(d.indemnityIndexCorrelation, 3)}</div>
+              <div className="kpi-val" style={{ color: 'var(--accent)' }}>{fmtNum(d.indemnityIndexCorrelation, 3)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">1-in-250 TVaR Saved</div>
-              <div className="kpi-val" style={{ color: '#22c55e' }}>{fmtMoneyM(d.tvar250ReductionM, 2)}</div>
+              <div className="kpi-val" style={{ color: 'var(--positive)' }}>{fmtMoneyM(d.tvar250ReductionM, 2)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Hedge Effectiveness</div>

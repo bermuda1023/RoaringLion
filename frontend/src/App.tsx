@@ -1,7 +1,8 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { API_BASE, api, apiUrl } from './api/client';
+import { API_BASE, api, apiUrl, fetchJson } from './api/client';
 import { BreadcrumbBar } from './components/BreadcrumbBar';
+import { NavIcon } from './components/NavIcon';
 import { RocCdfChart } from './components/RocCdfChart';
 import { fmtMoneyM, fmtNum, fmtPct } from './utils/format';
 import { AllocationAndBranches } from './pages/AllocationAndBranches';
@@ -26,6 +27,52 @@ type TabKey =
   | 'optimizer'
   | 'modelsops'
   | 'benchmarks';
+
+const NAV_GROUPS: { label: string; items: { key: TabKey; label: string; icon: string }[] }[] = [
+  {
+    label: 'Underwriting',
+    items: [
+      { key: 'cms', label: 'Contracts', icon: 'ledger' },
+      { key: 'dag', label: 'Structuring Studio', icon: 'graph' },
+      { key: 'ilw', label: 'Industry Loss Warranties', icon: 'index' },
+      { key: 'deterministic', label: 'Deterministic', icon: 'list' },
+    ],
+  },
+  {
+    label: 'Portfolio',
+    items: [
+      { key: 'portfolio', label: 'Portfolio Returns', icon: 'pie' },
+      { key: 'optimizer', label: 'Optimizer', icon: 'target' },
+      { key: 'allocation', label: 'Retro & Scenarios', icon: 'branch' },
+    ],
+  },
+  {
+    label: 'Data & Models',
+    items: [
+      { key: 'simsets', label: 'Simulation Sets', icon: 'database' },
+      { key: 'burnclaims', label: 'Burn & Claims', icon: 'flame' },
+      { key: 'modelsops', label: 'Models & Operations', icon: 'cpu' },
+    ],
+  },
+  {
+    label: 'Governance',
+    items: [{ key: 'benchmarks', label: 'Lineage & Audit', icon: 'shield' }],
+  },
+];
+
+const PAGE_INFO: Record<TabKey, { title: string; subtitle: string }> = {
+  cms: { title: 'Contract Management', subtitle: 'Programme ledger, underwriting dossiers and year-over-year renewals' },
+  dag: { title: 'Structuring Studio', subtitle: 'Compose layer structures as a calculation graph and review loss statistics' },
+  ilw: { title: 'Industry Loss Warranties', subtitle: 'Index triggers, basis risk and industry catalogue pricing' },
+  deterministic: { title: 'Deterministic Scenarios', subtitle: 'Chronological recovery and erosion statements for named loss lists' },
+  portfolio: { title: 'Portfolio Returns', subtitle: 'Fund-level return on capital, risk appetite and Euler capital allocation' },
+  optimizer: { title: 'Portfolio Optimizer', subtitle: 'Efficient frontier exploration with layer-level constraints' },
+  allocation: { title: 'Retro & Scenarios', subtitle: 'Retrocession allocation, portfolio branching and historical backtests' },
+  simsets: { title: 'Simulation Sets', subtitle: 'Event loss tables, catalogue alignment and synthetic generation' },
+  burnclaims: { title: 'Burn & Claims', subtitle: 'Experience burn analysis and claims development' },
+  modelsops: { title: 'Models & Operations', subtitle: 'Catastrophe model jobs, exposure sync, pricing and fund operations' },
+  benchmarks: { title: 'Lineage & Audit', subtitle: 'Run manifests, breadcrumb staleness and engine benchmarks' },
+};
 
 const DEFAULT_LOSSES: DeterministicLossRow[] = [
   {
@@ -52,7 +99,14 @@ const DEFAULT_LOSSES: DeterministicLossRow[] = [
 ];
 
 export function App() {
-  const [tab, setTab] = useState<TabKey>('dag');
+  const [tab, setTabState] = useState<TabKey>(() => {
+    const h = window.location.hash.replace('#', '') as TabKey;
+    return h in PAGE_INFO ? h : 'dag';
+  });
+  const setTab = (next: TabKey) => {
+    setTabState(next);
+    window.history.replaceState(null, '', `#${next}`);
+  };
   const [selectedProgId, setSelectedProgId] = useState<string>('prog-farmers-us-27');
   const [portfolioView, setPortfolioView] = useState<ViewOfRisk>('ADJUSTED');
   const [totalCapital, setTotalCapital] = useState<number>(160);
@@ -60,6 +114,12 @@ export function App() {
   const [losses, setLosses] = useState<DeterministicLossRow[]>(DEFAULT_LOSSES);
 
   const programmesQ = useQuery({ queryKey: ['programmes'], queryFn: api.listProgrammes });
+  const healthQ = useQuery({
+    queryKey: ['health'],
+    queryFn: () => fetchJson<{ status: string }>('/api/health'),
+    refetchInterval: 30_000,
+    retry: 1,
+  });
   const selectedProg = programmesQ.data?.find((p) => p.programmeId === selectedProgId) ?? programmesQ.data?.[0];
 
   const portfolioQ = useQuery({
@@ -90,27 +150,69 @@ export function App() {
 
   const staleMap = Object.fromEntries((stalenessQ.data ?? []).map((s) => [s.manifestId, s]));
 
+  const page = PAGE_INFO[tab];
+  const group = NAV_GROUPS.find((g) => g.items.some((i) => i.key === tab))?.label;
+  const apiUp = healthQ.isSuccess;
+
   return (
-    <div>
-      <header className="topbar">
+    <div className="app-shell">
+      <aside className="sidebar">
         <div className="brand">
-          <span>ROARING LION</span>
-          <span className="badge">Full Platform · Rust Kernel + HiGHS Optimizer</span>
+          <div className="brand-mark">RL</div>
+          <div>
+            <div className="brand-name">RoaringLion</div>
+            <div className="brand-sub">Cat Re &amp; ILS Platform</div>
+          </div>
         </div>
-        <nav className="tabs" aria-label="Primary navigation">
-          <button className={`tab ${tab === 'cms' ? 'active' : ''}`} onClick={() => setTab('cms')}>CMS</button>
-          <button className={`tab ${tab === 'simsets' ? 'active' : ''}`} onClick={() => setTab('simsets')}>SimSets</button>
-          <button className={`tab ${tab === 'ilw' ? 'active' : ''}`} onClick={() => setTab('ilw')}>ILWs</button>
-          <button className={`tab ${tab === 'dag' ? 'active' : ''}`} onClick={() => setTab('dag')}>DAG Studio</button>
-          <button className={`tab ${tab === 'deterministic' ? 'active' : ''}`} onClick={() => setTab('deterministic')}>Deterministic</button>
-          <button className={`tab ${tab === 'burnclaims' ? 'active' : ''}`} onClick={() => setTab('burnclaims')}>Burn & Claims</button>
-          <button className={`tab ${tab === 'portfolio' ? 'active' : ''}`} onClick={() => setTab('portfolio')}>Portfolio IRR</button>
-          <button className={`tab ${tab === 'allocation' ? 'active' : ''}`} onClick={() => setTab('allocation')}>Retro & Forge</button>
-          <button className={`tab ${tab === 'optimizer' ? 'active' : ''}`} onClick={() => setTab('optimizer')}>Optimizer</button>
-          <button className={`tab ${tab === 'modelsops' ? 'active' : ''}`} onClick={() => setTab('modelsops')}>Models & Ops</button>
-          <button className={`tab ${tab === 'benchmarks' ? 'active' : ''}`} onClick={() => setTab('benchmarks')}>Lineage</button>
+        <nav aria-label="Primary navigation" style={{ display: 'contents' }}>
+          {NAV_GROUPS.map((g) => (
+            <div className="nav-group" key={g.label}>
+              <div className="nav-group-label">{g.label}</div>
+              {g.items.map((item) => (
+                <button
+                  key={item.key}
+                  className={`nav-item ${tab === item.key ? 'active' : ''}`}
+                  onClick={() => setTab(item.key)}
+                  aria-current={tab === item.key ? 'page' : undefined}
+                >
+                  <NavIcon name={item.icon} />
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          ))}
         </nav>
-      </header>
+        <div className="sidebar-footer">
+          <div>
+            <span className={`status-dot ${healthQ.isPending ? 'pending' : apiUp ? 'ok' : 'down'}`} />
+            {healthQ.isPending ? 'Connecting…' : apiUp ? 'Engine online' : 'Engine offline'}
+          </div>
+          <div>Rust kernel · HiGHS solver</div>
+        </div>
+      </aside>
+
+      <div className="app-main">
+        <header className="page-header">
+          <div style={{ minWidth: 0 }}>
+            <div className="page-eyebrow">{group}</div>
+            <div className="page-title">{page.title}</div>
+            <div className="page-subtitle">{page.subtitle}</div>
+          </div>
+          <div className="page-meta">
+            {selectedProg && ['dag', 'burnclaims', 'deterministic'].includes(tab) && (
+              <span className="meta-chip">
+                Programme <strong>{selectedProg.cedentName}</strong>
+              </span>
+            )}
+            <span className="meta-chip">
+              Programmes <strong>{programmesQ.data?.length ?? '—'}</strong>
+            </span>
+            <span className="meta-chip">
+              <span className={`status-dot ${apiUp ? 'ok' : healthQ.isPending ? 'pending' : 'down'}`} style={{ marginRight: 0 }} />
+              {apiUp ? 'Live' : healthQ.isPending ? 'Connecting' : 'Offline'}
+            </span>
+          </div>
+        </header>
 
       <main className="main">
         {programmesQ.isError && (
@@ -157,10 +259,10 @@ export function App() {
                 <span>{portfolioQ.data.portfolioName}</span>
                 <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                   <select value={portfolioView} onChange={(e) => setPortfolioView(e.target.value as ViewOfRisk)}>
-                    <option value="ADJUSTED">ADJUSTED View</option>
-                    <option value="UNADJUSTED">UNADJUSTED View</option>
+                    <option value="ADJUSTED">Adjusted view</option>
+                    <option value="UNADJUSTED">Unadjusted view</option>
                   </select>
-                  <label style={{ color: '#94a3b8', fontSize: 12 }}>
+                  <label style={{ color: 'var(--text-muted)', fontSize: 12 }}>
                     Fund Capital ($M)
                     <input
                       type="number"
@@ -169,7 +271,7 @@ export function App() {
                       style={{ width: 80, marginLeft: 6 }}
                     />
                   </label>
-                  <span style={{ color: '#94a3b8', fontSize: 11 }}>
+                  <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
                     Rollup: {portfolioQ.data.computeMs} ms
                   </span>
                   <a
@@ -178,7 +280,7 @@ export function App() {
                     href={apiUrl(`/api/exports/portfolio-csv?view=${portfolioView}&totalCapital=${totalCapital}`)}
                     download
                   >
-                    Export CSV (Excel)
+                    Export CSV
                   </a>
                   <a
                     className="btn btn-ghost"
@@ -187,7 +289,7 @@ export function App() {
                     target="_blank"
                     rel="noreferrer"
                   >
-                    Tear-Sheet (PDF)
+                    Tear Sheet
                   </a>
                 </div>
               </div>
@@ -214,7 +316,7 @@ export function App() {
                 </div>
                 <div className="kpi">
                   <div className="kpi-label">Co-TVaR Sum Err</div>
-                  <div className="kpi-val" style={{ color: '#22c55e' }}>
+                  <div className="kpi-val" style={{ color: 'var(--positive)' }}>
                     {portfolioQ.data.cotvarSumCheckDiff.toExponential(1)}
                   </div>
                 </div>
@@ -255,7 +357,7 @@ export function App() {
 
             <div className="card">
               <div className="card-title">
-                <span>Euler Co-TVaR Marginal Capital Allocation (1-in-250 / 99.6th%)</span>
+                <span>Euler Capital Allocation · Co-TVaR 1-in-250</span>
               </div>
               <table>
                 <thead>
@@ -284,7 +386,7 @@ export function App() {
                       <td className="num">{fmtMoneyM(row.standaloneTvar250, 2)}</td>
                       <td className="num" style={{ fontWeight: 600 }}>{fmtMoneyM(row.eulerCotvar250, 2)}</td>
                       <td className="num">{fmtPct(row.diversificationCreditPct, 1)}</td>
-                      <td className="num" style={{ color: '#38bdf8', fontWeight: 600 }}>
+                      <td className="num" style={{ color: 'var(--accent)', fontWeight: 600 }}>
                         {fmtPct(row.marginalRocPct, 1)}
                       </td>
                     </tr>
@@ -299,14 +401,14 @@ export function App() {
           <>
             <div className="card">
               <div className="card-title">
-                <span>Deterministic Loss List (Same Rust Financial-Terms Code as Stochastic Engine)</span>
+                <span>Loss List</span>
                 <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                   <select value={detView} onChange={(e) => setDetView(e.target.value as ViewOfRisk)}>
                     <option value="UNADJUSTED">UNADJUSTED</option>
                     <option value="ADJUSTED">ADJUSTED</option>
                   </select>
                   <button className="btn" onClick={() => detMut.mutate()}>
-                    Run Chronological Recovery Statement
+                    Run Recovery Statement
                   </button>
                 </div>
               </div>
@@ -349,13 +451,13 @@ export function App() {
               <div className="card">
                 <div className="card-title">
                   <span>
-                    Per-Layer Stateful Recovery & Erosion Statement — Total Ceded:{' '}
+                    Recovery & Erosion Statement — Ceded{' '}
                     {fmtMoneyM(detMut.data.totalCeded, 2)} · RIP Due: {fmtMoneyM(detMut.data.totalRipDue, 2)}
                   </span>
                 </div>
                 {detMut.data.layerStatements.map((stmt) => (
                   <div key={stmt.layerId} style={{ marginBottom: 16 }}>
-                    <div style={{ fontWeight: 600, marginBottom: 6, color: '#f8fafc' }}>
+                    <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--text-strong)' }}>
                       {stmt.layerName} ({stmt.layerType}) — Ceded: {fmtMoneyM(stmt.totalCededLoss, 2)} | RIP:{' '}
                       {fmtMoneyM(stmt.totalRipDue, 2)}
                     </div>
@@ -403,15 +505,15 @@ export function App() {
           <>
             <div className="card">
               <div className="card-title">
-                <span>Phase 0 Kernel & Solver Benchmark Gate (Measured on This Machine)</span>
+                <span>Engine & Solver Benchmarks</span>
               </div>
-              <pre style={{ margin: 0, overflowX: 'auto', color: '#93c5fd', fontSize: 12 }}>
+              <pre className="panel mono" style={{ margin: 0, overflowX: 'auto', color: 'var(--accent-soft)' }}>
                 {JSON.stringify(benchmarksQ.data ?? {}, null, 2)}
               </pre>
             </div>
             <div className="card">
               <div className="card-title">
-                <span>Recorded Run Manifests & Breadcrumb Staleness Audit ({manifestsQ.data?.length ?? 0})</span>
+                <span>Run Manifests · Staleness Audit ({manifestsQ.data?.length ?? 0})</span>
               </div>
               <table>
                 <thead>
@@ -428,7 +530,7 @@ export function App() {
                     const st = staleMap[m.manifestId];
                     return (
                       <tr key={m.manifestId}>
-                        <td style={{ fontFamily: 'monospace', color: '#5eead4' }}>{m.manifestId}</td>
+                        <td style={{ fontFamily: 'var(--mono)', color: 'var(--teal)' }}>{m.manifestId}</td>
                         <td>{m.runType}</td>
                         <td>
                           {st?.isStale ? (
@@ -439,8 +541,8 @@ export function App() {
                             <span className="pass">FRESH</span>
                           )}
                         </td>
-                        <td style={{ fontFamily: 'monospace' }}>#{m.outputHash}</td>
-                        <td style={{ fontSize: 11, color: '#94a3b8' }}>
+                        <td style={{ fontFamily: 'var(--mono)' }}>#{m.outputHash}</td>
+                        <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                           {m.breadcrumb.map((b) => `${b.entityType}:${b.entityId}`).join(' › ')}
                         </td>
                       </tr>
@@ -452,6 +554,7 @@ export function App() {
           </>
         )}
       </main>
+      </div>
     </div>
   );
 }

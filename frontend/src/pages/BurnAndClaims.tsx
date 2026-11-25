@@ -57,9 +57,9 @@ export function BurnAndClaims({ programme }: { programme: ProgrammeDeal }) {
     <>
       <div className="card">
         <div className="card-title">
-          <span>Historical As-If (1990–2025) & Burning Cost — {programme.cedentName}</span>
+          <span>As-If Burning Cost · 1990–2025 — {programme.cedentName}</span>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <label style={{ fontSize: 11, color: '#94a3b8' }}>
+            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
               Annual Trend (%)
               <input
                 type="number"
@@ -69,7 +69,7 @@ export function BurnAndClaims({ programme }: { programme: ProgrammeDeal }) {
                 style={{ width: 65, marginLeft: 4 }}
               />
             </label>
-            <label style={{ fontSize: 11, color: '#94a3b8' }}>
+            <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
               Burn Credibility (%)
               <input
                 type="number"
@@ -111,11 +111,11 @@ export function BurnAndClaims({ programme }: { programme: ProgrammeDeal }) {
             </div>
             <div className="kpi">
               <div className="kpi-label">Credibility Blended EL</div>
-              <div className="kpi-val" style={{ color: '#38bdf8' }}>{fmtMoneyM(bc.credibilityBlendedElM ?? 0, 2)}</div>
+              <div className="kpi-val" style={{ color: 'var(--accent)' }}>{fmtMoneyM(bc.credibilityBlendedElM ?? 0, 2)}</div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Rec Technical ROL</div>
-              <div className="kpi-val" style={{ color: '#22c55e' }}>{fmtPct(bc.recommendedTechnicalRolPct ?? 0, 2)}</div>
+              <div className="kpi-val" style={{ color: 'var(--positive)' }}>{fmtPct(bc.recommendedTechnicalRolPct ?? 0, 2)}</div>
             </div>
           </div>
         )}
@@ -123,7 +123,7 @@ export function BurnAndClaims({ programme }: { programme: ProgrammeDeal }) {
 
       <div className="card">
         <div className="card-title">
-          <span>Live Claims Ledger (Versioned Estimate History → Chronological Recovery Statement)</span>
+          <span>Claims Ledger</span>
           <button className="btn" onClick={() => evalClaimsMut.mutate()}>
             Run Live Claims Recovery
           </button>
@@ -150,18 +150,18 @@ export function BurnAndClaims({ programme }: { programme: ProgrammeDeal }) {
           <tbody>
             {claimsQ.data?.map((c) => (
               <tr key={c.claimId}>
-                <td style={{ fontFamily: 'monospace' }}>{c.claimNo}</td>
+                <td style={{ fontFamily: 'var(--mono)' }}>{c.claimNo}</td>
                 <td>{c.eventName}</td>
                 <td>{c.regionPerilKey}</td>
                 <td>v{c.currentVersion}</td>
-                <td><span className="badge">{c.latestStatus}</span></td>
+                <td><span className={`badge status-${String(c.latestStatus).toLowerCase()}`}>{c.latestStatus}</span></td>
                 <td className="num">{fmtMoneyM(c.latestGroundUpLoss, 2)}</td>
               </tr>
             ))}
           </tbody>
         </table>
         {evalClaimsMut.data && (
-          <div style={{ marginTop: 10, color: '#5eead4', fontSize: 12 }}>
+          <div style={{ marginTop: 10, color: 'var(--teal)', fontSize: 12 }}>
             Live Claims Evaluated: Ground-Up {fmtMoneyM(evalClaimsMut.data.totalGroundUp, 2)} → Ceded Recovery{' '}
             {fmtMoneyM(evalClaimsMut.data.totalCeded, 2)} · RIP Due {fmtMoneyM(evalClaimsMut.data.totalRipDue, 2)}
           </div>
