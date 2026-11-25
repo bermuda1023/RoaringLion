@@ -46,7 +46,7 @@ from app.engine.slice_runner import evaluate_portfolio_rollup, evaluate_programm
 from app.engine.synthetic import SyntheticLossRequest, generate_synthetic_freq_sev
 from app.models.domain import DeterministicRunResponse
 from app.models.enums import ProgrammeStatus, StructureType, ViewOfRisk
-from app.models.phase1 import SimSetDetail
+from app.models.phase1 import ContractNoteCreate, ContractNoteOut, SimSetDetail
 from app.services.branching import BranchCreate, BranchDiffResponse, BranchOut, BranchService
 from app.services.claims import ClaimCreate, ClaimOut, ClaimRevision, ClaimsService
 from app.services.contracts import ContractStore, contract_to_programme_deal
@@ -436,5 +436,109 @@ def create_extended_router(
             industry_yelt=sim_store.get_yelt(ind_sim_id),
         )
         return HTMLResponse(content=build_programme_tearsheet_html(prog, dag_eval))
+
+    # ── CMS Programme Front Sheet, Underwriting Notes & 360° Linkage Dossier ──
+
+    @router.get("/api/contracts/{programme_id}/notes", response_model=list[ContractNoteOut])
+    def list_contract_notes(
+        programme_id: str,
+        scope: str = Query(default="programme"),
+    ) -> list[ContractNoteOut]:
+        if not contract_store.get_contract(programme_id):
+            raise HTTPException(status_code=404, detail="Contract not found")
+        return contract_store.list_notes(programme_id, scope="cedent" if scope == "cedent" else "programme")
+
+    @router.post("/api/contracts/{programme_id}/notes", response_model=ContractNoteOut)
+    def create_contract_note(programme_id: str, payload: ContractNoteCreate) -> ContractNoteOut:
+        if not payload.body.strip():
+            raise HTTPException(status_code=422, detail="Note body cannot be empty")
+        out = contract_store.add_note(programme_id, payload)
+        if not out:
+            raise HTTPException(status_code=404, detail="Contract not found")
+        return out
+
+    @router.get("/api/contracts/{programme_id}/dossier")
+    def get_contract_dossier(programme_id: str) -> dict:
+        c = contract_store.get_contract(programme_id)
+        if not c:
+            raise HTTPException(status_code=404, detail="Contract not found")
+
+        prog = contract_to_programme_deal(c)
+        yelt = sim_store.get_yelt(prog.sim_set_id)
+        dag_eval, _ = evaluate_programme_dag(
+            prog,
+            yelt,
+            LineageRegistry(persist=False),
+            industry_yelt=sim_store.get_yelt(ind_sim_id),
+        )
+
+        # Related programmes for same cedent
+        related = [
+            {
+                "programmeId": other.programme_id,
+                "frontSheetCode": other.front_sheet.front_sheet_code,
+                "programmeName": other.programme_name,
+                "treatyYear": other.treaty_year,
+                "renewalPeriod": other.renewal_period,
+                "status": other.status.value,
+                "limit": other.limit,
+                "rol": other.rol,
+            }
+            for other in contract_store.list_contracts()
+            if other.cedent_name == c.cedent_name and other.programme_id != c.programme_id
+        ]
+
+        # Linked ExposureEclipse programme
+        ee_progs = ee_client.list_exposure_programmes()
+        ee_match = next(
+            (
+                ep.model_dump(by_alias=True)
+                for ep in ee_progs
+                if (c.exposure_eclipse_programme_id and ep.programme_id == c.exposure_eclipse_programme_id)
+                or ep.cedent_name.lower() == c.cedent_name.lower()
+            ),
+            None,
+        )
+
+        # Linked SimSet + Cat Model API jobs
+        sim_detail = next((s.model_dump(by_alias=True) for s in sim_store.list_sim_sets() if s.sim_set_id == c.sim_set_id), None)
+        model_jobs = [j.model_dump(by_alias=True) for j in cat_orch.list_jobs() if j.programme_id == programme_id]
+
+        # Linked Claims + Recent Manifests
+        claims = claims_svc.list_claims(programme_id=programme_id)
+        stale_map = {s.manifest_id: s.is_stale for s in lineage.check_staleness(contract_store.current_entity_hashes())}
+        manifests = [
+            {
+                "manifestId": m.manifest_id,
+                "runType": m.run_type,
+                "createdAt": m.created_at.isoformat(),
+                "outputHash": m.output_hash,
+                "isStale": stale_map.get(m.manifest_id, False),
+            }
+            for m in lineage.list_manifests(limit=40)
+            if m.parameters.get("programme_id") == programme_id
+            or any(b.entity_id == programme_id for b in m.breadcrumb)
+        ][:10]
+
+        return {
+            "contract": c.model_dump(by_alias=True),
+            "relatedProgrammes": related,
+            "notes": [n.model_dump(by_alias=True) for n in contract_store.list_notes(programme_id, scope="cedent")],
+            "pricingLink": {
+                "graphId": dag_eval.graph_id,
+                "graphVersion": dag_eval.graph_version,
+                "computeMs": dag_eval.compute_ms,
+                "unadjustedNodes": [m.model_dump(by_alias=True) for m in dag_eval.views.get("UNADJUSTED", [])],
+                "adjustedNodes": [m.model_dump(by_alias=True) for m in dag_eval.views.get("ADJUSTED", [])],
+            },
+            "exposureLink": ee_match,
+            "modelingLink": {
+                "simSet": sim_detail,
+                "upliftSet": c.uplift_set.model_dump(by_alias=True),
+                "modelRuns": model_jobs,
+            },
+            "claimsCount": len(claims),
+            "recentManifests": manifests,
+        }
 
     return router

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
@@ -38,6 +38,13 @@ def init_engine(db_url: str | None = None):
     _engine = create_engine(url, connect_args=connect_args, future=True)
     _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, expire_on_commit=False)
     Base.metadata.create_all(bind=_engine)
+    # Lightweight additive column check so existing local SQLite DBs pick up new columns seamlessly
+    insp = inspect(_engine)
+    if "contracts" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("contracts")}
+        if "front_sheet_json" not in cols:
+            with _engine.begin() as conn:
+                conn.execute(text("ALTER TABLE contracts ADD COLUMN front_sheet_json TEXT DEFAULT '{}'"))
     return _engine
 
 

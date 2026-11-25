@@ -82,3 +82,40 @@ def test_portfolio_and_programme_exports_include_manifest_provenance():
     assert r_deal.status_code == 200
     assert "Underwriting Deal Tear-Sheet" in r_deal.text
     assert "Farmers Group" in r_deal.text
+
+
+def test_cms_front_sheet_notes_and_360_dossier():
+    # Update front sheet metadata (RARC + credit rating + broker contact)
+    r_upd = client.put(
+        "/api/contracts/prog-farmers-us-27",
+        json={
+            "frontSheet": {
+                "frontSheetCode": "BDA-2027-200001",
+                "cedentCreditRating": "AM Best A+",
+                "brokerContact": "Treaty Desk Lead",
+                "rarcTotalPct": 7.25,
+                "economicInflationPct": 3.5,
+            }
+        },
+    )
+    assert r_upd.status_code == 200
+    assert r_upd.json()["frontSheet"]["rarcTotalPct"] == 7.25
+
+    # Post an underwriting note and verify retrieval
+    r_note = client.post(
+        "/api/contracts/prog-farmers-us-27/notes",
+        json={"author": "J. Anfosso", "category": "PRICING", "body": "Confirmed +10% FL uplift and FHCF inuring."},
+    )
+    assert r_note.status_code == 200
+    assert r_note.json()["category"] == "PRICING"
+
+    # Fetch full 360-degree dossier linking pricing, ExposureEclipse, modeling, and notes
+    r_dos = client.get("/api/contracts/prog-farmers-us-27/dossier")
+    assert r_dos.status_code == 200
+    dos = r_dos.json()
+    assert dos["contract"]["frontSheet"]["cedentCreditRating"] == "AM Best A+"
+    assert any("FHCF inuring" in n["body"] for n in dos["notes"])
+    assert len(dos["pricingLink"]["adjustedNodes"]) >= 4
+    assert dos["exposureLink"] is not None
+    assert dos["exposureLink"]["edmDatabaseName"] == "EDM_FARMERS_2027_Q1"
+    assert dos["modelingLink"]["simSet"] is not None

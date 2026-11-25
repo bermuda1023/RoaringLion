@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 
 from app.db.database import get_session
-from app.db.models import ContractRecord
+from app.db.models import ContractNoteRecord, ContractRecord
 from app.models.domain import (
     GraphEdgeSpec,
     GraphNodeSpec,
@@ -26,7 +26,16 @@ from app.models.enums import (
     ProgrammeStatus,
     StructureType,
 )
-from app.models.phase1 import ContractCreate, ContractFull, ContractUpdate, IlwPriceRequest, SliceRollupRequest
+from app.models.phase1 import (
+    ContractCreate,
+    ContractFull,
+    ContractNoteCreate,
+    ContractNoteOut,
+    ContractUpdate,
+    IlwPriceRequest,
+    ProgrammeFrontSheet,
+    SliceRollupRequest,
+)
 from app.services.lineage import LineageRegistry, canonical_hash
 from app.services.seed_data import _build_eurowind_programme, _build_farmers_programme, _build_pacific_eq_programme
 
@@ -139,6 +148,7 @@ def _record_to_full(r: ContractRecord) -> ContractFull:
         uplift_set=UpliftSet(**json.loads(r.uplift_set_json)),
         graph=GraphSpec(**json.loads(r.graph_json)),
         ilw_spec=json.loads(r.ilw_spec_json) if r.ilw_spec_json else None,
+        front_sheet=ProgrammeFrontSheet(**json.loads(r.front_sheet_json)) if r.front_sheet_json else ProgrammeFrontSheet(),
         version=r.version,
         content_hash=r.content_hash,
         updated_at=r.updated_at,
@@ -178,11 +188,50 @@ class ContractStore:
         with get_session() as db:
             if db.query(ContractRecord).count() > 0:
                 return
-            for prog in (
+            for idx, prog in enumerate((
                 _build_farmers_programme(default_sim_set_id),
                 _build_pacific_eq_programme(default_sim_set_id),
                 _build_eurowind_programme(default_sim_set_id),
-            ):
+            ), start=1):
+                is_farmers = "farmers" in prog.programme_id
+                is_pacific = "pacific" in prog.programme_id
+                ee_id = "ee-prog-farmers-27" if is_farmers else ("ee-prog-pacific-27" if is_pacific else None)
+                fs = ProgrammeFrontSheet(
+                    front_sheet_code=f"{prog.office}-{prog.treaty_year}-2000{idx:02d}",
+                    program_code=f"6070{40 + idx}",
+                    legal_entity="Keystone Re Transformer",
+                    trading_unit="N.A. Property" if (is_farmers or is_pacific) else "International Property",
+                    planning_class="Property CAT",
+                    new_or_renewal="RENEWAL",
+                    is_multi_year=False,
+                    written_date="2026-11-18",
+                    external_file_path=f"https://sharepoint.internal/reinsurance/{prog.treaty_year}/{prog.programme_id}",
+                    cedent_group=prog.cedent_name,
+                    cedent_country="USA" if is_farmers else ("USA / JP" if is_pacific else "DE"),
+                    cedent_credit_rating="AM Best A" if is_farmers else ("AM Best A-" if is_pacific else "S&P A+"),
+                    broker_group="Marsh McLennan" if "Guy Carpenter" in prog.broker else prog.broker,
+                    closing_broker=prog.broker,
+                    broker_contact="Lead Treaty Desk",
+                    pricing_analyst="Cat Modeling Desk",
+                    offered_line=prog.written_line,
+                    estimated_signed_pct=1.0,
+                    limit_basis="UNL",
+                    claim_trigger="LOSSES_OCCURRING",
+                    loss_event_type="1ST_LOSS",
+                    reinstatement_basis="PRO_RATA_AMOUNT",
+                    inuring_note="FHCF & underlying QS inure prior to 1st Cat XL" if is_farmers else "Clean occurrence tower",
+                    economic_inflation_pct=3.5 if is_farmers else 2.5,
+                    social_inflation_pct=1.2 if is_farmers else 0.0,
+                    gearing_effect_pct=14.5 if is_farmers else 6.0,
+                    rarc_exposure_pct=1.8 if is_farmers else 0.6,
+                    rarc_layer_pct=-2.1 if is_farmers else 0.4,
+                    rarc_price_pct=6.4 if is_farmers else (4.2 if is_pacific else 3.1),
+                    rarc_total_pct=6.1 if is_farmers else (5.2 if is_pacific else 4.1),
+                    prior_year_limit_m=round(prog.limit * 0.94, 2),
+                    prior_year_premium_m=round(prog.deposit_premium * 0.91, 2),
+                    prior_year_rol_pct=round(prog.rol * 94.0, 2),
+                    prior_year_signed_line=prog.signed_line,
+                )
                 chash = canonical_hash(prog.model_dump())
                 rec = ContractRecord(
                     programme_id=prog.programme_id,
@@ -208,7 +257,7 @@ class ContractStore:
                     written_line=prog.written_line,
                     signed_line=prog.signed_line,
                     limit=prog.limit,
-                    attachment=80.0 if "farmers" in prog.programme_id else (70.0 if "pacific" in prog.programme_id else 45.0),
+                    attachment=80.0 if is_farmers else (70.0 if is_pacific else 45.0),
                     deposit_premium=prog.deposit_premium,
                     rol=prog.rol,
                     technical_rol=round(prog.rol * 0.92, 4),
@@ -217,15 +266,28 @@ class ContractStore:
                     collateral_required=prog.collateral_required,
                     currency=prog.currency,
                     sim_set_id=prog.sim_set_id,
+                    exposure_eclipse_programme_id=ee_id,
                     region_perils_json=json.dumps(prog.region_perils),
                     perils_json=json.dumps([p.value for p in prog.perils]),
                     custom_tags_json=json.dumps(["Peak" if "US-FL-WS" in prog.region_perils else "Diversifier"]),
                     uplift_set_json=prog.uplift_set.model_dump_json(),
                     graph_json=prog.graph.model_dump_json(),
+                    front_sheet_json=fs.model_dump_json(),
                     version=1,
                     content_hash=chash,
                 )
                 db.add(rec)
+                if is_farmers:
+                    db.add(
+                        ContractNoteRecord(
+                            note_id="note-seed-farmers-1",
+                            programme_id=prog.programme_id,
+                            cedent_name=prog.cedent_name,
+                            author=prog.underwriter,
+                            category="UNDERWRITING",
+                            body="FL Wind house uplift +10% applied (Adjusted view). Attachment raised +5m YoY; RARC +6.1% meets Keystone hurdle.",
+                        )
+                    )
             db.commit()
 
     def list_contracts(
@@ -328,6 +390,7 @@ class ContractStore:
             uplift_set_json=uplift.model_dump_json(),
             graph_json=graph.model_dump_json(),
             ilw_spec_json=json.dumps(payload.ilw_spec) if payload.ilw_spec else None,
+            front_sheet_json=(payload.front_sheet or ProgrammeFrontSheet(front_sheet_code=f"{payload.office}-{payload.treaty_year}-{prog_id[-6:].upper()}", cedent_group=payload.cedent_name)).model_dump_json(),
             version=1,
             content_hash=chash,
         )
@@ -350,6 +413,8 @@ class ContractStore:
             for k, v in data.items():
                 if k == "custom_tags":
                     rec.custom_tags_json = json.dumps(v)
+                elif k == "front_sheet" and v is not None:
+                    rec.front_sheet_json = ProgrammeFrontSheet(**v).model_dump_json()
                 elif hasattr(v, "value"):
                     setattr(rec, k, v.value)
                 else:
@@ -480,6 +545,56 @@ class ContractStore:
                 continue
             out.append(c)
         return out
+
+    def list_notes(self, programme_id: str, scope: str = "programme") -> list[ContractNoteOut]:
+        with get_session() as db:
+            rec = db.get(ContractRecord, programme_id)
+            if not rec:
+                return []
+            q = db.query(ContractNoteRecord)
+            if scope == "cedent":
+                q = q.filter(ContractNoteRecord.cedent_name == rec.cedent_name)
+            else:
+                q = q.filter(ContractNoteRecord.programme_id == programme_id)
+            rows = q.order_by(ContractNoteRecord.created_at.desc()).all()
+            return [
+                ContractNoteOut(
+                    note_id=n.note_id,
+                    programme_id=n.programme_id,
+                    cedent_name=n.cedent_name,
+                    author=n.author,
+                    category=n.category,
+                    body=n.body,
+                    created_at=n.created_at,
+                )
+                for n in rows
+            ]
+
+    def add_note(self, programme_id: str, payload: ContractNoteCreate) -> ContractNoteOut | None:
+        with get_session() as db:
+            rec = db.get(ContractRecord, programme_id)
+            if not rec:
+                return None
+            note = ContractNoteRecord(
+                note_id=f"note-{uuid.uuid4().hex[:8]}",
+                programme_id=programme_id,
+                cedent_name=rec.cedent_name,
+                author=payload.author.strip() or "J. Anfosso",
+                category=payload.category.upper(),
+                body=payload.body.strip(),
+            )
+            db.add(note)
+            db.commit()
+            db.refresh(note)
+            return ContractNoteOut(
+                note_id=note.note_id,
+                programme_id=note.programme_id,
+                cedent_name=note.cedent_name,
+                author=note.author,
+                category=note.category,
+                body=note.body,
+                created_at=note.created_at,
+            )
 
     def current_entity_hashes(self) -> dict[str, str]:
         hashes: dict[str, str] = {}

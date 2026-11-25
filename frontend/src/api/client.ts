@@ -9,6 +9,46 @@ import type {
   ViewOfRisk,
 } from '../types/contracts';
 
+export interface ProgrammeFrontSheet {
+  frontSheetCode: string;
+  programCode: string;
+  legalEntity: string;
+  tradingUnit: string;
+  planningClass: string;
+  newOrRenewal: string;
+  isMultiYear: boolean;
+  writtenDate?: string | null;
+  externalFilePath?: string | null;
+  cedentGroup: string;
+  cedentCountry: string;
+  cedentCreditRating: string;
+  brokerGroup: string;
+  closingBroker?: string | null;
+  brokerContact?: string | null;
+  mgaCode?: string | null;
+  underwriterAssistant?: string | null;
+  pricingAnalyst?: string | null;
+  claimHandler?: string | null;
+  offeredLine?: number | null;
+  estimatedSignedPct: number;
+  limitBasis: string;
+  claimTrigger: string;
+  lossEventType: string;
+  reinstatementBasis: string;
+  inuringNote?: string | null;
+  economicInflationPct: number;
+  socialInflationPct: number;
+  gearingEffectPct: number;
+  rarcExposurePct: number;
+  rarcLayerPct: number;
+  rarcPricePct: number;
+  rarcTotalPct: number;
+  priorYearLimitM?: number | null;
+  priorYearPremiumM?: number | null;
+  priorYearRolPct?: number | null;
+  priorYearSignedLine?: number | null;
+}
+
 export interface ContractFull extends ProgrammeDeal {
   chainId: string;
   direction: string;
@@ -24,6 +64,8 @@ export interface ContractFull extends ProgrammeDeal {
   brokeragePct: number;
   frontingFeePct: number;
   customTags: string[];
+  exposureEclipseProgrammeId?: string | null;
+  frontSheet: ProgrammeFrontSheet;
   version: number;
   contentHash: string;
 }

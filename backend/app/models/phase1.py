@@ -31,6 +31,73 @@ class IlwSpec(CamelModel):
     direction: ContractDirection = ContractDirection.CEDED if hasattr(ContractDirection, "CEDED") else ContractDirection.EXTERNAL_RETRO
 
 
+class ProgrammeFrontSheet(CamelModel):
+    """Institutional underwriting front-sheet metadata per programme (reference, counterparty, team, RARC, coverage, files)."""
+
+    # Identification & classification
+    front_sheet_code: str = ""
+    program_code: str = ""
+    legal_entity: str = "Keystone Re Transformer"
+    trading_unit: str = "N.A. Property"
+    planning_class: str = "Property CAT"
+    new_or_renewal: str = "RENEWAL"  # NEW | RENEWAL
+    is_multi_year: bool = False
+    written_date: str | None = None
+    external_file_path: str | None = None
+
+    # Counterparty, broker & credit
+    cedent_group: str = ""
+    cedent_country: str = "USA"
+    cedent_credit_rating: str = "AM Best A-"
+    broker_group: str = ""
+    closing_broker: str | None = None
+    broker_contact: str | None = None
+    mga_code: str | None = None
+
+    # Underwriting & analytics team
+    underwriter_assistant: str | None = None
+    pricing_analyst: str | None = None
+    claim_handler: str | None = None
+
+    # Line & coverage mechanics
+    offered_line: float | None = None
+    estimated_signed_pct: float = 1.0
+    limit_basis: str = "UNL"  # UNL | INDUSTRY_INDEX | PARAMETRIC
+    claim_trigger: str = "LOSSES_OCCURRING"  # LOSSES_OCCURRING | RISK_ATTACHING
+    loss_event_type: str = "1ST_LOSS"  # 1ST_LOSS | 2ND_LOSS | AGGREGATE
+    reinstatement_basis: str = "PRO_RATA_AMOUNT"  # PRO_RATA_AMOUNT | PRO_RATA_TIME | FREE
+    inuring_note: str | None = None
+
+    # RARC (Risk-Adjusted Rate Change) decomposition & Prior UY comparison
+    economic_inflation_pct: float = 3.0
+    social_inflation_pct: float = 0.0
+    gearing_effect_pct: float = 0.0
+    rarc_exposure_pct: float = 0.0
+    rarc_layer_pct: float = 0.0
+    rarc_price_pct: float = 0.0
+    rarc_total_pct: float = 0.0
+    prior_year_limit_m: float | None = None
+    prior_year_premium_m: float | None = None
+    prior_year_rol_pct: float | None = None
+    prior_year_signed_line: float | None = None
+
+
+class ContractNoteCreate(CamelModel):
+    author: str = "J. Anfosso"
+    category: str = "UNDERWRITING"  # UNDERWRITING | PRICING | BROKER | CLAIMS | MODELING
+    body: str
+
+
+class ContractNoteOut(CamelModel):
+    note_id: str
+    programme_id: str
+    cedent_name: str
+    author: str
+    category: str
+    body: str
+    created_at: datetime
+
+
 class ContractCreate(CamelModel):
     programme_id: str | None = None
     chain_id: str = ""
@@ -73,6 +140,7 @@ class ContractCreate(CamelModel):
     uplift_set: UpliftSet | None = None
     graph: GraphSpec | None = None
     ilw_spec: dict[str, Any] | None = None
+    front_sheet: ProgrammeFrontSheet | None = None
 
 
 class ContractUpdate(CamelModel):
@@ -95,6 +163,7 @@ class ContractUpdate(CamelModel):
     renewal_period: str | None = None
     custom_tags: list[str] | None = None
     exposure_eclipse_programme_id: str | None = None
+    front_sheet: ProgrammeFrontSheet | None = None
 
 
 class ContractFull(CamelModel):
@@ -139,6 +208,7 @@ class ContractFull(CamelModel):
     uplift_set: UpliftSet
     graph: GraphSpec
     ilw_spec: dict[str, Any] | None = None
+    front_sheet: ProgrammeFrontSheet = ProgrammeFrontSheet()
     version: int = 1
     content_hash: str = ""
     updated_at: datetime | None = None
