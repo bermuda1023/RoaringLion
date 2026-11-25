@@ -20,10 +20,14 @@ from app.engine.backtest_scenario import (
 )
 from app.engine.burn_cost import BurnCostRequest, BurnCostResponse, evaluate_burning_cost
 from app.engine.optimizer import (
+    FrontierExplorerResponse,
     FrontierPoint,
+    OptimizerLayerCatalogItem,
     OptimizerRequest,
     OptimizerResponse,
     compute_efficient_frontier,
+    explore_efficient_frontier,
+    list_optimizable_layers,
     solve_portfolio_optimization,
 )
 from app.engine.pricing_periods_fx import (
@@ -225,6 +229,34 @@ def create_extended_router(
     @router.post("/api/optimizer/frontier", response_model=list[FrontierPoint])
     def run_frontier(req: OptimizerRequest, num_points: int = Query(default=6, ge=2, le=12)) -> list[FrontierPoint]:
         return compute_efficient_frontier(
+            req=req,
+            programmes=_all_non_ilw_deals(),
+            yelt=sim_store.get_yelt(base_sim_id),
+            ind_yelt=sim_store.get_yelt(ind_sim_id),
+            lineage=lineage,
+            num_points=num_points,
+        )
+
+    @router.get("/api/optimizer/layers", response_model=list[OptimizerLayerCatalogItem])
+    def get_optimizer_layers(
+        view: ViewOfRisk = Query(default=ViewOfRisk.ADJUSTED),
+        mode: str = Query(default="FORWARD_PLANNING"),
+    ) -> list[OptimizerLayerCatalogItem]:
+        safe_mode = "CURRENT" if mode == "CURRENT" else "FORWARD_PLANNING"
+        return list_optimizable_layers(
+            programmes=_all_non_ilw_deals(),
+            yelt=sim_store.get_yelt(base_sim_id),
+            ind_yelt=sim_store.get_yelt(ind_sim_id),
+            view=view,
+            mode=safe_mode,
+        )
+
+    @router.post("/api/optimizer/explore", response_model=FrontierExplorerResponse)
+    def run_frontier_explorer(
+        req: OptimizerRequest,
+        num_points: int = Query(default=12, ge=4, le=20),
+    ) -> FrontierExplorerResponse:
+        return explore_efficient_frontier(
             req=req,
             programmes=_all_non_ilw_deals(),
             yelt=sim_store.get_yelt(base_sim_id),
