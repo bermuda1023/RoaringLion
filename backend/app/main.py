@@ -426,9 +426,9 @@ def list_graph_templates(programme_id: str | None = Query(default=None, alias="p
             "templateId": "blank-flt-rp",
             "category": "Filters",
             "source": "BLANK",
-            "label": "Zone Peril Filter",
+            "label": "Zone / Peril Filter",
             "nodeType": "REGION_PERIL_FILTER",
-            "params": {"regionPerils": []},
+            "params": {"zones": [], "perils": [], "regionPerils": []},
         },
         {
             "templateId": "blank-flt-order",

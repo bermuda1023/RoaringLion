@@ -14,6 +14,13 @@ import { api, apiUrl } from '../api/client';
 import { BreadcrumbBar } from '../components/BreadcrumbBar';
 import type { GraphEdgeSpec, GraphNodeSpec, GraphSpec, ProgrammeDeal } from '../types/contracts';
 
+const AVAILABLE_ZONES = ['US-FL', 'US-TX', 'US-SE', 'US-CA', 'JP-KANTO', 'EU-DE'];
+const AVAILABLE_PERILS = [
+  { code: 'WS', label: 'WS (Windstorm)' },
+  { code: 'EQ', label: 'EQ (Earthquake)' },
+];
+const AVAILABLE_REGION_PERILS = ['US-FL-WS', 'US-TX-WS', 'US-SE-WS', 'US-CA-EQ', 'JP-KANTO-EQ', 'EU-DE-WS'];
+
 function nodeStyle(nodeType: string, selected: boolean): React.CSSProperties {
   const base: React.CSSProperties = {
     borderRadius: 6,
@@ -328,6 +335,109 @@ export function StructuringStudio({
                     style={{ width: '100%', marginTop: 3 }}
                   />
                 </label>
+                {selectedNode.nodeType === 'REGION_PERIL_FILTER' && (() => {
+                  const selZones: string[] = Array.isArray(selectedNode.params.zones) ? (selectedNode.params.zones as string[]) : [];
+                  const selPerils: string[] = Array.isArray(selectedNode.params.perils) ? (selectedNode.params.perils as string[]) : [];
+                  const selRps: string[] = Array.isArray(selectedNode.params.regionPerils)
+                    ? (selectedNode.params.regionPerils as string[])
+                    : [];
+
+                  const toggle = (key: 'zones' | 'perils' | 'regionPerils', current: string[], item: string) => {
+                    const next = current.includes(item) ? current.filter((x) => x !== item) : [...current, item];
+                    updateSelectedNodeParam(key, next);
+                  };
+
+                  const chipStyle = (active: boolean): React.CSSProperties => ({
+                    fontSize: 10,
+                    padding: '3px 7px',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                    border: active ? '1px solid #38bdf8' : '1px solid #334155',
+                    background: active ? 'rgba(56, 189, 248, 0.22)' : '#131a29',
+                    color: active ? '#e0f2fe' : '#94a3b8',
+                    fontWeight: active ? 600 : 400,
+                  });
+
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#94a3b8', marginBottom: 4 }}>
+                          <span>ZONES (OR)</span>
+                          {selZones.length > 0 && (
+                            <button
+                              style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: 10, cursor: 'pointer', padding: 0 }}
+                              onClick={() => updateSelectedNodeParam('zones', [])}
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                          {AVAILABLE_ZONES.map((z) => (
+                            <button key={z} type="button" style={chipStyle(selZones.includes(z))} onClick={() => toggle('zones', selZones, z)}>
+                              {z}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#94a3b8', marginBottom: 4 }}>
+                          <span>PERILS (AND/OR)</span>
+                          {selPerils.length > 0 && (
+                            <button
+                              style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: 10, cursor: 'pointer', padding: 0 }}
+                              onClick={() => updateSelectedNodeParam('perils', [])}
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                          {AVAILABLE_PERILS.map((p) => (
+                            <button key={p.code} type="button" style={chipStyle(selPerils.includes(p.code))} onClick={() => toggle('perils', selPerils, p.code)}>
+                              {p.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#94a3b8', marginBottom: 4 }}>
+                          <span>SPECIFIC ZONE-PERILS</span>
+                          {selRps.length > 0 && (
+                            <button
+                              style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: 10, cursor: 'pointer', padding: 0 }}
+                              onClick={() => updateSelectedNodeParam('regionPerils', [])}
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                          {AVAILABLE_REGION_PERILS.map((rp) => (
+                            <button key={rp} type="button" style={chipStyle(selRps.includes(rp))} onClick={() => toggle('regionPerils', selRps, rp)}>
+                              {rp}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div style={{ fontSize: 10, color: '#5eead4', background: '#131a29', border: '1px solid #26324a', borderRadius: 4, padding: '5px 7px' }}>
+                        {selZones.length === 0 && selPerils.length === 0 && selRps.length === 0
+                          ? 'Filter: All zones & perils (unfiltered)'
+                          : `Active: ${[
+                              selZones.length ? `Zones[${selZones.join(', ')}]` : '',
+                              selPerils.length ? `Perils[${selPerils.join(', ')}]` : '',
+                              selRps.length ? `Exact[${selRps.join(', ')}]` : '',
+                            ]
+                              .filter(Boolean)
+                              .join(' · ')}`}
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {Object.entries(selectedNode.params)
                   .filter(([, v]) => typeof v === 'number' || typeof v === 'string')
                   .map(([k, v]) => {

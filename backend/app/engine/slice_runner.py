@@ -125,6 +125,40 @@ def _num(node: Any, key: str, default: float | None = None) -> float:
     return val
 
 
+def _allowed_rp_keys_for_filter(params: dict[str, Any]) -> set[str] | None:
+    """Resolve allowed region-peril keys from zones, perils, and/or explicit regionPerils.
+    Returns None when unfiltered (pass all)."""
+    explicit = [k for k in (params.get("regionPerils") or []) if k]
+    zones = [z for z in (params.get("zones") or []) if z]
+    perils = [p for p in (params.get("perils") or []) if p]
+
+    if "ALL" in explicit and not zones and not perils:
+        return None
+    if not explicit and not zones and not perils:
+        return None
+
+    all_keys = list(RP_TO_ID.keys())
+    matched: set[str] = set()
+
+    if explicit and "ALL" not in explicit:
+        matched.update(k for k in explicit if k in RP_TO_ID)
+
+    if zones or perils:
+        zp_set = set(all_keys)
+        if zones and "ALL" not in zones:
+            z_set = set(zones)
+            zp_set = {
+                k for k in zp_set
+                if k.rsplit("-", 1)[0] in z_set or k.split("-")[0] in z_set
+            }
+        if perils and "ALL" not in perils:
+            p_set = set(perils)
+            zp_set = {k for k in zp_set if k.rsplit("-", 1)[-1] in p_set}
+        matched.update(zp_set)
+
+    return matched
+
+
 def _validate_node_params(node: Any) -> None:
     _check_finite_numbers(node.params, f"Node {node.node_id} params")
     t = node.node_type
@@ -209,6 +243,14 @@ def _validate_node_params(node: Any) -> None:
         for key in node.params.get("regionPerils", []) or []:
             if key != "ALL" and key not in RP_TO_ID:
                 raise ValueError(f"Node {node.node_id} references unknown region-peril '{key}'")
+        valid_zones = {k.rsplit("-", 1)[0] for k in RP_TO_ID} | {k.split("-")[0] for k in RP_TO_ID}
+        for z in node.params.get("zones", []) or []:
+            if z != "ALL" and z not in valid_zones:
+                raise ValueError(f"Node {node.node_id} references unknown zone '{z}'")
+        valid_perils = {k.rsplit("-", 1)[-1] for k in RP_TO_ID}
+        for p in node.params.get("perils", []) or []:
+            if p != "ALL" and p not in valid_perils:
+                raise ValueError(f"Node {node.node_id} references unknown peril '{p}'")
     elif t == NodeType.UPLIFT:
         if _num(node, "factor", 1.0) < 0:
             raise ValueError(f"Node {node.node_id} uplift factor must be >= 0")
@@ -334,8 +376,8 @@ def evaluate_programme_dag(
                     mx = np.zeros(yelt.num_trials, dtype=np.float64)
                     np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
                 elif node.node_type == NodeType.REGION_PERIL_FILTER:
-                    allowed = set(node.params.get("regionPerils", []))
-                    if not allowed or "ALL" in allowed:
+                    allowed = _allowed_rp_keys_for_filter(node.params)
+                    if allowed is None:
                         ev_out = combined
                     else:
                         allowed_ids = [RP_TO_ID[k] for k in allowed if k in RP_TO_ID]
@@ -782,8 +824,8 @@ def evaluate_deterministic_run(
         for src_id in incoming_map[node.node_id]:
             src = nodes_by_id[src_id]
             if src.node_type == NodeType.REGION_PERIL_FILTER:
-                allowed = set(src.params.get("regionPerils", []))
-                if allowed and "ALL" not in allowed:
+                allowed = _allowed_rp_keys_for_filter(src.params)
+                if allowed is not None:
                     for i, row in enumerate(ordered_losses):
                         if row.region_peril_key not in allowed:
                             subject[i] = 0.0
