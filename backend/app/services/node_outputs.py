@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 
-from app.engine.pricing_link import LAYER_NODE_TYPES, PricingLink
+from app.engine.pricing_link import LAYER_NODE_TYPES, PricingLink, graph_uses_explicit_pricing_links
 from app.engine.sim_generator import REGION_PERILS, YeltTable
 from app.models.domain import GraphSpec
 from app.models.enums import NodeType
@@ -19,13 +19,14 @@ from app.services.contracts import contract_layers
 from app.services.lineage import canonical_hash
 
 
-def _link_from_layer(source: str, contract: ContractFull, layer: ContractLayer) -> PricingLink:
+def _link_from_layer(source: str, contract: ContractFull, layer: ContractLayer, *, rolls_up: bool = False) -> PricingLink:
     return PricingLink(
         source=source,
         contract_id=contract.programme_id,
         contract_code=contract.profile.unique_code or contract.programme_id,
         contract_name=f"{contract.cedent_name} — {contract.programme_name}",
         layer_node_id=layer.node_id,
+        layer_code=layer.layer_code,
         layer_label=layer.label,
         limit=layer.limit,
         attachment=layer.attachment,
@@ -34,6 +35,7 @@ def _link_from_layer(source: str, contract: ContractFull, layer: ContractLayer) 
         signed_line=layer.signed_line,
         brokerage_pct=layer.brokerage_pct,
         technical_rol=layer.technical_rol,
+        rolls_up=rolls_up,
     )
 
 
@@ -42,36 +44,38 @@ def resolve_pricing_links(
     current: ContractFull | None,
     get_contract: Callable[[str], ContractFull | None],
 ) -> dict[str, PricingLink]:
-    """Each Pricing Output takes economics from the contract layer chosen on the node, or else from
-    the layer node feeding it on this programme."""
+    """Each Pricing Output always takes its loss stream from its feeder connection; its economics
+    come from the 1:1 linked CMS contract layer (which rolls up), or else from its feeder layer on
+    the canvas for exploratory pricing."""
     nodes_by_id = {n.node_id: n for n in graph.nodes}
+    explicit = graph_uses_explicit_pricing_links(graph)
     links: dict[str, PricingLink] = {}
     for node in graph.nodes:
         if node.node_type != NodeType.PRICING_OUTPUT:
             continue
-        contract_id = node.params.get("contractId")
+        contract_id = str(node.params.get("contractId") or "").strip()
         if contract_id:
-            contract = current if current and current.programme_id == contract_id else get_contract(str(contract_id))
+            contract = current if current and current.programme_id == contract_id else get_contract(contract_id)
             if contract is None:
                 continue
             layers = contract_layers(contract)
             if not layers:
                 continue
-            wanted = node.params.get("layerNodeId")
+            wanted = str(node.params.get("layerNodeId") or "").strip()
             layer = next((l for l in layers if l.node_id == wanted), layers[0])
-            links[node.node_id] = _link_from_layer("LINKED", contract, layer)
+            links[node.node_id] = _link_from_layer("LINKED", contract, layer, rolls_up=True)
             continue
         if current is None:
             continue
         upstream = [
             e.source for e in graph.edges
-            if e.target == node.node_id and nodes_by_id[e.source].node_type in LAYER_NODE_TYPES
+            if e.target == node.node_id and e.source in nodes_by_id and nodes_by_id[e.source].node_type in LAYER_NODE_TYPES
         ]
         if not upstream:
             continue
         layers = {l.node_id: l for l in contract_layers(current.model_copy(update={"graph": graph}))}
         if upstream[0] in layers:
-            links[node.node_id] = _link_from_layer("UPSTREAM", current, layers[upstream[0]])
+            links[node.node_id] = _link_from_layer("UPSTREAM", current, layers[upstream[0]], rolls_up=not explicit)
     return links
 
 

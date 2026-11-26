@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { api, apiUrl, fetchJson, postJson, type ContractFull, type ProgrammeProfile } from '../api/client';
 import { ContractLayersEditor } from '../components/ContractLayersEditor';
 import { fmtInt, fmtMoneyB, fmtMoneyM, fmtPct, fmtPts, fmtRatioPct } from '../utils/format';
+import { nextLayerCode } from '../utils/nodeLabels';
 import { matchesNumberFilter, matchesTextFilter } from '../utils/tableFilter';
 
 type DossierTab = 'profile' | 'layers' | 'notes' | 'pricing' | 'exposure';
@@ -36,6 +37,7 @@ const LEDGER_COLUMNS: LedgerColumn[] = [
 ];
 
 interface NewDealLayer {
+  layerCode: string;
   name: string;
   layerType: 'OCC_XL' | 'AGG_XL';
   limit: number;
@@ -46,8 +48,9 @@ interface NewDealLayer {
   signedPct: number;
 }
 
-function nextLayer(prev: NewDealLayer): NewDealLayer {
+function nextLayer(prev: NewDealLayer, all: NewDealLayer[]): NewDealLayer {
   return {
+    layerCode: nextLayerCode(all.map((l) => l.layerCode)),
     name: '',
     layerType: prev.layerType,
     limit: prev.limit,
@@ -141,7 +144,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   const [cedentName, setCedentName] = useState('Coastal Shield Ins');
   const [programmeName, setProgrammeName] = useState('FL Peak Cat XL 2027');
   const [newLayers, setNewLayers] = useState<NewDealLayer[]>([
-    { name: '', layerType: 'OCC_XL', limit: 25, attachment: 90, rolPct: 21, brokeragePct: 10, writtenPct: 15, signedPct: 10 },
+    { layerCode: 'L1', name: '', layerType: 'OCC_XL', limit: 25, attachment: 90, rolPct: 21, brokeragePct: 10, writtenPct: 15, signedPct: 10 },
   ]);
   const [regionPeril, setRegionPeril] = useState('US-FL-WS');
 
@@ -215,7 +218,11 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
     attachment: Math.min(...newLayers.map((l) => l.attachment || 0)),
   };
   const pctOk = (v: number, max = 100) => Number.isFinite(v) && v >= 0 && v <= max;
+  const newLayerCodesNormalized = newLayers.map((l) => l.layerCode.trim().toLowerCase());
+  const newLayerCodesUnique =
+    newLayerCodesNormalized.every(Boolean) && new Set(newLayerCodesNormalized).size === newLayerCodesNormalized.length;
   const newDealValid =
+    newLayerCodesUnique &&
     newLayers.every(
       (l) => l.limit > 0 && l.attachment >= 0 && l.rolPct >= 0 && pctOk(l.brokeragePct, 90) && pctOk(l.writtenPct) && pctOk(l.signedPct),
     ) &&
@@ -243,6 +250,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
         rol: newDealTotals.limit ? newDealTotals.premium / newDealTotals.limit : 0,
         collateralRequired: newDealTotals.limit,
         layers: newLayers.map((l) => ({
+          layerCode: l.layerCode.trim() || undefined,
           name: l.name.trim() || undefined,
           layerType: l.layerType,
           limit: l.limit,
@@ -260,6 +268,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
       setActiveId(created.programmeId);
       qc.invalidateQueries({ queryKey: ['contracts'] });
       qc.invalidateQueries({ queryKey: ['programmes'] });
+      qc.invalidateQueries({ queryKey: ['graphTemplates'] });
     },
   });
 
@@ -415,6 +424,16 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               {newLayers.map((l, i) => (
                 <div className="layer-row" key={i}>
                   <label>
+                    Layer ID
+                    <input
+                      value={l.layerCode}
+                      placeholder={`L${i + 1}`}
+                      onChange={(e) => setNewLayer(i, { layerCode: e.target.value })}
+                      className="mono"
+                      style={{ width: 72 }}
+                    />
+                  </label>
+                  <label>
                     Layer {i + 1}
                     <input
                       value={l.name}
@@ -473,9 +492,12 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                 </div>
               ))}
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <button className="btn btn-ghost" onClick={() => setNewLayers((ls) => [...ls, nextLayer(ls[ls.length - 1])])}>
+                <button className="btn btn-ghost" onClick={() => setNewLayers((ls) => [...ls, nextLayer(ls[ls.length - 1], ls)])}>
                   + Add layer
                 </button>
+                {!newLayerCodesUnique && (
+                  <span style={{ fontSize: 11, color: 'var(--negative)' }}>Each layer needs a unique Layer ID.</span>
+                )}
                 <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                   {newLayers.length} layer{newLayers.length > 1 ? 's' : ''} · {fmtMoneyM(newDealTotals.limit, 1)} limit ·{' '}
                   {fmtMoneyM(newDealTotals.premium, 2)} premium ·{' '}
@@ -704,6 +726,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                 qc.invalidateQueries({ queryKey: ['contractDossier', activeId] });
                 qc.invalidateQueries({ queryKey: ['programmes'] });
                 qc.invalidateQueries({ queryKey: ['portfolio'] });
+                qc.invalidateQueries({ queryKey: ['graphTemplates'] });
+                qc.invalidateQueries({ queryKey: ['dagEval'] });
               }}
             />
           )}

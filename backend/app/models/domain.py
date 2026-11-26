@@ -144,7 +144,12 @@ class PricingEconomics(CamelModel):
     contract_code: str
     contract_name: str
     layer_node_id: str
+    layer_code: str = ""
     layer_label: str
+    feeder_node_id: str | None = None
+    feeder_layer_code: str = ""
+    feeder_label: str = ""
+    rolls_up: bool = False
     limit: float | None = None
     attachment: float | None = None
     premium: float

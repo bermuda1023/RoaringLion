@@ -216,6 +216,8 @@ export const api = {
     fetchJson<
       {
         templateId: string;
+        layerCode?: string;
+        layerNodeId?: string;
         category: string;
         source?: 'CMS' | 'BLANK';
         label: string;

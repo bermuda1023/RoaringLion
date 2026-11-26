@@ -61,17 +61,17 @@ const NAV_GROUPS: { label: string; items: { key: TabKey; label: string; icon: st
 ];
 
 const PAGE_INFO: Record<TabKey, { title: string; subtitle: string }> = {
-  cms: { title: 'Contract Management', subtitle: 'Programme ledger, underwriting dossiers and year-over-year renewals' },
-  dag: { title: 'Structuring Studio', subtitle: 'Compose layer structures as a calculation graph and review loss statistics' },
-  ilw: { title: 'Industry Loss Warranties', subtitle: 'Index triggers, basis risk and industry catalogue pricing' },
-  deterministic: { title: 'Deterministic Scenarios', subtitle: 'Chronological recovery and erosion statements for named loss lists' },
-  portfolio: { title: 'Portfolio Returns', subtitle: 'Fund-level return on capital, risk appetite and Euler capital allocation' },
-  optimizer: { title: 'Portfolio Optimizer', subtitle: 'Efficient frontier exploration with layer-level constraints' },
-  allocation: { title: 'Retro & Scenarios', subtitle: 'Retrocession allocation, portfolio branching and historical backtests' },
-  simsets: { title: 'Simulation Sets', subtitle: 'Event loss tables, catalogue alignment and synthetic generation' },
-  burnclaims: { title: 'Burn & Claims', subtitle: 'Experience burn analysis and claims development' },
-  modelsops: { title: 'Models & Operations', subtitle: 'Catastrophe model jobs, exposure sync, pricing and fund operations' },
-  benchmarks: { title: 'Lineage & Audit', subtitle: 'Run manifests, breadcrumb staleness and engine benchmarks' },
+  cms: { title: 'Contract Management', subtitle: 'Programme ledger, dossiers, and renewal history' },
+  dag: { title: 'Structuring Studio', subtitle: 'Build layer structures and review loss statistics' },
+  ilw: { title: 'Industry Loss Warranties', subtitle: 'Index triggers, basis risk, and catalogue pricing' },
+  deterministic: { title: 'Deterministic Scenarios', subtitle: 'Recovery and erosion statements for named events' },
+  portfolio: { title: 'Portfolio Returns', subtitle: 'Fund returns, risk appetite, and capital allocation' },
+  optimizer: { title: 'Portfolio Optimizer', subtitle: 'Explore efficient frontiers with layer constraints' },
+  allocation: { title: 'Retro & Scenarios', subtitle: 'Retrocession, branching, and historical backtests' },
+  simsets: { title: 'Simulation Sets', subtitle: 'Event loss tables and synthetic catalogues' },
+  burnclaims: { title: 'Burn & Claims', subtitle: 'Experience burn and claims development' },
+  modelsops: { title: 'Models & Operations', subtitle: 'Model jobs, exposure sync, and fund ops' },
+  benchmarks: { title: 'Lineage & Audit', subtitle: 'Run history, freshness, and performance' },
 };
 
 const DEFAULT_LOSSES: DeterministicLossRow[] = [
@@ -161,7 +161,7 @@ export function App() {
           <div className="brand-mark">RL</div>
           <div>
             <div className="brand-name">RoaringLion</div>
-            <div className="brand-sub">Cat Re &amp; ILS Platform</div>
+            <div className="brand-sub">Catastrophe reinsurance desk</div>
           </div>
         </div>
         <nav aria-label="Primary navigation" style={{ display: 'contents' }}>
@@ -185,9 +185,9 @@ export function App() {
         <div className="sidebar-footer">
           <div>
             <span className={`status-dot ${healthQ.isPending ? 'pending' : apiUp ? 'ok' : 'down'}`} />
-            {healthQ.isPending ? 'Connecting…' : apiUp ? 'Engine online' : 'Engine offline'}
+            {healthQ.isPending ? 'Connecting…' : apiUp ? 'Systems online' : 'Systems offline'}
           </div>
-          <div>Rust kernel · HiGHS solver</div>
+          <div>Simulation &amp; portfolio engine</div>
         </div>
       </aside>
 
@@ -209,7 +209,7 @@ export function App() {
             </span>
             <span className="meta-chip">
               <span className={`status-dot ${apiUp ? 'ok' : healthQ.isPending ? 'pending' : 'down'}`} style={{ marginRight: 0 }} />
-              {apiUp ? 'Live' : healthQ.isPending ? 'Connecting' : 'Offline'}
+              {apiUp ? 'Connected' : healthQ.isPending ? 'Connecting' : 'Offline'}
             </span>
           </div>
         </header>
@@ -343,7 +343,7 @@ export function App() {
                           <td>{g.label}</td>
                           <td className="num">{fmtPct(g.thresholdRocPct, 1)}</td>
                           <td className="num">{fmtPct(g.actualRocPct, 2)}</td>
-                          <td className={`num ${g.passed ? 'pass' : 'fail'}`}>{g.passed ? 'PASS' : 'BREACH'}</td>
+                          <td className={`num ${g.passed ? 'pass' : 'fail'}`}>{g.passed ? 'Pass' : 'Breach'}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -487,7 +487,7 @@ export function App() {
                             <td className="num">{fmtNum(st.stateAfter.reinstatementsUsed, 2)}</td>
                             <td className="num">{fmtMoneyM(st.stateAfter.aggDeductibleEroded, 1)}</td>
                             <td className={`num ${st.stateAfter.exhausted ? 'fail' : 'pass'}`}>
-                              {st.stateAfter.exhausted ? 'YES' : 'NO'}
+                              {st.stateAfter.exhausted ? 'Yes' : 'No'}
                             </td>
                           </tr>
                         ))}
@@ -505,7 +505,7 @@ export function App() {
           <>
             <div className="card">
               <div className="card-title">
-                <span>Engine & Solver Benchmarks</span>
+                <span>Performance benchmarks</span>
               </div>
               <pre className="panel mono" style={{ margin: 0, overflowX: 'auto', color: 'var(--accent-soft)' }}>
                 {JSON.stringify(benchmarksQ.data ?? {}, null, 2)}
@@ -513,7 +513,7 @@ export function App() {
             </div>
             <div className="card">
               <div className="card-title">
-                <span>Run Manifests · Staleness Audit ({manifestsQ.data?.length ?? 0})</span>
+                <span>Run history & freshness ({manifestsQ.data?.length ?? 0})</span>
               </div>
               <div className="table-wrap"><table>
                 <thead>
@@ -535,10 +535,10 @@ export function App() {
                         <td>
                           {st?.isStale ? (
                             <span className="fail" title={st.staleReasons.join('; ')}>
-                              STALE
+                              Stale
                             </span>
                           ) : (
-                            <span className="pass">FRESH</span>
+                            <span className="pass">Fresh</span>
                           )}
                         </td>
                         <td style={{ fontFamily: 'var(--mono)' }}>#{m.outputHash}</td>

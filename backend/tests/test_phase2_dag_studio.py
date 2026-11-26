@@ -155,7 +155,9 @@ def test_graph_templates_blank_canvas_and_cms_suggestions():
     r_cms = client.get("/api/graph-templates?programmeId=prog-farmers-us-27")
     assert r_cms.status_code == 200
     cms_items = [t for t in r_cms.json() if t.get("source") == "CMS"]
-    assert any(t["templateId"] == "cms-layer-prog-farmers-us-27" for t in cms_items)
+    layer_items = [t for t in cms_items if t["templateId"].startswith("cms-layer-prog-farmers-us-27-")]
+    assert len(layer_items) >= 2
+    assert {t["layerCode"] for t in layer_items} >= {"L1", "L2"}
     assert any(t["templateId"] == "cms-perils-prog-farmers-us-27" for t in cms_items)
     assert any("Prior UY (2026)" in t["category"] for t in cms_items)
 

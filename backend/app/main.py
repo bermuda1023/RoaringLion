@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.database import init_engine
 from app.engine.ilw import evaluate_ilw_trial_payouts, price_ilw_with_portfolio_hedge
+from app.engine.pricing_link import extract_rollup_layers
 from app.engine.slice_runner import (
     evaluate_deterministic_run,
     evaluate_portfolio_rollup,
@@ -86,18 +87,23 @@ def _sync_memory_aliases() -> None:
 
 
 def _compute_bound_gross_loss_vector(view: ViewOfRisk) -> np.ndarray:
+    all_contracts = CONTRACT_STORE.list_contracts()
+    all_deals = {c.programme_id: contract_to_programme_deal(c) for c in all_contracts}
     bound = [
-        c for c in CONTRACT_STORE.list_contracts(status=ProgrammeStatus.BOUND)
-        if c.direction == ContractDirection.ASSUMED and c.structure != StructureType.ILW
+        all_deals[c.programme_id]
+        for c in all_contracts
+        if c.status == ProgrammeStatus.BOUND and c.direction == ContractDirection.ASSUMED and c.structure != StructureType.ILW
     ]
     yelt = SIM_STORE.get_yelt(_base_yelt.sim_set_id)
-    total = np.zeros(yelt.num_trials, dtype=np.float64)
-    for c in bound:
-        prog = contract_to_programme_deal(c)
+    ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
+    rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
+    for prog in bound:
         _, vecs = evaluate_programme_dag(prog, yelt, LineageRegistry(persist=False), views=[view])
-        for node in prog.graph.nodes:
-            if node.node_type.value in ("OCC_XL", "AGG_XL"):
-                total += vecs["annual"][view.value][node.node_id]
+        ann_by_prog[prog.programme_id] = vecs["annual"][view.value]
+        rip_by_prog[prog.programme_id] = vecs["rip"][view.value]
+    total = np.zeros(yelt.num_trials, dtype=np.float64)
+    for entry in extract_rollup_layers(bound, ann_by_prog, rip_by_prog, all_programmes=all_deals):
+        total += entry.loss_vec
     return total
 
 
@@ -201,7 +207,10 @@ def create_contract(payload: ContractCreate) -> ContractFull:
         SIM_STORE.get_yelt(payload.sim_set_id)
     except KeyError as exc:
         raise HTTPException(status_code=422, detail=f"Unknown simSetId: {payload.sim_set_id}") from exc
-    full = CONTRACT_STORE.create_contract(payload, LINEAGE)
+    try:
+        full = CONTRACT_STORE.create_contract(payload, LINEAGE)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     _sync_memory_aliases()
     return full
 
@@ -225,7 +234,7 @@ def get_contract_layers(programme_id: str) -> list[ContractLayer]:
     c = CONTRACT_STORE.get_contract(programme_id)
     if not c:
         raise HTTPException(status_code=404, detail="Contract not found")
-    return contract_layers(c)
+    return contract_layers(c, all_contracts=CONTRACT_STORE.list_contracts())
 
 
 @app.put("/api/contracts/{programme_id}/layers", response_model=list[ContractLayer])
@@ -409,9 +418,9 @@ def node_yelt_save(programme_id: str, node_id: str, req: YeltFromNodeRequest) ->
 def update_programme_graph(programme_id: str, graph: GraphSpec) -> ProgrammeDeal:
     try:
         validate_dag_acyclic(graph)
+        c = CONTRACT_STORE.update_graph(programme_id, graph)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    c = CONTRACT_STORE.update_graph(programme_id, graph)
     if not c:
         raise HTTPException(status_code=404, detail="Programme not found")
     _sync_memory_aliases()
@@ -436,50 +445,72 @@ def list_graph_templates(programme_id: str | None = Query(default=None, alias="p
     if programme_id:
         c = CONTRACT_STORE.get_contract(programme_id)
         if c:
-            struct_node = {
-                StructureType.OCC_XL: "OCC_XL",
-                StructureType.AGG_XL: "AGG_XL",
-                StructureType.QUOTA_SHARE: "AGG_QUOTA_SHARE",
-                StructureType.CASCADING: "CASCADING_TOWER",
-                StructureType.ILW: "ILW_OPTION",
-            }.get(c.structure, "OCC_XL")
-
-            if struct_node == "AGG_XL":
-                cms_params: dict = {
-                    "aggLimit": c.limit,
-                    "aggAttachment": c.attachment,
-                    "perEventFranchise": 0.0,
-                    "perEventCap": None,
-                    "depositPremium": c.deposit_premium,
-                    "placedShare": c.signed_line,
-                }
-            elif struct_node == "AGG_QUOTA_SHARE":
-                cms_params = {
-                    "cessionShare": c.signed_line,
-                    "eventCap": c.limit,
-                    "aggCap": c.limit,
-                    "depositPremium": c.deposit_premium,
-                    "placedShare": 1.0,
-                }
+            layers = contract_layers(c)
+            nodes_by_id = {n.node_id: n for n in c.graph.nodes}
+            if layers:
+                for layer in layers:
+                    node = nodes_by_id.get(layer.node_id)
+                    params = dict(node.params) if node else {}
+                    params["layerCode"] = layer.layer_code
+                    templates.append({
+                        "templateId": f"cms-layer-{c.programme_id}-{layer.node_id}",
+                        "layerCode": layer.layer_code,
+                        "layerNodeId": layer.node_id,
+                        "category": f"CMS Layer · {layer.layer_code}",
+                        "source": "CMS",
+                        "label": layer.label,
+                        "nodeType": layer.node_type,
+                        "params": params,
+                    })
             else:
-                cms_params = {
-                    "occLimit": c.limit,
-                    "occAttachment": c.attachment,
-                    "occFranchise": 0.0,
-                    "reinstatements": 1.0,
-                    "ripRate": 1.0,
-                    "depositPremium": c.deposit_premium,
-                    "placedShare": c.signed_line,
-                }
+                struct_node = {
+                    StructureType.OCC_XL: "OCC_XL",
+                    StructureType.AGG_XL: "AGG_XL",
+                    StructureType.QUOTA_SHARE: "AGG_QUOTA_SHARE",
+                    StructureType.CASCADING: "CASCADING_TOWER",
+                    StructureType.ILW: "ILW_OPTION",
+                }.get(c.structure, "OCC_XL")
 
-            templates.append({
-                "templateId": f"cms-layer-{c.programme_id}",
-                "category": "Suggested from CMS",
-                "source": "CMS",
-                "label": f"{c.programme_name} ({c.limit:g}m xs {c.attachment:g}m)",
-                "nodeType": struct_node,
-                "params": cms_params,
-            })
+                if struct_node == "AGG_XL":
+                    cms_params: dict = {
+                        "layerCode": "L1",
+                        "aggLimit": c.limit,
+                        "aggAttachment": c.attachment,
+                        "perEventFranchise": 0.0,
+                        "perEventCap": None,
+                        "depositPremium": c.deposit_premium,
+                        "placedShare": c.signed_line,
+                    }
+                elif struct_node == "AGG_QUOTA_SHARE":
+                    cms_params = {
+                        "layerCode": "L1",
+                        "cessionShare": c.signed_line,
+                        "eventCap": c.limit,
+                        "aggCap": c.limit,
+                        "depositPremium": c.deposit_premium,
+                        "placedShare": 1.0,
+                    }
+                else:
+                    cms_params = {
+                        "layerCode": "L1",
+                        "occLimit": c.limit,
+                        "occAttachment": c.attachment,
+                        "occFranchise": 0.0,
+                        "reinstatements": 1.0,
+                        "ripRate": 1.0,
+                        "depositPremium": c.deposit_premium,
+                        "placedShare": c.signed_line,
+                    }
+
+                templates.append({
+                    "templateId": f"cms-layer-{c.programme_id}",
+                    "layerCode": "L1",
+                    "category": "CMS Layer · L1",
+                    "source": "CMS",
+                    "label": f"{c.programme_name} ({c.limit:g}m xs {c.attachment:g}m)",
+                    "nodeType": struct_node,
+                    "params": cms_params,
+                })
 
             if c.region_perils:
                 templates.append({
@@ -494,16 +525,21 @@ def list_graph_templates(programme_id: str | None = Query(default=None, alias="p
             if c.prior_contract_id:
                 prior = CONTRACT_STORE.get_contract(c.prior_contract_id)
                 if prior:
-                    for n in prior.graph.nodes:
-                        if n.node_type.value in ("OCC_XL", "AGG_XL", "QUOTA_SHARE", "AGG_QUOTA_SHARE", "SURPLUS_SHARE", "CASCADING_TOWER"):
-                            templates.append({
-                                "templateId": f"cms-prior-{prior.programme_id}-{n.node_id}",
-                                "category": f"Prior UY ({prior.treaty_year}) CMS",
-                                "source": "CMS",
-                                "label": n.label,
-                                "nodeType": n.node_type.value,
-                                "params": dict(n.params),
-                            })
+                    prior_nodes = {n.node_id: n for n in prior.graph.nodes}
+                    for layer in contract_layers(prior):
+                        node = prior_nodes.get(layer.node_id)
+                        params = dict(node.params) if node else {}
+                        params["layerCode"] = layer.layer_code
+                        templates.append({
+                            "templateId": f"cms-prior-{prior.programme_id}-{layer.node_id}",
+                            "layerCode": layer.layer_code,
+                            "layerNodeId": layer.node_id,
+                            "category": f"Prior UY ({prior.treaty_year}) · {layer.layer_code}",
+                            "source": "CMS",
+                            "label": layer.label,
+                            "nodeType": layer.node_type,
+                            "params": params,
+                        })
 
     # Clean blank-canvas node palette (no hardcoded layer sizes or preset terms)
     templates.extend([
@@ -655,10 +691,12 @@ def get_portfolio_rollup(
     view: ViewOfRisk = Query(default=ViewOfRisk.ADJUSTED),
     total_capital: float = Query(default=160.0, alias="totalCapital", gt=0),
 ) -> PortfolioRollupResponse:
+    all_contracts = CONTRACT_STORE.list_contracts()
+    all_deals = {c.programme_id: contract_to_programme_deal(c) for c in all_contracts}
     bound = [
-        contract_to_programme_deal(c)
-        for c in CONTRACT_STORE.list_contracts(status=ProgrammeStatus.BOUND)
-        if c.structure != StructureType.ILW
+        all_deals[c.programme_id]
+        for c in all_contracts
+        if c.status == ProgrammeStatus.BOUND and c.structure != StructureType.ILW
     ]
     yelt = SIM_STORE.get_yelt(_base_yelt.sim_set_id)
     return evaluate_portfolio_rollup(
@@ -669,6 +707,7 @@ def get_portfolio_rollup(
         view=view,
         total_capital=total_capital,
         lineage=LINEAGE,
+        all_programmes=all_deals,
     )
 
 
@@ -677,6 +716,7 @@ def rollup_cms_slice(req: SliceRollupRequest) -> PortfolioRollupResponse:
     selected = [c for c in CONTRACT_STORE.select_slice(req) if c.structure != StructureType.ILW]
     if not selected:
         raise HTTPException(status_code=400, detail="No matching non-ILW contracts in slice")
+    all_deals = {c.programme_id: contract_to_programme_deal(c) for c in CONTRACT_STORE.list_contracts()}
     yelt = SIM_STORE.get_yelt(_base_yelt.sim_set_id)
     return evaluate_portfolio_rollup(
         portfolio_id="slice-rollup",
@@ -686,6 +726,7 @@ def rollup_cms_slice(req: SliceRollupRequest) -> PortfolioRollupResponse:
         view=req.view,
         total_capital=req.total_capital,
         lineage=LINEAGE,
+        all_programmes=all_deals,
     )
 
 

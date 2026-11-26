@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 import roaring_lion_engine as rle
 
-from app.engine.pricing_link import PricingLink, compute_pricing_economics
+from app.engine.pricing_link import PricingLink, compute_pricing_economics, extract_rollup_layers
 from app.engine.sim_generator import RP_TO_ID, YeltTable
 from app.models.domain import (
     BreadcrumbStep,
@@ -633,6 +633,7 @@ def evaluate_portfolio_rollup(
     view: ViewOfRisk,
     total_capital: float,
     lineage: LineageRegistry,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
 ) -> PortfolioRollupResponse:
     """Roll up bound programmes/layers into a fund portfolio with ROC/IRR CDF and Euler Co-TVaR."""
     t0 = time.perf_counter()
@@ -644,19 +645,12 @@ def evaluate_portfolio_rollup(
     ]
     input_hashes: dict[str, str] = {"sim_set": yelt.content_hash}
 
-    term_types = (
-        NodeType.OCC_XL,
-        NodeType.AGG_XL,
-        NodeType.QUOTA_SHARE,
-        NodeType.AGG_QUOTA_SHARE,
-        NodeType.SURPLUS_SHARE,
-        NodeType.CASCADING_TOWER,
-    )
-
+    ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
+    rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
     for prog in programmes:
         _, vecs = evaluate_programme_dag(prog, yelt, lineage, views=[view])
-        ann_map = vecs["annual"][view.value]
-        rip_map = vecs["rip"][view.value]
+        ann_by_prog[prog.programme_id] = vecs["annual"][view.value]
+        rip_by_prog[prog.programme_id] = vecs["rip"][view.value]
         breadcrumbs.append(
             BreadcrumbStep(
                 entity_type="PROGRAMME",
@@ -668,22 +662,18 @@ def evaluate_portfolio_rollup(
         )
         input_hashes[prog.programme_id] = prog.graph.content_hash
 
-        for node in prog.graph.nodes:
-            if node.node_type in term_types:
-                placed = float(node.params.get("placedShare", prog.signed_line))
-                lim = float(node.params.get("occLimit", node.params.get("aggLimit", node.params.get("aggCap", prog.limit)))) * placed
-                prem = float(node.params.get("depositPremium", 0.0)) * placed
-                layer_ann_list.append(ann_map[node.node_id])
-                layer_rip_list.append(rip_map[node.node_id])
-                layer_rows_meta.append({
-                    "programme_id": prog.programme_id,
-                    "layer_id": node.node_id,
-                    "layer_name": node.label,
-                    "cedent_name": prog.cedent_name,
-                    "limit": lim,
-                    "premium": prem,
-                    "signed_line": placed,
-                })
+    for entry in extract_rollup_layers(programmes, ann_by_prog, rip_by_prog, all_programmes=all_programmes):
+        layer_ann_list.append(entry.loss_vec)
+        layer_rip_list.append(entry.rip_vec)
+        layer_rows_meta.append({
+            "programme_id": entry.programme_id,
+            "layer_id": entry.layer_id,
+            "layer_name": entry.layer_name,
+            "cedent_name": entry.cedent_name,
+            "limit": entry.limit,
+            "premium": entry.premium,
+            "signed_line": entry.signed_line,
+        })
 
     layer_matrix = np.vstack(layer_ann_list) if layer_ann_list else np.zeros((0, yelt.num_trials))
     rip_matrix = np.vstack(layer_rip_list) if layer_rip_list else np.zeros((0, yelt.num_trials))
