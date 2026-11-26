@@ -30,6 +30,41 @@ TERM_NODE_TYPES = (
 )
 STACK_RETURN_PERIODS = [2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0]
 
+OptimizerMode = Literal["CURRENT", "FORWARD_PLANNING"]
+
+# Deal statuses each horizon mode builds its portfolio from when the request names none.
+CURRENT_MODE_STATUSES = frozenset({ProgrammeStatus.QUOTED, ProgrammeStatus.FIRM_ORDER, ProgrammeStatus.BOUND})
+FORWARD_MODE_EXCLUDED_STATUSES = frozenset({ProgrammeStatus.DECLINED, ProgrammeStatus.NTU, ProgrammeStatus.EXPIRED})
+NO_DEALS_MESSAGE = "No programmes match the selected deal statuses, so there is no portfolio to optimize"
+
+
+def default_optimizer_statuses(mode: OptimizerMode) -> list[ProgrammeStatus]:
+    """Statuses a mode includes by default, in `ProgrammeStatus` order."""
+    if mode == "CURRENT":
+        return [s for s in ProgrammeStatus if s in CURRENT_MODE_STATUSES]
+    return [s for s in ProgrammeStatus if s not in FORWARD_MODE_EXCLUDED_STATUSES]
+
+
+def resolve_optimizer_statuses(
+    mode: OptimizerMode, included_statuses: list[ProgrammeStatus] | None
+) -> list[ProgrammeStatus]:
+    """Statuses whose deals form the portfolio: the explicit selection, else the mode's defaults."""
+    if included_statuses is None:
+        return default_optimizer_statuses(mode)
+    chosen = set(included_statuses)
+    return [s for s in ProgrammeStatus if s in chosen]
+
+
+def optimizer_link_target_statuses(included_statuses: list[ProgrammeStatus] | None) -> set[ProgrammeStatus]:
+    """Statuses a Pricing Output's linked contract may have for its layer to roll up.
+
+    With an explicit selection a linked layer follows the same filter as every other deal. Without one,
+    links resolve as they always have: against every programme that is not declined, NTU or expired.
+    """
+    if included_statuses is not None:
+        return set(included_statuses)
+    return set(default_optimizer_statuses("FORWARD_PLANNING"))
+
 
 class RegionPerilCap(CamelModel):
     region_peril_key: str
@@ -56,7 +91,9 @@ class TvarCapConstraint(CamelModel):
 
 
 class OptimizerRequest(CamelModel):
-    mode: Literal["CURRENT", "FORWARD_PLANNING"] = "CURRENT"
+    mode: OptimizerMode = "CURRENT"
+    # Deal statuses to build the portfolio from. None keeps the mode's defaults; any status may be listed.
+    included_statuses: list[ProgrammeStatus] | None = None
     granularity: Literal["DEAL", "LAYER"] = "DEAL"
     objective: Literal["MAX_EXPECTED_PROFIT", "MIN_TVAR_250", "MAX_RISK_ADJUSTED_RETURN"] = "MAX_EXPECTED_PROFIT"
     risk_aversion_lambda: float = Field(default=0.15, ge=0, le=2, allow_inf_nan=False)
@@ -86,6 +123,10 @@ class OptimizerRequest(CamelModel):
             raise ValueError("minDeployedCollateral must be <= maxDeployedCollateral")
         if self.min_line_size_share > self.max_line_size_share:
             raise ValueError("minLineSizeShare must be <= maxLineSizeShare")
+        if self.included_statuses is not None:
+            if not self.included_statuses:
+                raise ValueError("includedStatuses must name at least one status (omit it to use the mode's defaults)")
+            self.included_statuses = resolve_optimizer_statuses(self.mode, self.included_statuses)
         return self
 
 
@@ -109,6 +150,32 @@ class OptimizerLayerCatalogItem(CamelModel):
     default_max_share: float
 
 
+class OptimizerStatusCount(CamelModel):
+    status: ProgrammeStatus
+    programmes: int
+    included: bool
+    default_included: bool
+
+
+class OptimizerCandidatesPage(CamelModel):
+    """One page of the deals a portfolio would be built from, with each deal's layers."""
+
+    mode: str
+    view: str
+    included_statuses: list[ProgrammeStatus]
+    default_statuses: list[ProgrammeStatus]
+    uses_default_statuses: bool
+    status_counts: list[OptimizerStatusCount]
+    universe_programmes: int
+    matched_programmes: int
+    search: str
+    limit: int
+    offset: int
+    programme_ids: list[str]
+    layers: list[OptimizerLayerCatalogItem]
+    retro_candidate: OptimizerLayerCatalogItem | None = None
+
+
 class OptimizedDealRow(CamelModel):
     programme_id: str
     layer_key: str = ""
@@ -116,6 +183,7 @@ class OptimizedDealRow(CamelModel):
     cedent_name: str
     programme_name: str
     direction: str
+    status: str = ""
     current_share: float
     optimal_share: float
     delta_share: float
@@ -146,6 +214,7 @@ class OptimizerResponse(CamelModel):
     after_tvar_250_m: float
     before_mean_roc_pct: float
     after_mean_roc_pct: float
+    included_statuses: list[ProgrammeStatus] = []
     deals: list[OptimizedDealRow]
     constraints: list[ConstraintDiagnostic]
     manifest: RunManifest
@@ -185,6 +254,7 @@ class OptimizedLayerRow(CamelModel):
     programme_name: str
     layer_name: str
     direction: str
+    status: str = ""
     region_perils: list[str]
     current_share: float
     optimal_share: float
@@ -221,6 +291,7 @@ class FrontierExplorerResponse(CamelModel):
     mode: str
     granularity: str
     view: str
+    included_statuses: list[ProgrammeStatus] = []
     compute_ms: float
     initial_portfolio: PortfolioMetricsSnapshot
     initial_layers: list[OptimizedLayerRow]
@@ -234,19 +305,22 @@ def _build_vectors(
     yelt: YeltTable,
     ind_yelt: YeltTable,
     req: OptimizerRequest,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
 ) -> tuple[list[dict[str, Any]], np.ndarray]:
-    """Build 100%-share annual loss vectors (M x N) at either DEAL or LAYER granularity + optional retro ILW."""
+    """Build 100%-share annual loss vectors (M x N) at either DEAL or LAYER granularity + optional retro ILW.
+
+    `programmes` are the candidate deals; only those whose status is selected (`req.included_statuses`,
+    else the mode's defaults) enter the portfolio. `all_programmes` resolves the contract a Pricing Output
+    links to, and defaults to `programmes`.
+    """
     items: list[dict[str, Any]] = []
     vecs: list[np.ndarray] = []
 
-    active_progs = [
-        p
-        for p in programmes
-        if not (
-            req.mode == "CURRENT"
-            and p.status not in (ProgrammeStatus.BOUND, ProgrammeStatus.QUOTED, ProgrammeStatus.FIRM_ORDER)
-        )
-    ]
+    allowed = set(resolve_optimizer_statuses(req.mode, req.included_statuses))
+    active_progs = [p for p in programmes if p.status in allowed]
+    link_allowed = optimizer_link_target_statuses(req.included_statuses)
+    link_source = all_programmes if all_programmes is not None else {p.programme_id: p for p in programmes}
+    link_targets = {pid: p for pid, p in link_source.items() if p.status in link_allowed}
     ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
     rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
     for p in active_progs:
@@ -258,7 +332,7 @@ def _build_vectors(
         active_progs,
         ann_by_prog,
         rip_by_prog,
-        all_programmes={p.programme_id: p for p in programmes},
+        all_programmes=link_targets,
     )
 
     if req.granularity == "LAYER":
@@ -365,11 +439,19 @@ def list_optimizable_layers(
     yelt: YeltTable,
     ind_yelt: YeltTable,
     view: ViewOfRisk = ViewOfRisk.ADJUSTED,
-    mode: Literal["CURRENT", "FORWARD_PLANNING"] = "FORWARD_PLANNING",
+    mode: OptimizerMode = "FORWARD_PLANNING",
+    included_statuses: list[ProgrammeStatus] | None = None,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
 ) -> list[OptimizerLayerCatalogItem]:
     """Return every layer-level decision variable with 1x economics and default participation bounds."""
-    req = OptimizerRequest(mode=mode, granularity="LAYER", view=view, include_retro_ilw_candidate=True)
-    items, _ = _build_vectors(programmes, yelt, ind_yelt, req)
+    req = OptimizerRequest(
+        mode=mode,
+        granularity="LAYER",
+        view=view,
+        include_retro_ilw_candidate=True,
+        included_statuses=included_statuses,
+    )
+    items, _ = _build_vectors(programmes, yelt, ind_yelt, req, all_programmes)
     out: list[OptimizerLayerCatalogItem] = []
     for it in items:
         rol_pct = (it["prem_1x"] / it["limit_1x"]) * 100.0 if it["limit_1x"] > 0 else (req.retro_ilw_rol * 100.0)
@@ -467,6 +549,7 @@ def _compute_portfolio_snapshot(
                 programme_name=it["programme_name"],
                 layer_name=it["layer_name"],
                 direction=it["direction"],
+                status=it["status"],
                 region_perils=it["region_perils"],
                 current_share=round(it["current_share"], 4),
                 optimal_share=round(w, 4),
@@ -767,13 +850,14 @@ def solve_portfolio_optimization(
     yelt: YeltTable,
     ind_yelt: YeltTable,
     lineage: LineageRegistry,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
 ) -> OptimizerResponse:
     """Solve constrained portfolio optimization via HiGHS LP/MILP with tail-scenario reduction & shadow prices."""
     t0 = time.perf_counter()
-    items, mat = _build_vectors(programmes, yelt, ind_yelt, req)
+    items, mat = _build_vectors(programmes, yelt, ind_yelt, req, all_programmes)
     m, n_trials = mat.shape
-    if m == 0:
-        raise ValueError("No candidate deals available for optimization")
+    if not any(it["direction"] == "ASSUMED" for it in items):
+        raise ValueError(NO_DEALS_MESSAGE)
 
     cur_w = np.array([it["current_share"] for it in items], dtype=np.float64)
     _, base_tvar_250, _ = rle.euler_cotvar(np.ascontiguousarray(mat * cur_w[:, None], dtype=np.float64), 250.0)
@@ -804,6 +888,7 @@ def solve_portfolio_optimization(
                 cedent_name=it["cedent_name"],
                 programme_name=it["programme_name"],
                 direction=it["direction"],
+                status=it["status"],
                 current_share=round(it["current_share"], 4),
                 optimal_share=round(w, 4),
                 delta_share=round(w - it["current_share"], 4),
@@ -835,6 +920,7 @@ def solve_portfolio_optimization(
         after_tvar_250_m=round(float(opt_tvar_250), 4),
         before_mean_roc_pct=round(base_roc, 2),
         after_mean_roc_pct=round(opt_roc, 2),
+        included_statuses=resolve_optimizer_statuses(req.mode, req.included_statuses),
         deals=deal_rows,
         constraints=diags,
         manifest=manifest,
@@ -849,6 +935,7 @@ def compute_efficient_frontier(
     ind_yelt: YeltTable,
     lineage: LineageRegistry,
     num_points: int = 6,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
 ) -> list[FrontierPoint]:
     """Sweep 1-in-250 TVaR budgets to generate the Pareto Efficient Frontier."""
     tvar_grid = np.linspace(max(40.0, req.max_tvar_250_m * 0.45), req.max_tvar_250_m * 1.25, num_points)
@@ -861,6 +948,7 @@ def compute_efficient_frontier(
             yelt=yelt,
             ind_yelt=ind_yelt,
             lineage=LineageRegistry(persist=False),
+            all_programmes=all_programmes,
         )
         dep = sum(d.optimal_limit_m for d in res.deals if d.direction == "ASSUMED")
         points.append(
@@ -884,14 +972,16 @@ def explore_efficient_frontier(
     ind_yelt: YeltTable,
     lineage: LineageRegistry,
     num_points: int = 12,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
 ) -> FrontierExplorerResponse:
     """Build full interactive Pareto Frontier Explorer with per-point layer shares, Euler Co-TVaR, Co-VaR, and RP stacks."""
     t0 = time.perf_counter()
     layer_req = req.model_copy(update={"granularity": req.granularity})
-    items, mat = _build_vectors(programmes, yelt, ind_yelt, layer_req)
+    items, mat = _build_vectors(programmes, yelt, ind_yelt, layer_req, all_programmes)
     m, n_trials = mat.shape
-    if m == 0:
-        raise ValueError("No candidate layers available for frontier exploration")
+    if not any(it["direction"] == "ASSUMED" for it in items):
+        raise ValueError(NO_DEALS_MESSAGE)
+    included_statuses = resolve_optimizer_statuses(req.mode, req.included_statuses)
 
     cur_w = np.array([it["current_share"] for it in items], dtype=np.float64)
     init_snap, init_layers, _ = _compute_portfolio_snapshot(items, mat, cur_w, req.total_capital)
@@ -947,7 +1037,13 @@ def explore_efficient_frontier(
     manifest = lineage.record_manifest(
         run_type="FRONTIER_EXPLORER",
         input_hashes={"sim_set": yelt.content_hash, "req": canonical_hash(req.model_dump())},
-        parameters={"num_points": num_points, "granularity": req.granularity, "mode": req.mode, "view": req.view.value},
+        parameters={
+            "num_points": num_points,
+            "granularity": req.granularity,
+            "mode": req.mode,
+            "view": req.view.value,
+            "included_statuses": [s.value for s in included_statuses],
+        },
         output_payload={
             "points": len(frontier_pts),
             "recommended_index": rec_idx,
@@ -961,6 +1057,7 @@ def explore_efficient_frontier(
         mode=req.mode,
         granularity=req.granularity,
         view=req.view.value,
+        included_statuses=included_statuses,
         compute_ms=compute_ms,
         initial_portfolio=init_snap,
         initial_layers=init_layers,

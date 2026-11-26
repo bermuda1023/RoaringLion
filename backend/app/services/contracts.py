@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Iterable
 from datetime import datetime, timezone
+from typing import Literal
+
+from sqlalchemy import func, or_
 
 from app.db.database import get_session
 from app.db.models import ContractNoteRecord, ContractRecord
@@ -941,6 +945,65 @@ class ContractStore:
                     or s in c.programme_id.lower()
                 ]
             return out
+
+    def query_contracts(
+        self,
+        *,
+        statuses: Iterable[ProgrammeStatus] | None = None,
+        programme_ids: Iterable[str] | None = None,
+        exclude_structures: Iterable[StructureType] = (),
+        search: str | None = None,
+        order_by: Literal["RECENT", "NAME"] = "RECENT",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[ContractFull], int]:
+        """Filter, search and page contracts in SQL. Returns (page, total rows matching the filters).
+
+        `statuses` / `programme_ids` of None mean "no filter"; an empty collection matches nothing.
+        """
+        status_values = None if statuses is None else sorted({s.value for s in statuses})
+        id_values = None if programme_ids is None else sorted(set(programme_ids))
+        if status_values == [] or id_values == []:
+            return [], 0
+        with get_session() as db:
+            q = db.query(ContractRecord)
+            if status_values is not None:
+                q = q.filter(ContractRecord.status.in_(status_values))
+            if id_values is not None:
+                q = q.filter(ContractRecord.programme_id.in_(id_values))
+            excluded = [s.value for s in exclude_structures]
+            if excluded:
+                q = q.filter(ContractRecord.structure.notin_(excluded))
+            term = (search or "").strip()
+            if term:
+                pattern = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                q = q.filter(
+                    or_(
+                        ContractRecord.cedent_name.ilike(pattern, escape="\\"),
+                        ContractRecord.programme_name.ilike(pattern, escape="\\"),
+                        ContractRecord.broker.ilike(pattern, escape="\\"),
+                        ContractRecord.programme_id.ilike(pattern, escape="\\"),
+                    )
+                )
+            total = q.count()
+            if order_by == "NAME":
+                q = q.order_by(ContractRecord.cedent_name, ContractRecord.programme_name, ContractRecord.programme_id)
+            else:
+                q = q.order_by(ContractRecord.updated_at.desc())
+            if offset:
+                q = q.offset(offset)
+            if limit is not None:
+                q = q.limit(limit)
+            return [_record_to_full(r) for r in q.all()], total
+
+    def count_by_status(self, *, exclude_structures: Iterable[StructureType] = ()) -> dict[ProgrammeStatus, int]:
+        """Number of contracts per status, counted in SQL."""
+        with get_session() as db:
+            q = db.query(ContractRecord.status, func.count(ContractRecord.programme_id))
+            excluded = [s.value for s in exclude_structures]
+            if excluded:
+                q = q.filter(ContractRecord.structure.notin_(excluded))
+            return {ProgrammeStatus(status): int(n) for status, n in q.group_by(ContractRecord.status).all()}
 
     def get_contract(self, programme_id: str) -> ContractFull | None:
         with get_session() as db:

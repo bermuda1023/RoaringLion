@@ -55,6 +55,13 @@ Edge semantics:
 Aligned with ExposureEclipse (`BOUND` + dates in force = active portfolio):
 - `SUBMISSION`, `INDICATIVE`, `QUOTED`, `AUTHORIZED`, `FIRM_ORDER`, `BOUND`, `BOUND_FOR_OPS`, `DECLINED`, `NTU`, `EXPIRED`, `PLANNED`
 
+The Portfolio Optimizer chooses its deals by status:
+- `includedStatuses` lists the statuses whose deals form the portfolio. Any status is allowed, including `DECLINED`, `NTU` and `EXPIRED`. It is a body field on `POST /api/optimizer/solve`, `/frontier` and `/explore`, and a repeated query parameter on `GET /api/optimizer/candidates` and `/layers`.
+- When it is omitted, `mode: CURRENT` uses `QUOTED`, `FIRM_ORDER`, `BOUND`, and `mode: FORWARD_PLANNING` uses every status except `DECLINED`, `NTU`, `EXPIRED`. An empty list is rejected with 422, as is a selection that matches no deal.
+- Every optimizer row (`deals[]`, `layers[]`, `initialLayers[]`) carries the deal's `status`, and each response echoes the `includedStatuses` it was built from. A deal enters at its recorded signed line whatever its status. Selecting a status never changes a deal's status.
+- A layer priced through a Pricing Output link rolls up under the linked contract's status. With `includedStatuses` set, that status must be selected. Without it, the link resolves against every contract that is not `DECLINED`, `NTU` or `EXPIRED`.
+- `GET /api/optimizer/candidates` lists the deals a portfolio would be built from, one page of programmes at a time (`limit` up to 100, `offset`). `search` matches cedent, programme, broker or programme id. It returns the page's layers, `statusCounts` (programmes per status), `universeProgrammes` (programmes in the selected statuses) and `matchedProgrammes` (those also matching `search`). The candidate retro ILW hedge is returned separately as `retroCandidate`.
+
 ## 6. Deterministic Loss Source Types (`LossSourceType`)
 
 - `MANUAL`, `BORDEREAUX_UPLOAD`, `EXPOSURE_ECLIPSE`, `HISTORICAL_EVENT`, `PROGRAMME_HISTORY`, `CLAIM`, `STOCHASTIC_PICK`, `SCENARIO_INVENTED`, `SCENARIO_PERTURBED`
