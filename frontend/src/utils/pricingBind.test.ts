@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GraphSpec } from '../types/contracts';
-import { LAYER_ALREADY_BOUND, PRICING_ALREADY_LINKED, connectNodes, removeEdge } from './pricingBind';
+import { PRICING_ALREADY_BOUND, PRICING_ALREADY_LINKED, connectNodes, removeEdge } from './pricingBind';
 
 function graph(nodes: GraphSpec['nodes'], edges: GraphSpec['edges']): GraphSpec {
   return { graphId: 'g', name: 'g', version: 1, currency: 'USD', nodes, edges, contentHash: '' };
@@ -44,7 +44,7 @@ describe('pricing output binding', () => {
     expect(base.edges).toHaveLength(1);
   });
 
-  it('disconnects like any other edge, then reconnects the bind onto another layer', () => {
+  it('disconnects like any other edge, then reconnects without changing the CMS identity', () => {
     const disconnected = removeEdge(base, 'e-a');
     expect(disconnected.edges).toEqual([]);
     expect(disconnected.nodes.find((n) => n.nodeId === 'px')?.params.layerNodeId).toBe('lyr-a');
@@ -53,33 +53,17 @@ describe('pricing output binding', () => {
     expect('error' in moved).toBe(false);
     if ('error' in moved) return;
     const px = moved.graph.nodes.find((n) => n.nodeId === 'px')!;
-    expect(px.params.layerNodeId).toBe('lyr-b');
+    expect(px.params.layerNodeId).toBe('lyr-a');
     expect(px.params.contractId).toBe('prog');
-    expect(String(px.params.linkedLabel)).toContain('L2');
     expect(moved.graph.edges).toEqual([{ edgeId: 'e-b', source: 'lyr-b', target: 'px', sign: 1, weight: 1 }]);
     expect(moved.graph.edges.some((e) => e.source === 'lyr-a')).toBe(false);
   });
 
-  it('refuses to move onto a layer that already has a pricing output', () => {
-    const taken = graph(
-      [
-        ...base.nodes,
-        {
-          nodeId: 'px-b',
-          nodeType: 'PRICING_OUTPUT',
-          label: 'Pricing B',
-          params: { contractId: 'prog', layerNodeId: 'lyr-b', linkedLabel: 'RL · L2' },
-          position: { x: 920, y: 180 },
-        },
-      ],
-      [
-        { edgeId: 'e-a', source: 'lyr-a', target: 'px', sign: 1, weight: 1 },
-        { edgeId: 'e-b', source: 'lyr-b', target: 'px-b', sign: 1, weight: 1 },
-      ],
-    );
-    const disconnected = removeEdge(taken, 'e-a');
-    const refused = connectNodes(disconnected, 'prog', 'lyr-b', 'px', 'e-move');
-    expect('error' in refused && refused.error).toBe(LAYER_ALREADY_BOUND);
+  it('refuses a reconnect when that pricing output is already bound on another programme', () => {
+    const disconnected = removeEdge(base, 'e-a');
+    const refused = connectNodes(disconnected, 'prog', 'lyr-b', 'px', 'e-move', new Set(['prog::lyr-a']));
+    expect('error' in refused && refused.error).toBe(PRICING_ALREADY_BOUND);
+    expect(disconnected.edges).toEqual([]);
   });
 
   it('keeps an unlinked pricing output out of selective rollup when it is only previewed', () => {

@@ -434,7 +434,7 @@ export function ContractLayersEditor({
       {layers.length === 0 && !newLayer ? (
         <div className="empty-cell">This programme has no layers yet. Use “+ Add layer” or add financial-terms nodes in the Structuring Studio.</div>
       ) : (
-        <div className="table-wrap">
+        <div className="table-wrap table-fit">
           <table>
             <thead>
               <tr>

@@ -131,25 +131,17 @@ describe('CMS layer suggestions', () => {
     expect(placed.graph.nodes.filter((n) => n.nodeType === 'PRICING_OUTPUT')).toHaveLength(1);
   });
 
-  it('does not take a 1:1 link that another programme already holds', () => {
+  it('refuses to place a pricing output that is already bound on another programme', () => {
     const base = graph([
       { nodeId: 'lyr-1', nodeType: 'OCC_XL', label: 'Cat XL', params: { layerCode: 'L1' }, position: { x: 600, y: 40 } },
     ]);
-    const placed = applyCmsLayerSuggestion(base, layerTemplate(), {
-      claimedElsewhere: new Set(['prog::lyr-1']),
-      idFactory: factory('f'),
-    });
-    const px = placed.graph.nodes.find((n) => n.nodeId === placed.pricingNodeId)!;
-    expect(placed.linked).toBe(false);
-    expect(px.params.contractId).toBeUndefined();
-    expect(inBlankCanvas(px.position)).toBe(false);
-    expect(px.position).toEqual({ x: 920, y: 40 });
-    const second = applyCmsLayerSuggestion(placed.graph, layerTemplate(), {
-      claimedElsewhere: new Set(['prog::lyr-1']),
-      idFactory: factory('g'),
-    });
-    expect(second.changed).toBe(false);
-    expect(second.graph.nodes.filter((n) => n.nodeType === 'PRICING_OUTPUT')).toHaveLength(1);
+    expect(() =>
+      applyCmsLayerSuggestion(base, layerTemplate(), {
+        claimedElsewhere: new Set(['prog::lyr-1']),
+        idFactory: factory('f'),
+      }),
+    ).toThrow(/already bound/);
+    expect(base.nodes.filter((n) => n.nodeType === 'PRICING_OUTPUT')).toHaveLength(0);
   });
 
   it('shifts the pricing output out of the blank box when the 320 offset would land inside it', () => {

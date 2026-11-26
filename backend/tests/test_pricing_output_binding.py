@@ -1,4 +1,4 @@
-"""A Pricing Output binds one layer: a second connection is refused, and a reconnect moves the bind."""
+"""A Pricing Output has one incoming edge. Reconnecting moves the feeder and keeps the CMS layer."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.models.domain import GraphEdgeSpec, GraphNodeSpec, GraphSpec
 from app.models.enums import NodeType
-from app.services.pricing_bind import LAYER_ALREADY_BOUND, connect_nodes
+from app.services.pricing_bind import ALREADY_BOUND, connect_nodes
 
 client = TestClient(app)
 
@@ -97,36 +97,46 @@ def test_pricing_output_refuses_a_second_layer_then_moves_when_reconnected():
     disconnected.edges = [e for e in disconnected.edges if e.target != px_id]
     moved = connect_nodes(disconnected, pid, built_id, px_id, "e-moved")
     pricing = next(n for n in moved.nodes if n.node_id == px_id)
-    assert pricing.params["layerNodeId"] == built_id
+    assert pricing.params["layerNodeId"] == layer_id
     assert pricing.params["contractId"] == pid
-    assert not any(e.target == px_id and e.source == layer_id for e in moved.edges)
     assert any(e.source == built_id and e.target == px_id for e in moved.edges)
 
     stored = _put(pid, moved)
     assert stored.status_code == 200, stored.text
     stored_px = next(n for n in stored.json()["graph"]["nodes"] if n["nodeId"] == px_id)
-    assert stored_px["params"]["layerNodeId"] == built_id
+    assert stored_px["params"]["layerNodeId"] == layer_id
+    assert stored_px["params"]["contractId"] == pid
 
     layers = client.get(f"/api/contracts/{pid}/layers").json()
     old = next(layer for layer in layers if layer["nodeId"] == layer_id)
     built = next(layer for layer in layers if layer["nodeId"] == built_id)
-    assert old["linkedPricingNodeId"] is None
-    assert built["linkedPricingNodeId"] == px_id
-    assert built["linkedFeederNodeId"] == built_id
+    assert old["linkedPricingNodeId"] == px_id
+    assert old["linkedFeederNodeId"] == built_id
+    assert built["linkedPricingNodeId"] is None
 
     dossier = client.get(f"/api/contracts/{pid}/dossier").json()["contract"]
-    assert dossier["limit"] == 22.0
-    assert dossier["depositPremium"] == 4.0
+    assert dossier["limit"] == 40.0
+    assert dossier["depositPremium"] == 8.0
+
+    evaluated = client.post(f"/api/programmes/{pid}/evaluate")
+    assert evaluated.status_code == 200, evaluated.text
+    metrics = {m["nodeId"]: m for m in evaluated.json()["views"]["ADJUSTED"]}
+    assert metrics[px_id]["pricing"]["feederNodeId"] == built_id
+    assert metrics[px_id]["pricing"]["layerNodeId"] == layer_id
+    assert abs(metrics[px_id]["pricing"]["expectedLoss"] - metrics[built_id]["el"]) < 1e-3
 
     rollup = client.post(
         "/api/portfolio/rollup/slice",
         json={"portfolioName": "Moved Bind", "programmeIds": [pid], "view": "ADJUSTED", "totalCapital": 100.0},
     )
     assert rollup.status_code == 200, rollup.text
-    assert [row["layerId"] for row in rollup.json()["layerAllocations"]] == [built_id]
+    rows = rollup.json()["layerAllocations"]
+    assert [row["layerId"] for row in rows] == [layer_id]
+    assert rows[0]["limit"] == 40.0
+    assert rows[0]["premium"] == 8.0
 
 
-def test_reconnect_refuses_a_layer_that_already_has_a_pricing_output():
+def test_reconnect_keeps_cms_identity_and_refuses_a_bound_output():
     c = _create("Taken")
     pid = c["programmeId"]
     graph = GraphSpec.model_validate(c["graph"])
@@ -149,6 +159,19 @@ def test_reconnect_refuses_a_layer_that_already_has_a_pricing_output():
     graph.edges.append(GraphEdgeSpec(edge_id="e-taken", source="lyr-taken", target="px-taken", sign=1, weight=1.0))
     disconnected = graph.model_copy(deep=True)
     disconnected.edges = [e for e in disconnected.edges if e.target != px_id]
-    with pytest.raises(ValueError, match="already has a Pricing Output"):
-        connect_nodes(disconnected, pid, "lyr-taken", px_id, "e-steal")
-    assert LAYER_ALREADY_BOUND.startswith("That layer already has a Pricing Output")
+    moved = connect_nodes(disconnected, pid, "lyr-taken", px_id, "e-onto-taken")
+    pricing = next(n for n in moved.nodes if n.node_id == px_id)
+    taken = next(n for n in moved.nodes if n.node_id == "px-taken")
+    assert pricing.params["layerNodeId"] == layer_id
+    assert taken.params["layerNodeId"] == "lyr-taken"
+    assert any(e.source == "lyr-taken" and e.target == px_id for e in moved.edges)
+    with pytest.raises(ValueError, match="already bound"):
+        connect_nodes(
+            disconnected,
+            pid,
+            "lyr-taken",
+            px_id,
+            "e-steal",
+            claimed_elsewhere={(pid, layer_id)},
+        )
+    assert "already bound" in ALREADY_BOUND

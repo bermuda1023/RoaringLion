@@ -245,11 +245,7 @@ export function App() {
         {tab === 'modelsops' && <CatModelsAndOps />}
 
         {tab === 'dag' && selectedProg && programmesQ.data && (
-          <StructuringStudio
-            programmes={programmesQ.data}
-            selectedProg={selectedProg}
-            onSelectProgramme={setSelectedProgId}
-          />
+          <StructuringStudio selectedProg={selectedProg} onSelectProgramme={setSelectedProgId} />
         )}
 
         {tab === 'portfolio' && portfolioQ.data && (

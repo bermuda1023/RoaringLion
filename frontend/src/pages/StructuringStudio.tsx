@@ -13,12 +13,15 @@ import { useEffect, useState } from 'react';
 import { api, apiUrl } from '../api/client';
 import { BreadcrumbBar } from '../components/BreadcrumbBar';
 import { CMS_LAYER_DRAG_TYPE, CmsSuggestionCard } from '../components/CmsSuggestionCard';
+import { RelatedProgrammeSelect } from '../components/RelatedProgrammeSelect';
 import { PricingOutputPanel, YeltOutputPanel } from '../components/OutputNodePanels';
 import type { GraphNodeSpec, GraphSpec, GraphTemplate, ProgrammeDeal } from '../types/contracts';
 import { applyCmsLayerSuggestion, claimedPricingLinks, SUGGESTED_FROM_PARAM } from '../utils/cmsLayerSuggestion';
 import { nodeAccent } from '../utils/nodeAccent';
 import { connectNodes, removeEdge } from '../utils/pricingBind';
+import { filterChoices } from '../utils/filterOptions';
 import { fmtMoneyB, fmtMoneyM, fmtNum, fmtPct, fmtRatioPct, NODE_PARAM_META } from '../utils/format';
+import { CMS_LAYER_PRICE_KEYS, layerPremiumViaPricing } from '../utils/pricingFacts';
 import {
   isAutoLabel,
   LABEL_META_KEYS,
@@ -31,13 +34,6 @@ import {
   OUTPUT_LINK_KEYS,
   smartLabel,
 } from '../utils/nodeLabels';
-
-const AVAILABLE_ZONES = ['US-FL', 'US-TX', 'US-SE', 'US-CA', 'JP-KANTO', 'EU-DE'];
-const AVAILABLE_PERILS = [
-  { code: 'WS', label: 'WS (Windstorm)' },
-  { code: 'EQ', label: 'EQ (Earthquake)' },
-];
-const AVAILABLE_REGION_PERILS = ['US-FL-WS', 'US-TX-WS', 'US-SE-WS', 'US-CA-EQ', 'JP-KANTO-EQ', 'EU-DE-WS'];
 
 function withParams(n: GraphNodeSpec, params: Record<string, unknown>): GraphNodeSpec {
   return { ...n, params, label: smartLabel(n.nodeType, params, n.label) };
@@ -78,11 +74,9 @@ function nodeStyle(nodeType: string, selected: boolean): React.CSSProperties {
 }
 
 export function StructuringStudio({
-  programmes,
   selectedProg,
   onSelectProgramme,
 }: {
-  programmes: ProgrammeDeal[];
   selectedProg: ProgrammeDeal;
   onSelectProgramme: (id: string) => void;
 }) {
@@ -108,6 +102,9 @@ export function StructuringStudio({
     setSelectedEdgeId((id) => (id && selectedProg.graph.edges.some((e) => e.edgeId === id) ? id : null));
     setDirty(false);
   }, [selectedProg.programmeId, selectedProg.graph.version]);
+
+  const simSetsQ = useQuery({ queryKey: ['simSets'], queryFn: () => api.listSimSets() });
+  const bindingsQ = useQuery({ queryKey: ['pricingBindings'], queryFn: () => api.listPricingBindings() });
 
   const templatesQ = useQuery({
     queryKey: ['graphTemplates', selectedProg.programmeId, selectedProg.graph.version],
@@ -195,14 +192,8 @@ export function StructuringStudio({
     if (n.nodeType === 'PRICING_OUTPUT') {
       const cid = typeof n.params.contractId === 'string' ? n.params.contractId.trim() : '';
       if (cid) {
-        const lid = typeof n.params.layerNodeId === 'string' ? n.params.layerNodeId.trim() : '';
-        const targetGraph =
-          cid === selectedProg.programmeId ? draftGraph : programmes.find((p) => p.programmeId === cid)?.graph;
-        const targetLayer = targetGraph?.nodes.find(
-          (ln) => LAYER_NODE_TYPES.includes(ln.nodeType) && (!lid || ln.nodeId === lid),
-        );
-        const lc = typeof targetLayer?.params.layerCode === 'string' ? targetLayer.params.layerCode.trim() : '';
-        pricingBadge = { text: lc ? `CMS · ${lc}` : 'CMS · Linked', linked: true };
+        const linked = typeof n.params.linkedLabel === 'string' ? n.params.linkedLabel.trim() : '';
+        pricingBadge = { text: linked ? `CMS · ${linked}` : 'CMS · Linked', linked: true };
       } else {
         pricingBadge = { text: 'Canvas only', linked: false };
       }
@@ -251,11 +242,18 @@ export function StructuringStudio({
     },
   }));
 
+  const claimedElsewhere = (() => {
+    const mine = claimedPricingLinks([draftGraph]);
+    const keys = new Set<string>();
+    for (const binding of bindingsQ.data ?? []) {
+      const key = `${binding.contractId}::${binding.layerNodeId}`;
+      if (!mine.has(key)) keys.add(key);
+    }
+    return keys;
+  })();
+
   const onConnect = (conn: Connection) => {
     if (!conn.source || !conn.target) return;
-    const claimedElsewhere = claimedPricingLinks(
-      programmes.filter((p) => p.programmeId !== selectedProg.programmeId).map((p) => p.graph),
-    );
     const result = connectNodes(
       draftGraph,
       selectedProg.programmeId,
@@ -313,11 +311,18 @@ export function StructuringStudio({
   };
 
   const placeTemplate = (tpl: GraphTemplate) => {
+    if (tpl.pricingBound) {
+      setConnectNotice('This Pricing Output is already bound and cannot be used for another layer.');
+      return;
+    }
     if (tpl.source === 'CMS' && tpl.pricingOutput && LAYER_NODE_TYPES.includes(tpl.nodeType)) {
-      const claimedElsewhere = claimedPricingLinks(
-        programmes.filter((p) => p.programmeId !== selectedProg.programmeId).map((p) => p.graph),
-      );
-      const placed = applyCmsLayerSuggestion(draftGraph, tpl, { claimedElsewhere });
+      let placed;
+      try {
+        placed = applyCmsLayerSuggestion(draftGraph, tpl, { claimedElsewhere });
+      } catch (err) {
+        setConnectNotice(err instanceof Error ? err.message : 'This Pricing Output is already bound and cannot be used for another layer.');
+        return;
+      }
       if (placed.changed) {
         setDraftGraph(placed.graph);
         setDirty(true);
@@ -369,17 +374,18 @@ export function StructuringStudio({
             {dirty && <span style={{ color: 'var(--warning)', marginLeft: 6 }}>Unsaved changes</span>}
           </span>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <select
-              value={selectedProg.programmeId}
-              onChange={(e) => onSelectProgramme(e.target.value)}
-              style={{ maxWidth: '100%' }}
-            >
-              {programmes.map((p) => (
-                <option key={p.programmeId} value={p.programmeId}>
-                  {p.cedentName} — {p.programmeName} ({p.renewalPeriod})
-                </option>
-              ))}
-            </select>
+            <RelatedProgrammeSelect
+              programmeId={selectedProg.programmeId}
+              current={{
+                programmeId: selectedProg.programmeId,
+                cedentName: selectedProg.cedentName,
+                programmeName: selectedProg.programmeName,
+                treatyYear: selectedProg.treatyYear,
+                renewalPeriod: selectedProg.renewalPeriod,
+                status: selectedProg.status,
+              }}
+              onChange={onSelectProgramme}
+            />
             <label style={{ color: 'var(--text-muted)', fontSize: 11 }}>
               Uplift ×
               <input
@@ -432,17 +438,19 @@ export function StructuringStudio({
         )}
         {connectNotice && <div className="warning-banner">{connectNotice}</div>}
 
-        <div className="studio-layout">
-          {/* Left Inspector */}
-          <div className="studio-panel panel" style={{ padding: 10 }}>
+        <div className={`studio-layout${selectedNode || selectedEdge ? ' has-inspector' : ''}`}>
+          {(selectedNode || selectedEdge) && (
+          <div className="studio-panel panel" data-testid="node-inspector" style={{ padding: 10 }}>
             <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: 'var(--accent-soft)' }}>
               Node / Edge Properties
             </div>
             {selectedNode ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {selectedNode.nodeType !== 'PRICING_OUTPUT' && (
                 <div style={{ fontSize: 10, color: 'var(--text-faint)', fontFamily: 'var(--mono)' }}>
                   ID: {selectedNode.nodeId} ({selectedNode.nodeType})
                 </div>
+                )}
                 {LAYER_NODE_TYPES.includes(selectedNode.nodeType) && (() => {
                   const rawCode = typeof selectedNode.params.layerCode === 'string' ? selectedNode.params.layerCode : '';
                   const trimmed = rawCode.trim();
@@ -476,7 +484,7 @@ export function StructuringStudio({
                     </label>
                   );
                 })()}
-                {(() => {
+                {selectedNode.nodeType !== 'PRICING_OUTPUT' && (() => {
                   const terms = nodeTerms(selectedNode.nodeType, selectedNode.params);
                   const auto = isAutoLabel(selectedNode.params);
                   if (terms == null) {
@@ -553,12 +561,9 @@ export function StructuringStudio({
                 {selectedNode.nodeType === 'PRICING_OUTPUT' && (
                   <PricingOutputPanel
                     node={selectedNode}
-                    programmeId={selectedProg.programmeId}
-                    draftGraph={draftGraph}
-                    saved={evaluatesLikeSaved(draftGraph, selectedProg.graph, selectedNode.nodeId, [])}
-                    adj={adjById[selectedNode.nodeId]}
-                    unadj={unadjById[selectedNode.nodeId]}
-                    onParams={(params) => updateSelectedNode((n) => withParams(n, params))}
+                    graph={draftGraph}
+                    adjusted={adjById[selectedNode.nodeId]}
+                    unadjusted={unadjById[selectedNode.nodeId]}
                   />
                 )}
                 {selectedNode.nodeType === 'REGION_PERIL_FILTER' && (() => {
@@ -567,6 +572,15 @@ export function StructuringStudio({
                   const selRps: string[] = Array.isArray(selectedNode.params.regionPerils)
                     ? (selectedNode.params.regionPerils as string[])
                     : [];
+
+                  const simFiles = Object.fromEntries((simSetsQ.data ?? []).map((set) => [set.simSetId, set.lossFiles ?? []]));
+                  const choices = filterChoices(draftGraph, selectedNode.nodeId, simFiles, selectedProg.simSetId);
+                  const zoneOptions = [...new Set([...choices.zones, ...selZones])];
+                  const perilOptions = [...choices.perils];
+                  for (const code of selPerils) {
+                    if (!perilOptions.some((peril) => peril.code === code)) perilOptions.push({ code, label: code });
+                  }
+                  const regionOptions = [...new Set([...choices.regionPerils, ...selRps])];
 
                   const toggle = (key: 'zones' | 'perils' | 'regionPerils', current: string[], item: string) => {
                     const next = current.includes(item) ? current.filter((x) => x !== item) : [...current, item];
@@ -599,7 +613,7 @@ export function StructuringStudio({
                           )}
                         </div>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                          {AVAILABLE_ZONES.map((z) => (
+                          {zoneOptions.map((z) => (
                             <button key={z} type="button" style={chipStyle(selZones.includes(z))} onClick={() => toggle('zones', selZones, z)}>
                               {z}
                             </button>
@@ -620,7 +634,7 @@ export function StructuringStudio({
                           )}
                         </div>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                          {AVAILABLE_PERILS.map((p) => (
+                          {perilOptions.map((p) => (
                             <button key={p.code} type="button" style={chipStyle(selPerils.includes(p.code))} onClick={() => toggle('perils', selPerils, p.code)}>
                               {p.label}
                             </button>
@@ -641,7 +655,7 @@ export function StructuringStudio({
                           )}
                         </div>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                          {AVAILABLE_REGION_PERILS.map((rp) => (
+                          {regionOptions.map((rp) => (
                             <button key={rp} type="button" style={chipStyle(selRps.includes(rp))} onClick={() => toggle('regionPerils', selRps, rp)}>
                               {rp}
                             </button>
@@ -649,6 +663,11 @@ export function StructuringStudio({
                         </div>
                       </div>
 
+                      {choices.zones.length === 0 && choices.perils.length === 0 && choices.regionPerils.length === 0 && (
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                          Connect a loss source that has loss files. This filter only offers the regions and perils on those files.
+                        </div>
+                      )}
                       <div style={{ fontSize: 10, color: 'var(--teal)', background: 'var(--surface)', border: '1px solid var(--border-strong)', borderRadius: 4, padding: '5px 7px' }}>
                         {selZones.length === 0 && selPerils.length === 0 && selRps.length === 0
                           ? 'Filter: All zones & perils (unfiltered)'
@@ -664,12 +683,25 @@ export function StructuringStudio({
                   );
                 })()}
 
+                {LAYER_NODE_TYPES.includes(selectedNode.nodeType) && (() => {
+                  const premium = layerPremiumViaPricing(draftGraph, selectedNode.nodeId);
+                  return (
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      Premium from pricing output
+                      <div style={{ marginTop: 3, color: 'var(--text)' }}>
+                        {premium?.amount == null ? 'No pricing output attached' : fmtMoneyM(premium.amount, 2)}
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {Object.entries(selectedNode.params)
                   .filter(
                     ([k, v]) =>
                       !LABEL_META_KEYS.includes(k) &&
                       !LAYER_META_KEYS.includes(k) &&
                       !OUTPUT_LINK_KEYS.includes(k) &&
+                      !(LAYER_NODE_TYPES.includes(selectedNode.nodeType) && CMS_LAYER_PRICE_KEYS.has(k)) &&
                       (typeof v === 'number' || typeof v === 'string'),
                   )
                   .map(([k, v]) => {
@@ -805,12 +837,9 @@ export function StructuringStudio({
                   Delete Edge
                 </button>
               </div>
-            ) : (
-              <div style={{ fontSize: 11, color: 'var(--text-faint)' }}>
-                Click any node or edge on the canvas to edit parameters, toggle solid (+) vs dashed (−) inuring edges, or connect ports.
-              </div>
-            )}
+            ) : null}
           </div>
+          )}
 
           {/* Center React Flow Canvas */}
           <div
@@ -836,6 +865,10 @@ export function StructuringStudio({
               nodes={rfNodes}
               edges={rfEdges}
               onConnect={onConnect}
+              onPaneClick={() => {
+                setSelectedNodeId(null);
+                setSelectedEdgeId(null);
+              }}
               onNodeClick={(_, node) => {
                 setSelectedNodeId(node.id);
                 setSelectedEdgeId(null);
@@ -861,7 +894,7 @@ export function StructuringStudio({
           </div>
 
           {/* Right Rail: CMS Suggestions & Blank-Canvas Node Palette */}
-          <div className="panel" style={{ padding: 10, overflowY: 'auto', maxHeight: 440 }}>
+          <div className="panel studio-palette" style={{ padding: 10 }}>
             <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, color: 'var(--teal)' }}>
               Suggested from CMS
             </div>
@@ -914,7 +947,7 @@ export function StructuringStudio({
             {dagEvalQ.data?.cacheMisses ?? 0} misses
           </span>
         </div>
-        <div className="table-wrap"><table>
+        <div className="table-wrap table-fit"><table>
           <thead>
             <tr>
               <th>Node</th>

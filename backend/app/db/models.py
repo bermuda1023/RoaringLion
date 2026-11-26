@@ -81,6 +81,7 @@ class SimSetRecord(Base):
     total_events: Mapped[int] = mapped_column(Integer)
     currency: Mapped[str] = mapped_column(String(8), default="USD")
     region_perils_json: Mapped[str] = mapped_column(Text, default="[]")
+    loss_files_json: Mapped[str] = mapped_column(Text, default="[]")
     parquet_path: Mapped[str] = mapped_column(String(400))
     content_hash: Mapped[str] = mapped_column(String(32))
     is_industry_catalog: Mapped[bool] = mapped_column(Boolean, default=False, index=True)

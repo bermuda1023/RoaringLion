@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -159,18 +160,14 @@ def test_suggesting_a_cms_layer_places_one_linked_pricing_output_beside_it():
     assert again.changed is False
     assert len(again.graph.nodes) == len(placed.graph.nodes)
 
-    # The slot is held elsewhere: still one pricing node with the layer, but it does not take a second link.
-    blocked = apply_cms_layer_suggestion(
-        graph,
-        tpl,
-        claimed_elsewhere={(pid, layer_id)},
-        id_factory=_ids("block"),
-    )
-    blocked_px = next(n for n in blocked.graph.nodes if n.node_id == blocked.pricing_node_id)
-    assert blocked.linked is False
-    assert "contractId" not in blocked_px.params
-    assert not in_blank_canvas(blocked_px.position)
-    assert blocked_px.position["y"] == layer.position["y"]
+    # The slot is held elsewhere: click, drag and placement all refuse a second use.
+    with pytest.raises(ValueError, match="already bound"):
+        apply_cms_layer_suggestion(
+            graph,
+            tpl,
+            claimed_elsewhere={(pid, layer_id)},
+            id_factory=_ids("block"),
+        )
 
     saved = client.put(f"/api/programmes/{pid}/graph", json=placed.graph.model_dump(by_alias=True, mode="json"))
     assert saved.status_code == 200, saved.text

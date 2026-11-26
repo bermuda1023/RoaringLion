@@ -51,4 +51,22 @@ describe('CMS suggestion tree', () => {
     expect(dataTransfer.setData).toHaveBeenCalledWith(CMS_LAYER_DRAG_TYPE, template.templateId);
     expect(dataTransfer.setData).toHaveBeenCalledWith('text/plain', template.templateId);
   });
+
+  it('does not place or drag a pricing output that is already bound', () => {
+    const onPlace = vi.fn();
+    render(
+      <CmsSuggestionCard
+        template={{ ...template, pricingBound: true, pricingOutput: null }}
+        onCanvas={false}
+        onPlace={onPlace}
+      />,
+    );
+    const card = screen.getByRole('button', { name: /already bound/i });
+    fireEvent.click(card);
+    expect(onPlace).not.toHaveBeenCalled();
+    const dataTransfer = { setData: vi.fn(), effectAllowed: 'copy' };
+    fireEvent.dragStart(card, { dataTransfer });
+    expect(dataTransfer.setData).not.toHaveBeenCalled();
+    expect(screen.getByText(/already bound/i)).toBeTruthy();
+  });
 });

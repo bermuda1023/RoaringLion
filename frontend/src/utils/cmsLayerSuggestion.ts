@@ -6,6 +6,7 @@
 // contracted layer when that slot is free. A second click selects the pair.
 
 import type { GraphEdgeSpec, GraphNodeSpec, GraphSpec, GraphTemplate } from '../types/contracts';
+import { PRICING_ALREADY_BOUND } from './pricingBind';
 import { LAYER_NODE_TYPES, nextLayerCode, smartLabel } from './nodeLabels';
 
 /** Blank-canvas palette drops land in this box (StructuringStudio `addTemplateNode`). */
@@ -174,7 +175,10 @@ export function applyCmsLayerSuggestion(
   };
 
   const addPricing = (layerId: string, layerPos: { x: number; y: number }, linkTo: string | null): GraphNodeSpec => {
-    const useLink = Boolean(contractId && linkTo && !slotTaken(contractId, linkTo));
+    if (contractId && linkTo && slotTaken(contractId, linkTo)) {
+      throw new Error(PRICING_ALREADY_BOUND);
+    }
+    const useLink = Boolean(contractId && linkTo);
     const params: Record<string, unknown> = useLink
       ? { ...linkParams, contractId, layerNodeId: linkTo, labelName: linkParams.labelName ?? 'Pricing' }
       : { labelName: 'Pricing' };

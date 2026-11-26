@@ -14,8 +14,12 @@ export function CmsSuggestionCard({
   onCanvas: boolean;
   onPlace: (template: GraphTemplate) => void;
 }) {
-  const pricing = template.pricingOutput;
+  const pricing = template.pricingBound ? undefined : template.pricingOutput;
   const onDragStart = (event: DragEvent<HTMLDivElement>) => {
+    if (!pricing) {
+      event.preventDefault();
+      return;
+    }
     event.dataTransfer.setData(CMS_LAYER_DRAG_TYPE, template.templateId);
     event.dataTransfer.setData('text/plain', template.templateId);
     event.dataTransfer.effectAllowed = 'copy';
@@ -27,12 +31,17 @@ export function CmsSuggestionCard({
       role="button"
       tabIndex={0}
       draggable={Boolean(pricing)}
+      aria-disabled={template.pricingBound || undefined}
       aria-label={
-        pricing
-          ? `Place ${template.label} with its pricing output`
-          : `Place ${template.label}`
+        template.pricingBound
+          ? `${template.label} pricing output is already bound`
+          : pricing
+            ? `Place ${template.label} with its pricing output`
+            : `Place ${template.label}`
       }
-      onClick={() => onPlace(template)}
+      onClick={() => {
+        if (!template.pricingBound) onPlace(template);
+      }}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
@@ -46,6 +55,9 @@ export function CmsSuggestionCard({
         {onCanvas && <span className="canvas-tag">On canvas</span>}
       </span>
       <span className="palette-label">{template.label}</span>
+      {template.pricingBound && (
+        <span className="suggestion-kind">Pricing output already bound</span>
+      )}
       {pricing && (
         <span className="suggestion-tree" aria-hidden={false}>
           <span className="suggestion-node" style={{ borderLeftColor: nodeAccent(template.nodeType) }}>

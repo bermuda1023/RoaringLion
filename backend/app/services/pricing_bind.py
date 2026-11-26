@@ -1,58 +1,22 @@
-"""Pricing Output connections: one incoming edge, and a same-programme bind follows a reconnect.
+"""Pricing Output connections: one incoming edge. The CMS layer identity stays locked.
 
-Mirrored in ``frontend/src/utils/pricingBind.ts``. A saved graph may still price a CMS
-layer from a different feeder when ``layerNodeId`` is left on that layer; the studio
-moves the bind when the user disconnects and reconnects.
+Mirrored in ``frontend/src/utils/pricingBind.ts``. Disconnecting and reconnecting moves
+which graph layer feeds the output. ``contractId`` and ``layerNodeId`` stay on the CMS
+layer that was bought, and rollup keeps that layer's terms while using the attached
+graph layer's losses.
 """
 
 from __future__ import annotations
 
-from app.models.domain import GraphEdgeSpec, GraphNodeSpec, GraphSpec
+from app.models.domain import GraphEdgeSpec, GraphSpec
 from app.models.enums import NodeType
-from app.services.node_labels import smart_label
-
-LAYER_NODE_TYPES = frozenset({
-    NodeType.OCC_XL,
-    NodeType.AGG_XL,
-    NodeType.QUOTA_SHARE,
-    NodeType.AGG_QUOTA_SHARE,
-    NodeType.SURPLUS_SHARE,
-    NodeType.CASCADING_TOWER,
-    NodeType.ILW_OPTION,
-})
 
 ALREADY_LINKED = (
     "This Pricing Output is already linked to a layer. "
     "Disconnect it before connecting another. One pricing output binds one layer."
 )
 
-LAYER_ALREADY_BOUND = (
-    "That layer already has a Pricing Output. "
-    "Disconnect it there first — one pricing output binds one layer."
-)
-
-
-def _is_layer(node: GraphNodeSpec) -> bool:
-    return node.node_type in LAYER_NODE_TYPES
-
-
-def _claim(params: dict) -> tuple[str, str] | None:
-    cid = str(params.get("contractId") or "").strip()
-    lid = str(params.get("layerNodeId") or "").strip()
-    return (cid, lid) if cid and lid else None
-
-
-def _layer_summary(layer: GraphNodeSpec) -> str:
-    code = str(layer.params.get("layerCode") or "").strip()
-    name = str(layer.params.get("labelName") or "").strip() or layer.label
-    return " · ".join(part for part in (code, name) if part)
-
-
-def _moved_label(existing: str, layer: GraphNodeSpec) -> str:
-    head = existing.split(" · ")[0].strip() if existing else ""
-    summary = _layer_summary(layer)
-    return " · ".join(part for part in (head, summary) if part)
-
+ALREADY_BOUND = "This Pricing Output is already bound and cannot be used for another layer."
 
 def validate_pricing_output_single_connection(graph: GraphSpec) -> None:
     """A Pricing Output can be connected to one layer. A second incoming edge is rejected."""
@@ -69,6 +33,12 @@ def validate_pricing_output_single_connection(graph: GraphSpec) -> None:
             )
 
 
+def _claim(params: dict) -> tuple[str, str] | None:
+    cid = str(params.get("contractId") or "").strip()
+    lid = str(params.get("layerNodeId") or "").strip()
+    return (cid, lid) if cid and lid else None
+
+
 def connect_nodes(
     graph: GraphSpec,
     programme_id: str,
@@ -80,9 +50,11 @@ def connect_nodes(
 ) -> GraphSpec:
     """Connect two nodes. A Pricing Output that already has an incoming edge is refused.
 
-    When the output is linked to ``programme_id`` and the source is a free layer, the
-    bind moves: ``layerNodeId`` becomes that layer, so the previous layer loses it.
+    Reconnecting does not change ``contractId`` or ``layerNodeId``. If that CMS identity
+    is already bound on another programme, the connection is refused. ``programme_id``
+    stays in the signature so the studio helper and this function match.
     """
+    del programme_id
     if not source or not target or source == target:
         raise ValueError("Choose two different nodes to connect")
     g = graph.model_copy(deep=True)
@@ -95,23 +67,10 @@ def connect_nodes(
         return g
     if dst.node_type == NodeType.PRICING_OUTPUT and any(e.target == target for e in g.edges):
         raise ValueError(ALREADY_LINKED)
-
-    if dst.node_type == NodeType.PRICING_OUTPUT and _is_layer(src):
-        cid = str(dst.params.get("contractId") or "").strip()
-        if cid and cid == programme_id:
-            external = claimed_elsewhere or set()
-            taken = (cid, src.node_id) in external or any(
-                n.node_id != dst.node_id and n.node_type == NodeType.PRICING_OUTPUT and _claim(n.params) == (cid, src.node_id)
-                for n in g.nodes
-            )
-            if taken:
-                raise ValueError(LAYER_ALREADY_BOUND)
-            params = dict(dst.params)
-            params["layerNodeId"] = src.node_id
-            params.pop("unlinked", None)
-            params["linkedLabel"] = _moved_label(str(params.get("linkedLabel") or ""), src)
-            dst.params = params
-            dst.label = smart_label(dst.node_type, params, dst.label)
+    if dst.node_type == NodeType.PRICING_OUTPUT:
+        claim = _claim(dst.params)
+        if claim and claim in (claimed_elsewhere or set()):
+            raise ValueError(ALREADY_BOUND)
 
     g.edges.append(GraphEdgeSpec(edge_id=edge_id, source=source, target=target, sign=1, weight=1.0))
     return g

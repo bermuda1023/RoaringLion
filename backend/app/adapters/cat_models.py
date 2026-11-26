@@ -65,7 +65,7 @@ class MockVendorAdapter(CatModelAdapter):
         from app.db.database import get_session
 
         with get_session() as db:
-            sim_store._persist(db, table, SimSetFormat.YELT, is_industry=False)
+            sim_store._persist(db, table, SimSetFormat.YELT, is_industry=False, vendor=self.vendor_name)
             db.commit()
 
         manifest = lineage.record_manifest(

@@ -313,4 +313,6 @@ export interface GraphTemplate {
   placement?: 'EXISTING_LAYER' | 'NEW_COPY' | 'BLANK';
   position?: { x: number; y: number } | null;
   pricingOutput?: GraphTemplatePricingOutput | null;
+  /** The suggestion's pricing output is already bound, so it is not offered. */
+  pricingBound?: boolean;
 }
