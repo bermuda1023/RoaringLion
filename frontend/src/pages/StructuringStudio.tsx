@@ -13,7 +13,8 @@ import { useEffect, useState } from 'react';
 import { api, apiUrl } from '../api/client';
 import { BreadcrumbBar } from '../components/BreadcrumbBar';
 import { PricingOutputPanel, YeltOutputPanel } from '../components/OutputNodePanels';
-import type { GraphEdgeSpec, GraphNodeSpec, GraphSpec, ProgrammeDeal } from '../types/contracts';
+import type { GraphEdgeSpec, GraphNodeSpec, GraphSpec, GraphTemplate, ProgrammeDeal } from '../types/contracts';
+import { applyCmsLayerSuggestion, claimedPricingLinks, SUGGESTED_FROM_PARAM } from '../utils/cmsLayerSuggestion';
 import { fmtMoneyB, fmtMoneyM, fmtNum, fmtPct, fmtRatioPct, NODE_PARAM_META } from '../utils/format';
 import {
   isAutoLabel,
@@ -274,13 +275,6 @@ export function StructuringStudio({
     setDirty(true);
   };
 
-  const canvasLayerCodes = new Set(
-    draftGraph.nodes
-      .filter((n) => LAYER_NODE_TYPES.includes(n.nodeType))
-      .map((n) => String(n.params.layerCode ?? '').trim().toLowerCase())
-      .filter(Boolean),
-  );
-
   const addTemplateNode = (tpl: {
     label: string;
     nodeType: string;
@@ -309,12 +303,30 @@ export function StructuringStudio({
       nodeType: tpl.nodeType,
       label: smartLabel(tpl.nodeType, params, tpl.label),
       params,
+      // Blank-canvas scatter box. CMS layers do not use this; see applyCmsLayerSuggestion.
       position: { x: 420 + Math.round(Math.random() * 140), y: 80 + Math.round(Math.random() * 180) },
     };
     setDraftGraph((g) => ({ ...g, nodes: [...g.nodes, newNode] }));
     setSelectedNodeId(newNode.nodeId);
     setSelectedEdgeId(null);
     setDirty(true);
+  };
+
+  const placeTemplate = (tpl: GraphTemplate) => {
+    if (tpl.source === 'CMS' && tpl.pricingOutput && LAYER_NODE_TYPES.includes(tpl.nodeType)) {
+      const claimedElsewhere = claimedPricingLinks(
+        programmes.filter((p) => p.programmeId !== selectedProg.programmeId).map((p) => p.graph),
+      );
+      const placed = applyCmsLayerSuggestion(draftGraph, tpl, { claimedElsewhere });
+      if (placed.changed) {
+        setDraftGraph(placed.graph);
+        setDirty(true);
+      }
+      setSelectedNodeId(placed.selectedNodeId);
+      setSelectedEdgeId(null);
+      return;
+    }
+    addTemplateNode(tpl);
   };
 
   const selectedNode = draftGraph.nodes.find((n) => n.nodeId === selectedNodeId) ?? null;
@@ -841,17 +853,19 @@ export function StructuringStudio({
               {(templatesQ.data ?? [])
                 .filter((tpl) => tpl.source === 'CMS')
                 .map((tpl) => {
-                  const isCurrentLayer = tpl.templateId.startsWith(`cms-layer-${selectedProg.programmeId}`);
-                  const onCanvas =
-                    isCurrentLayer &&
-                    Boolean(tpl.layerCode && canvasLayerCodes.has(tpl.layerCode.trim().toLowerCase()));
+                  const onCanvas = tpl.pricingOutput
+                    ? tpl.placement === 'NEW_COPY'
+                      ? draftGraph.nodes.some((n) => n.params[SUGGESTED_FROM_PARAM] === tpl.templateId)
+                      : Boolean(tpl.layerNodeId && draftGraph.nodes.some((n) => n.nodeId === tpl.layerNodeId))
+                    : false;
                   return (
-                    <button key={tpl.templateId} className="palette-item suggested" onClick={() => addTemplateNode(tpl)}>
+                    <button key={tpl.templateId} className="palette-item suggested" onClick={() => placeTemplate(tpl)}>
                       <span className="palette-head">
                         <span className="palette-cat">{tpl.category}</span>
                         {onCanvas && <span className="canvas-tag">On canvas</span>}
                       </span>
                       <span className="palette-label">{tpl.label}</span>
+                      {tpl.pricingOutput && <span className="palette-cat">With pricing output</span>}
                     </button>
                   );
                 })}
@@ -862,9 +876,9 @@ export function StructuringStudio({
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {(templatesQ.data ?? [])
-                .filter((tpl) => tpl.source !== 'CMS')
+                .filter((tpl) => tpl.source === 'BLANK')
                 .map((tpl) => (
-                  <button key={tpl.templateId} className="palette-item" onClick={() => addTemplateNode(tpl)}>
+                  <button key={tpl.templateId} className="palette-item" onClick={() => placeTemplate(tpl)}>
                     <span className="palette-cat">{tpl.category}</span>
                     <span className="palette-label">{tpl.label}</span>
                   </button>
