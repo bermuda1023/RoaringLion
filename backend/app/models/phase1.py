@@ -205,6 +205,23 @@ class RenewalChainRow(CamelModel):
     is_current: bool = False
 
 
+class RelatedProgramme(CamelModel):
+    """A programme on the open deal's renewal chain. Not the whole book."""
+
+    programme_id: str
+    cedent_name: str
+    programme_name: str
+    treaty_year: int
+    renewal_period: str
+    status: str
+
+
+class PricingBinding(CamelModel):
+    contract_id: str
+    layer_node_id: str
+    programme_id: str
+
+
 class ContractCreate(CamelModel):
     programme_id: str | None = None
     chain_id: str = ""
@@ -342,7 +359,23 @@ class EltIngestRequest(CamelModel):
     currency: str = "USD"
     seed: int = 42
     is_industry_catalog: bool = False
+    # Set when this upload is one vendor file for a single region and peril.
+    region: str | None = None
+    peril: str | None = None
+    vendor: str | None = None
     rows: list[EltRowInput]
+
+
+class LossFileRecord(CamelModel):
+    """One uploaded ELT/YELT file, scoped to a region and a peril."""
+
+    file_id: str
+    sim_set_id: str
+    name: str = ""
+    region: str
+    peril: str
+    region_peril: str
+    vendor: str | None = None
 
 
 class SimSetDetail(SimSetSummary):
@@ -350,6 +383,7 @@ class SimSetDetail(SimSetSummary):
     parquet_path: str = ""
     is_industry_catalog: bool = False
     expected_annual_loss: float | None = None
+    loss_files: list[LossFileRecord] = []
     manifest: RunManifest | None = None
 
 

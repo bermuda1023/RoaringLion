@@ -18,7 +18,8 @@ from app.engine.elt_simulator import simulate_elt_to_yelt
 from app.engine.sim_generator import REGION_PERILS, RP_TO_ID, YeltTable, generate_synthetic_sim_set
 from app.models.domain import BreadcrumbStep
 from app.models.enums import SimSetFormat
-from app.models.phase1 import EltIngestRequest, SimSetDetail
+from app.models.phase1 import EltIngestRequest, LossFileRecord, SimSetDetail
+from app.services.loss_files import files_from_keys, files_from_stored, loss_file
 from app.services.lineage import LineageRegistry, canonical_hash
 
 
@@ -93,6 +94,16 @@ def build_aligned_industry_catalog(base_yelt: YeltTable, seed: int = 20269999) -
     )
 
 
+def _loss_file_models(rec: SimSetRecord) -> list[LossFileRecord]:
+    files = files_from_stored(
+        getattr(rec, "loss_files_json", "[]"),
+        json.loads(rec.region_perils_json or "[]"),
+        sim_set_id=rec.sim_set_id,
+        name=rec.name,
+    )
+    return [LossFileRecord.model_validate(item) for item in files]
+
+
 class SimSetStore:
     """Persistent Parquet + SQLite registry for YELT, ELT-simulated, and Industry simulation sets."""
 
@@ -126,10 +137,16 @@ class SimSetStore:
         fmt: SimSetFormat,
         *,
         is_industry: bool,
+        loss_files: list[dict] | None = None,
+        vendor: str | None = None,
     ) -> SimSetRecord:
         p = _sim_dir() / f"{table.sim_set_id}.parquet"
         write_yelt_parquet(table, p)
         unique_rps = sorted({REGION_PERILS[int(i)] for i in np.unique(table.rp_ids) if 0 <= int(i) < len(REGION_PERILS)})
+        files = loss_files if loss_files is not None else files_from_keys(
+            unique_rps, sim_set_id=table.sim_set_id, name=table.name, vendor=vendor,
+        )
+        file_keys = sorted({str(item.get("regionPeril")) for item in files if item.get("regionPeril")})
         rec = SimSetRecord(
             sim_set_id=table.sim_set_id,
             name=table.name,
@@ -138,7 +155,8 @@ class SimSetStore:
             num_trials=table.num_trials,
             total_events=int(len(table.losses)),
             currency=table.currency,
-            region_perils_json=json.dumps(unique_rps or REGION_PERILS),
+            region_perils_json=json.dumps(file_keys or unique_rps or REGION_PERILS),
+            loss_files_json=json.dumps(files),
             parquet_path=str(p),
             content_hash=table.content_hash,
             is_industry_catalog=is_industry,
@@ -182,6 +200,7 @@ class SimSetStore:
                         total_events=r.total_events,
                         currency=r.currency,
                         region_perils=json.loads(r.region_perils_json),
+                        loss_files=_loss_file_models(r),
                         content_hash=r.content_hash,
                         parquet_path=r.parquet_path,
                         is_industry_catalog=r.is_industry_catalog,
@@ -207,6 +226,9 @@ class SimSetStore:
         default_region_peril: str,
         is_industry_catalog: bool,
         lineage: LineageRegistry,
+        region: str | None = None,
+        peril: str | None = None,
+        vendor: str | None = None,
     ) -> SimSetDetail:
         if filename.lower().endswith(".parquet"):
             df = pl.read_parquet(io.BytesIO(raw_bytes))
@@ -221,11 +243,18 @@ class SimSetStore:
         else:
             days = np.full(len(losses), 240, dtype=np.uint16)
 
-        if region_peril_col and region_peril_col in df.columns:
+        declared_region = (region or "").strip()
+        declared_peril = (peril or "").strip()
+        declared = bool(declared_region and declared_peril)
+        if declared and not (region_peril_col and region_peril_col in df.columns):
+            default_region_peril = f"{declared_region}-{declared_peril}"
+        if region_peril_col and region_peril_col in df.columns and not declared:
             rp_strs = df[region_peril_col].cast(pl.Utf8).to_list()
             rp_ids = np.array([RP_TO_ID.get(s, 0) for s in rp_strs], dtype=np.int32)
+            file_keys = [str(s) for s in rp_strs if s]
         else:
             rp_ids = np.full(len(losses), RP_TO_ID.get(default_region_peril, 0), dtype=np.int32)
+            file_keys = [default_region_peril]
 
         order = np.lexsort((event_ids, days, trial_ids))
         trial_ids = np.ascontiguousarray(trial_ids[order], dtype=np.uint32)
@@ -255,8 +284,12 @@ class SimSetStore:
             content_hash=chash,
         )
 
+        if declared:
+            uploaded = [loss_file(sim_set_id=sim_id, name=name, region=declared_region, peril=declared_peril, vendor=vendor)]
+        else:
+            uploaded = files_from_keys(file_keys, sim_set_id=sim_id, name=name, vendor=vendor)
         with get_session() as db:
-            rec = self._persist(db, table, SimSetFormat.YELT, is_industry=is_industry_catalog)
+            rec = self._persist(db, table, SimSetFormat.YELT, is_industry=is_industry_catalog, loss_files=uploaded, vendor=vendor)
             db.commit()
 
         aal = round(float(losses.sum()) / max(num_trials, 1), 4)
@@ -276,6 +309,7 @@ class SimSetStore:
             total_events=rec.total_events,
             currency=rec.currency,
             region_perils=json.loads(rec.region_perils_json),
+            loss_files=_loss_file_models(rec),
             content_hash=rec.content_hash,
             parquet_path=rec.parquet_path,
             is_industry_catalog=rec.is_industry_catalog,
@@ -294,8 +328,21 @@ class SimSetStore:
             currency=req.currency,
             seed=req.seed,
         )
+        declared_region = (req.region or "").strip()
+        declared_peril = (req.peril or "").strip()
+        if declared_region and declared_peril:
+            uploaded = [loss_file(
+                sim_set_id=sim_id, name=req.name, region=declared_region, peril=declared_peril, vendor=req.vendor,
+            )]
+        else:
+            uploaded = files_from_keys(
+                [row.region_peril_key for row in req.rows],
+                sim_set_id=sim_id,
+                name=req.name,
+                vendor=req.vendor,
+            )
         with get_session() as db:
-            rec = self._persist(db, table, SimSetFormat.ELT, is_industry=req.is_industry_catalog)
+            rec = self._persist(db, table, SimSetFormat.ELT, is_industry=req.is_industry_catalog, loss_files=uploaded, vendor=req.vendor)
             db.commit()
 
         sim_aal = round(float(table.losses.sum()) / max(req.num_trials, 1), 4)
@@ -315,6 +362,7 @@ class SimSetStore:
             total_events=rec.total_events,
             currency=rec.currency,
             region_perils=json.loads(rec.region_perils_json),
+            loss_files=_loss_file_models(rec),
             content_hash=rec.content_hash,
             parquet_path=rec.parquet_path,
             is_industry_catalog=rec.is_industry_catalog,
@@ -354,6 +402,7 @@ class SimSetStore:
             total_events=rec.total_events,
             currency=rec.currency,
             region_perils=json.loads(rec.region_perils_json),
+            loss_files=_loss_file_models(rec),
             content_hash=rec.content_hash,
             parquet_path=rec.parquet_path,
             is_industry_catalog=False,

@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 
 from app.db.database import get_session
-from app.db.models import ContractNoteRecord, ContractRecord
+from app.db.models import ContractNoteRecord, ContractRecord, SimSetRecord
 from app.models.domain import (
     GraphEdgeSpec,
     GraphNodeSpec,
@@ -38,12 +38,16 @@ from app.models.phase1 import (
     ContractUpdate,
     IlwPriceRequest,
     ProgrammeProfile,
+    PricingBinding,
+    RelatedProgramme,
     RenewalChainRow,
     RenewProgrammeRequest,
     SliceRollupRequest,
 )
 from app.services.lineage import LineageRegistry, canonical_hash
 from app.services.node_labels import label_name, node_terms, relabel_graph, smart_label
+from app.services.loss_files import files_from_stored, validate_filters_match_loss_files
+from app.services.pricing_bind import validate_pricing_output_single_connection
 from app.services.seed_data import _build_eurowind_programme, _build_farmers_programme, _build_pacific_eq_programme
 
 
@@ -171,15 +175,44 @@ def _contract_layer_specs(c: ContractCreate) -> list[ContractLayerSpec]:
     ]
 
 
+def _sim_loss_files(db) -> dict[str, list]:
+    out: dict[str, list] = {}
+    for rec in db.query(SimSetRecord).all():
+        out[rec.sim_set_id] = files_from_stored(
+            getattr(rec, "loss_files_json", "[]"),
+            json.loads(rec.region_perils_json or "[]"),
+            sim_set_id=rec.sim_set_id,
+            name=rec.name,
+        )
+    return out
+
+
+def _loss_files_for_sim(sim_set_id: str) -> list:
+    with get_session() as db:
+        rec = db.get(SimSetRecord, sim_set_id)
+        if rec is None:
+            return []
+        return files_from_stored(
+            getattr(rec, "loss_files_json", "[]"),
+            json.loads(rec.region_perils_json or "[]"),
+            sim_set_id=rec.sim_set_id,
+            name=rec.name,
+        )
+
+
 def _default_graph_for_contract(c: ContractCreate, prog_id: str) -> GraphSpec:
     """Loss source -> zone/peril filter -> one node per layer, each priced, with a programme-total YELT."""
     src_id, flt_id, out_id = f"src-{prog_id}", f"flt-{prog_id}", f"out-{prog_id}"
+    source_params: dict = {"simSetId": c.sim_set_id}
+    loss_files = _loss_files_for_sim(c.sim_set_id)
+    if loss_files:
+        source_params["lossFiles"] = loss_files
     nodes = [
         GraphNodeSpec(
             node_id=src_id,
             node_type=NodeType.LOSS_SOURCE,
             label=f"Loss Source ({c.sim_set_id})",
-            params={"simSetId": c.sim_set_id},
+            params=source_params,
             position={"x": 40, "y": 100},
         ),
         GraphNodeSpec(
@@ -1123,6 +1156,8 @@ class ContractStore:
             all_contracts = [_record_to_full(r) for r in db.query(ContractRecord).all()]
             old_graph = GraphSpec(**json.loads(rec.graph_json))
             ensure_layer_codes(graph, strict=True)
+            validate_pricing_output_single_connection(graph)
+            validate_filters_match_loss_files(graph, _sim_loss_files(db), rec.sim_set_id)
             validate_pricing_links_one_to_one(programme_id, graph, all_contracts)
             relabel_graph(graph)
             graph.version = old_graph.version + 1
@@ -1450,35 +1485,75 @@ class ContractStore:
         lineage.add_link(new_id, out.graph.graph_id, LinkType.USES_STRUCTURE)
         return out
 
-    def get_renewal_chain(self, programme_id: str) -> list[RenewalChainRow]:
-        """Return all programmes in the YoY renewal chain ordered newest year first, with YoY deltas."""
-        with get_session() as db:
-            target = db.get(ContractRecord, programme_id)
-            if not target:
-                return []
-
-            # Collect every record sharing chain_id OR connected via prior_contract_id links
-            chain_recs: dict[str, ContractRecord] = {target.programme_id: target}
-            if target.chain_id:
-                for r in db.query(ContractRecord).filter(ContractRecord.chain_id == target.chain_id).all():
-                    chain_recs[r.programme_id] = r
-
-            # Walk backward and forward links defensively
-            changed = True
-            while changed:
-                changed = False
-                for r in list(chain_recs.values()):
-                    if r.prior_contract_id and r.prior_contract_id not in chain_recs:
-                        p = db.get(ContractRecord, r.prior_contract_id)
-                        if p:
-                            chain_recs[p.programme_id] = p
-                            changed = True
+    def _chain_records(self, db, programme_id: str) -> list[ContractRecord]:
+        """Programmes linked to this one by chain id or prior-year links. Never the whole book."""
+        target = db.get(ContractRecord, programme_id)
+        if not target:
+            return []
+        chain_recs: dict[str, ContractRecord] = {target.programme_id: target}
+        if target.chain_id:
+            for rec in db.query(ContractRecord).filter(ContractRecord.chain_id == target.chain_id).all():
+                chain_recs[rec.programme_id] = rec
+        changed = True
+        while changed:
+            changed = False
+            for rec in list(chain_recs.values()):
+                if rec.prior_contract_id and rec.prior_contract_id not in chain_recs:
+                    prior = db.get(ContractRecord, rec.prior_contract_id)
+                    if prior:
+                        chain_recs[prior.programme_id] = prior
+                        changed = True
+            if chain_recs:
                 for child in db.query(ContractRecord).filter(ContractRecord.prior_contract_id.in_(list(chain_recs.keys()))).all():
                     if child.programme_id not in chain_recs:
                         chain_recs[child.programme_id] = child
                         changed = True
+        return sorted(chain_recs.values(), key=lambda rec: (rec.treaty_year, rec.programme_id))
 
-            ordered_asc = sorted(chain_recs.values(), key=lambda r: (r.treaty_year, r.programme_id))
+    def related_programmes(self, programme_id: str) -> list[RelatedProgramme] | None:
+        with get_session() as db:
+            target = db.get(ContractRecord, programme_id)
+            if not target:
+                return None
+            return [
+                RelatedProgramme(
+                    programme_id=rec.programme_id,
+                    cedent_name=rec.cedent_name,
+                    programme_name=rec.programme_name,
+                    treaty_year=rec.treaty_year,
+                    renewal_period=rec.renewal_period,
+                    status=rec.status,
+                )
+                for rec in self._chain_records(db, programme_id)
+            ]
+
+    def bound_pricing_slots(self) -> list[PricingBinding]:
+        """Pricing outputs that already have a CMS layer and an incoming edge, across programmes."""
+        found: list[PricingBinding] = []
+        with get_session() as db:
+            rows = db.query(ContractRecord.programme_id, ContractRecord.graph_json).all()
+            for programme_id, raw in rows:
+                graph = GraphSpec.model_validate_json(raw)
+                incoming = {edge.target for edge in graph.edges}
+                for node in graph.nodes:
+                    if node.node_type != NodeType.PRICING_OUTPUT or node.node_id not in incoming:
+                        continue
+                    contract_id = str(node.params.get("contractId") or "").strip()
+                    layer_id = str(node.params.get("layerNodeId") or "").strip()
+                    if contract_id and layer_id:
+                        found.append(PricingBinding(
+                            contract_id=contract_id,
+                            layer_node_id=layer_id,
+                            programme_id=programme_id,
+                        ))
+        return found
+
+    def get_renewal_chain(self, programme_id: str) -> list[RenewalChainRow]:
+        """Return all programmes in the YoY renewal chain ordered newest year first, with YoY deltas."""
+        with get_session() as db:
+            ordered_asc = self._chain_records(db, programme_id)
+            if not ordered_asc:
+                return []
             by_id = {r.programme_id: r for r in ordered_asc}
 
             rows: list[RenewalChainRow] = []

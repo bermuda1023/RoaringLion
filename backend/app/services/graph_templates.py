@@ -22,6 +22,7 @@ from app.models.enums import NodeType, StructureType
 from app.models.phase1 import ContractFull, ContractLayer
 from app.services.contracts import _next_layer_code, contract_layers
 from app.services.node_labels import smart_label
+from app.services.pricing_bind import ALREADY_BOUND
 
 # Blank-canvas palette drops use this box (see StructuringStudio `addTemplateNode`).
 # CMS layer suggestions must not be placed inside it.
@@ -73,6 +74,8 @@ class GraphTemplate(CamelModel):
     placement: Literal["EXISTING_LAYER", "NEW_COPY", "BLANK"] = "BLANK"
     position: dict[str, float] | None = None
     pricing_output: GraphTemplatePricingOutput | None = None
+    # True when this suggestion's pricing output is already bound, so it is not offered.
+    pricing_bound: bool = False
 
 
 @dataclass
@@ -304,11 +307,16 @@ def _blank_templates() -> list[GraphTemplate]:
     ]
 
 
-def build_graph_templates(contract: ContractFull | None, prior: ContractFull | None = None) -> list[GraphTemplate]:
+def build_graph_templates(
+    contract: ContractFull | None,
+    prior: ContractFull | None = None,
+    bound_slots: set[tuple[str, str]] | None = None,
+) -> list[GraphTemplate]:
     """Blank-canvas node types, plus one CMS suggestion per contracted layer.
 
-    Every CMS layer suggestion includes exactly one Pricing Output linked to that layer.
+    A pricing output that is already bound is not offered again on a prior-year copy.
     """
+    bound = bound_slots or set()
     templates: list[GraphTemplate] = []
     if contract is not None:
         layers = contract_layers(contract)
@@ -337,14 +345,17 @@ def build_graph_templates(contract: ContractFull | None, prior: ContractFull | N
         if prior is not None:
             prior_nodes = {n.node_id: n for n in prior.graph.nodes}
             for layer in contract_layers(prior):
-                templates.append(_cms_layer_template(
+                suggestion = _cms_layer_template(
                     prior,
                     layer,
                     prior_nodes.get(layer.node_id),
                     template_id=f"cms-prior-{prior.programme_id}-{layer.node_id}",
                     category=f"Prior UY ({prior.treaty_year}) · {layer.layer_code}",
                     placement="NEW_COPY",
-                ))
+                )
+                if (prior.programme_id, layer.node_id) in bound:
+                    suggestion = suggestion.model_copy(update={"pricing_output": None, "pricing_bound": True})
+                templates.append(suggestion)
     templates.extend(_blank_templates())
     return templates
 
@@ -364,8 +375,8 @@ def apply_cms_layer_suggestion(
       not flip into selective rollup merely by clicking a layer that is already paired.
     - When the layer has no Pricing Output, one is added on the same row. It
       takes the 1:1 CMS link when that `(contractId, layerNodeId)` slot is free.
-    - If another programme already holds the link, the new node still sits with
-      the layer and prices the feeder, and it does not take a second link.
+    - If another programme already holds the link, placement is refused. A bound
+      pricing output is not created again for another layer.
     - Prior-year suggestions (`NEW_COPY`) mint a new layer id so they cannot
       collide with this programme's nodes. A second click selects the copy.
     """
@@ -411,7 +422,9 @@ def apply_cms_layer_suggestion(
         added_edges.append(edge_id)
 
     def add_pricing(layer_id: str, layer_pos: dict[str, Any], link_to: str | None) -> GraphNodeSpec:
-        use_link = bool(contract_id and link_to and not slot_taken(contract_id, link_to))
+        if contract_id and link_to and slot_taken(contract_id, link_to):
+            raise ValueError(ALREADY_BOUND)
+        use_link = bool(contract_id and link_to)
         if use_link:
             params = dict(link_params)
             params["contractId"] = contract_id
