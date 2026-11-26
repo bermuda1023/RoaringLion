@@ -48,6 +48,21 @@ function layerTemplate(over: Partial<GraphTemplate> = {}): GraphTemplate {
 }
 
 describe('CMS layer suggestions', () => {
+  it('palette click and drag both place the layer and pricing output already joined, outside the blank canvas', () => {
+    for (const gesture of ['click', 'drag']) {
+      const placed = applyCmsLayerSuggestion(graph([]), layerTemplate(), { idFactory: factory(gesture) });
+      expect(placed.addedNodeIds).toEqual([placed.layerNodeId, placed.pricingNodeId]);
+      expect(placed.graph.edges).toEqual([
+        expect.objectContaining({ source: placed.layerNodeId, target: placed.pricingNodeId, sign: 1 }),
+      ]);
+      const layer = placed.graph.nodes.find((n) => n.nodeId === placed.layerNodeId)!;
+      const px = placed.graph.nodes.find((n) => n.nodeId === placed.pricingNodeId)!;
+      expect(inBlankCanvas(layer.position)).toBe(false);
+      expect(inBlankCanvas(px.position)).toBe(false);
+      expect(px.position).toEqual({ x: layer.position.x + 320, y: layer.position.y });
+    }
+  });
+
   it('places one linked pricing output beside a missing layer, outside the blank canvas', () => {
     const placed = applyCmsLayerSuggestion(graph([]), layerTemplate(), { idFactory: factory('a') });
     expect(placed.changed).toBe(true);

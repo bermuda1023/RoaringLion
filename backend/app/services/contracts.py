@@ -44,6 +44,7 @@ from app.models.phase1 import (
 )
 from app.services.lineage import LineageRegistry, canonical_hash
 from app.services.node_labels import label_name, node_terms, relabel_graph, smart_label
+from app.services.pricing_bind import validate_pricing_output_single_connection
 from app.services.seed_data import _build_eurowind_programme, _build_farmers_programme, _build_pacific_eq_programme
 
 
@@ -1123,6 +1124,7 @@ class ContractStore:
             all_contracts = [_record_to_full(r) for r in db.query(ContractRecord).all()]
             old_graph = GraphSpec(**json.loads(rec.graph_json))
             ensure_layer_codes(graph, strict=True)
+            validate_pricing_output_single_connection(graph)
             validate_pricing_links_one_to_one(programme_id, graph, all_contracts)
             relabel_graph(graph)
             graph.version = old_graph.version + 1

@@ -12,9 +12,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { api, apiUrl } from '../api/client';
 import { BreadcrumbBar } from '../components/BreadcrumbBar';
+import { CMS_LAYER_DRAG_TYPE, CmsSuggestionCard } from '../components/CmsSuggestionCard';
 import { PricingOutputPanel, YeltOutputPanel } from '../components/OutputNodePanels';
-import type { GraphEdgeSpec, GraphNodeSpec, GraphSpec, GraphTemplate, ProgrammeDeal } from '../types/contracts';
+import type { GraphNodeSpec, GraphSpec, GraphTemplate, ProgrammeDeal } from '../types/contracts';
 import { applyCmsLayerSuggestion, claimedPricingLinks, SUGGESTED_FROM_PARAM } from '../utils/cmsLayerSuggestion';
+import { nodeAccent } from '../utils/nodeAccent';
+import { connectNodes, removeEdge } from '../utils/pricingBind';
 import { fmtMoneyB, fmtMoneyM, fmtNum, fmtPct, fmtRatioPct, NODE_PARAM_META } from '../utils/format';
 import {
   isAutoLabel,
@@ -54,22 +57,6 @@ function evaluatesLikeSaved(draft: GraphSpec, saved: GraphSpec, nodeId: string, 
   return saved.nodes.some((n) => n.nodeId === nodeId) && norm(draft) === norm(saved);
 }
 
-function nodeAccent(nodeType: string): string {
-  if (nodeType === 'LOSS_SOURCE' || nodeType === 'INDUSTRY_INDEX_SOURCE') return '#8a9bb0';
-  if (nodeType.includes('FILTER') || nodeType === 'COMBINATION' || nodeType === 'UPLIFT') return '#9a9082';
-  if (
-    nodeType === 'OCC_XL' ||
-    nodeType === 'AGG_XL' ||
-    nodeType === 'QUOTA_SHARE' ||
-    nodeType === 'AGG_QUOTA_SHARE' ||
-    nodeType === 'SURPLUS_SHARE' ||
-    nodeType === 'CASCADING_TOWER' ||
-    nodeType === 'ILW_OPTION'
-  )
-    return '#e8a84a';
-  return '#7a9e8e';
-}
-
 function nodeStyle(nodeType: string, selected: boolean): React.CSSProperties {
   const accent = nodeAccent(nodeType);
   const edgeColor = selected ? 'var(--accent)' : 'var(--border-strong)';
@@ -106,10 +93,12 @@ export function StructuringStudio({
   // Raw string while editing so typing '-' does not collapse to NaN and flip sign.
   const [flUplift, setFlUplift] = useState<number | string>(selectedProg.upliftSet.rules[0]?.flatSeverityFactor ?? 1.1);
   const [dirty, setDirty] = useState(false);
+  const [connectNotice, setConnectNotice] = useState<string | null>(null);
 
   useEffect(() => {
     setSelectedNodeId(null);
     setSelectedEdgeId(null);
+    setConnectNotice(null);
   }, [selectedProg.programmeId]);
 
   useEffect(() => {
@@ -264,15 +253,26 @@ export function StructuringStudio({
 
   const onConnect = (conn: Connection) => {
     if (!conn.source || !conn.target) return;
-    const newEdge: GraphEdgeSpec = {
-      edgeId: `e-${Date.now()}`,
-      source: conn.source,
-      target: conn.target,
-      sign: 1,
-      weight: 1.0,
-    };
-    setDraftGraph((g) => ({ ...g, edges: [...g.edges, newEdge] }));
-    setDirty(true);
+    const claimedElsewhere = claimedPricingLinks(
+      programmes.filter((p) => p.programmeId !== selectedProg.programmeId).map((p) => p.graph),
+    );
+    const result = connectNodes(
+      draftGraph,
+      selectedProg.programmeId,
+      conn.source,
+      conn.target,
+      `e-${Date.now()}`,
+      claimedElsewhere,
+    );
+    if ('error' in result) {
+      setConnectNotice(result.error);
+      return;
+    }
+    if (result.graph !== draftGraph) {
+      setDraftGraph(result.graph);
+      setDirty(true);
+    }
+    setConnectNotice(null);
   };
 
   const addTemplateNode = (tpl: {
@@ -430,6 +430,7 @@ export function StructuringStudio({
             )}
           </div>
         )}
+        {connectNotice && <div className="warning-banner">{connectNotice}</div>}
 
         <div className="studio-layout">
           {/* Left Inspector */}
@@ -795,11 +796,9 @@ export function StructuringStudio({
                   className="btn"
                   style={{ background: '#7f1d1d' }}
                   onClick={() => {
-                    setDraftGraph((g) => ({
-                      ...g,
-                      edges: g.edges.filter((ed) => ed.edgeId !== selectedEdge.edgeId),
-                    }));
+                    setDraftGraph((g) => removeEdge(g, selectedEdge.edgeId));
                     setSelectedEdgeId(null);
+                    setConnectNotice(null);
                     setDirty(true);
                   }}
                 >
@@ -814,7 +813,24 @@ export function StructuringStudio({
           </div>
 
           {/* Center React Flow Canvas */}
-          <div className="studio-canvas">
+          <div
+            className="studio-canvas"
+            onDragOverCapture={(event) => {
+              const types = Array.from(event.dataTransfer.types);
+              if (types.includes(CMS_LAYER_DRAG_TYPE) || types.includes('text/plain')) {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = 'copy';
+              }
+            }}
+            onDropCapture={(event) => {
+              const id =
+                event.dataTransfer.getData(CMS_LAYER_DRAG_TYPE) || event.dataTransfer.getData('text/plain');
+              const tpl = (templatesQ.data ?? []).find((item) => item.templateId === id);
+              if (!tpl) return;
+              event.preventDefault();
+              placeTemplate(tpl);
+            }}
+          >
             <ReactFlow
               key={selectedProg.programmeId}
               nodes={rfNodes}
@@ -859,14 +875,12 @@ export function StructuringStudio({
                       : Boolean(tpl.layerNodeId && draftGraph.nodes.some((n) => n.nodeId === tpl.layerNodeId))
                     : false;
                   return (
-                    <button key={tpl.templateId} className="palette-item suggested" onClick={() => placeTemplate(tpl)}>
-                      <span className="palette-head">
-                        <span className="palette-cat">{tpl.category}</span>
-                        {onCanvas && <span className="canvas-tag">On canvas</span>}
-                      </span>
-                      <span className="palette-label">{tpl.label}</span>
-                      {tpl.pricingOutput && <span className="palette-cat">With pricing output</span>}
-                    </button>
+                    <CmsSuggestionCard
+                      key={tpl.templateId}
+                      template={tpl}
+                      onCanvas={onCanvas}
+                      onPlace={placeTemplate}
+                    />
                   );
                 })}
             </div>

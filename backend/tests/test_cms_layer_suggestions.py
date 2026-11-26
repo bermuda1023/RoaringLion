@@ -366,3 +366,44 @@ def test_programme_without_layers_suggests_one_paired_pricing_output():
     assert not in_blank_canvas(px.position)
     second = apply_cms_layer_suggestion(placed.graph, fb, id_factory=_ids("fb2"))
     assert second.changed is False
+
+
+def test_suggestion_tree_payload_includes_the_pricing_node():
+    """The palette tree is drawn from this payload, before the suggestion is placed."""
+    c = _create("Tree", [
+        {"layerCode": "L1", "name": "Cat XL", "limit": 40, "attachment": 60, "depositPremium": 8},
+    ])
+    pid = c["programmeId"]
+    suggestions = _cms_layers(_templates(pid), pid)
+    assert suggestions
+    for tpl in suggestions:
+        pricing = tpl["pricingOutput"]
+        assert pricing["nodeType"] == "PRICING_OUTPUT"
+        assert pricing["label"]
+        assert pricing["params"]["contractId"] == pid
+        assert pricing["params"]["layerNodeId"] == tpl["layerNodeId"]
+
+
+def test_click_or_drag_places_the_suggestion_already_joined():
+    """Click and drag share apply_cms_layer_suggestion, so the pair never lands disconnected."""
+    c = _create("Joined", [
+        {"layerCode": "L1", "name": "Cat XL", "limit": 40, "attachment": 60, "depositPremium": 8},
+    ])
+    pid = c["programmeId"]
+    tpl = GraphTemplate.model_validate(_cms_layers(_templates(pid), pid)[0])
+    bare = GraphSpec.model_validate(c["graph"])
+    layer_ids = {n.node_id for n in bare.nodes if n.node_type in {NodeType.OCC_XL, NodeType.PRICING_OUTPUT}}
+    bare.nodes = [n for n in bare.nodes if n.node_id not in layer_ids]
+    bare.edges = [e for e in bare.edges if e.source not in layer_ids and e.target not in layer_ids]
+    for _gesture in ("click", "drag"):
+        placed = apply_cms_layer_suggestion(bare, tpl, id_factory=_ids(_gesture))
+        assert placed.changed is True
+        assert any(
+            e.source == placed.layer_node_id and e.target == placed.pricing_node_id
+            for e in placed.graph.edges
+        )
+        layer = next(n for n in placed.graph.nodes if n.node_id == placed.layer_node_id)
+        px = next(n for n in placed.graph.nodes if n.node_id == placed.pricing_node_id)
+        assert not in_blank_canvas(layer.position)
+        assert not in_blank_canvas(px.position)
+        assert not (BLANK_CANVAS_X[0] <= px.position["x"] <= BLANK_CANVAS_X[1] and 80 <= px.position["y"] <= 260)
