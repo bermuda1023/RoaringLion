@@ -505,9 +505,9 @@ label { color: var(--text-muted); }
 .status-filter-summary { flex: 1 1 160px; font-size: 12px; color: var(--text-muted); }
 .status-filter .status-filter-note { margin: 10px 0 0; }
 .candidates-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
-.candidates-toolbar input[type='search'] { flex: 1 1 200px; min-width: 0; }
-.candidates-range { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
-.bound-input { width: 58px; text-align: right; }
+.candidates-toolbar input[type='search'] { flex: 1 1 100%; min-width: 0; }
+.candidates-range { flex: 1 1 auto; font-size: 12px; color: var(--text-muted); }
+.bound-input { width: 64px; min-width: 64px; padding-left: 6px; padding-right: 6px; text-align: right; }
 .bound-input.raised { color: var(--negative); }
 .deal-name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-weight: 600; font-size: 12px; }
 .deal-sub { font-size: 11px; color: var(--text-muted); }
