@@ -287,3 +287,30 @@ export interface DeterministicRunResponse {
   layerStatements: DeterministicLayerStatement[];
   manifest: RunManifest;
 }
+
+/** One Pricing Output bound 1:1 to a CMS layer suggestion. `offset` is from the layer node. */
+export interface GraphTemplatePricingOutput {
+  nodeType: 'PRICING_OUTPUT';
+  label: string;
+  params: Record<string, unknown>;
+  offset: { x: number; y: number };
+}
+
+/**
+ * Palette entry. CMS layer suggestions (`source: 'CMS'` and a financial-terms `nodeType`)
+ * always include `pricingOutput`. `BLANK` entries are the unlinked canvas palette.
+ */
+export interface GraphTemplate {
+  templateId: string;
+  layerCode?: string;
+  layerNodeId?: string;
+  contractId?: string;
+  category: string;
+  source?: 'CMS' | 'BLANK';
+  label: string;
+  nodeType: string;
+  params: Record<string, unknown>;
+  placement?: 'EXISTING_LAYER' | 'NEW_COPY' | 'BLANK';
+  position?: { x: number; y: number } | null;
+  pricingOutput?: GraphTemplatePricingOutput | null;
+}

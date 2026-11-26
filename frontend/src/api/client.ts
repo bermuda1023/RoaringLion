@@ -2,6 +2,7 @@ import type {
   DagEvalResponse,
   DeterministicLossRow,
   DeterministicRunResponse,
+  GraphTemplate,
   PortfolioRollupResponse,
   ProgrammeDeal,
   RunManifest,
@@ -213,18 +214,7 @@ export const api = {
       method: 'POST',
     }),
   listGraphTemplates: (programmeId?: string) =>
-    fetchJson<
-      {
-        templateId: string;
-        layerCode?: string;
-        layerNodeId?: string;
-        category: string;
-        source?: 'CMS' | 'BLANK';
-        label: string;
-        nodeType: string;
-        params: Record<string, unknown>;
-      }[]
-    >(`/api/graph-templates${programmeId ? `?programmeId=${encodeURIComponent(programmeId)}` : ''}`),
+    fetchJson<GraphTemplate[]>(`/api/graph-templates${programmeId ? `?programmeId=${encodeURIComponent(programmeId)}` : ''}`),
   updateUplifts: (id: string, rules: UpliftRule[]) =>
     fetchJson<ProgrammeDeal>(`/api/programmes/${id}/uplifts`, {
       method: 'PUT',
