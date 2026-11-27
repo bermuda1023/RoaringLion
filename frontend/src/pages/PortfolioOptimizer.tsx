@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { fetchJson, postJson } from '../api/client';
 import { DealStatusBadge, LayerStatusBadge } from '../components/DealStatusBadge';
 import {
@@ -295,7 +295,10 @@ export function PortfolioOptimizer() {
     },
   });
 
+  const didAutoRunRef = useRef(false);
   useEffect(() => {
+    if (didAutoRunRef.current) return;
+    didAutoRunRef.current = true;
     exploreMut.mutate();
   }, []);
 
@@ -424,8 +427,13 @@ export function PortfolioOptimizer() {
         </div>
 
         {(exploreMut.error || forkBranchMut.error) && (
-          <div className="error-banner">
-            {String(((exploreMut.error ?? forkBranchMut.error) as Error).message)}
+          <div className="error-banner" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <span>{String(((exploreMut.error ?? forkBranchMut.error) as Error).message)}</span>
+            {exploreMut.error && (
+              <button type="button" className="btn btn-ghost" onClick={() => exploreMut.mutate()}>
+                Retry
+              </button>
+            )}
           </div>
         )}
 

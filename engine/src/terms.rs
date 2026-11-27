@@ -1,15 +1,27 @@
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Default + Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OccXlParams {
     pub occ_limit: f64,
     pub occ_attachment: f64,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub occ_franchise: f64,
     /// None = unlimited reinstatements; Some(k) => total annual limit = (1.0 + k) * occ_limit
+    #[serde(default)]
     pub reinstatements: Option<f64>,
     /// Reinstatement premium rate as fraction of deposit premium per full limit reinstated (e.g. 1.0 = 100% pro-rata)
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub rip_rate: f64,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub deposit_premium: f64,
     pub placed_share: f64,
 }
@@ -898,5 +910,28 @@ mod tests {
         assert!((casc_out[0] - 30.0).abs() < 1e-9);
         assert!((casc_out[1] - 20.0).abs() < 1e-9);
         assert!((c_ann - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_occ_xl_missing_or_null_deposit_premium_defaults_to_zero() {
+        let missing: OccXlParams = serde_json::from_str(
+            r#"{"occ_limit": 50.0, "occ_attachment": 80.0, "placed_share": 1.0}"#,
+        )
+        .unwrap();
+        let nulled: OccXlParams = serde_json::from_str(
+            r#"{"occ_limit": 50.0, "occ_attachment": 80.0, "deposit_premium": null, "rip_rate": null, "occ_franchise": null, "placed_share": 1.0}"#,
+        )
+        .unwrap();
+        assert_eq!(missing.deposit_premium, 0.0);
+        assert_eq!(nulled.deposit_premium, 0.0);
+        let losses = vec![110.0, 120.0];
+        let mut out_a = vec![0.0; 2];
+        let mut out_b = vec![0.0; 2];
+        let (ann_a, _, rip_a) = eval_occ_xl_period(&losses, &missing, &mut out_a);
+        let (ann_b, _, rip_b) = eval_occ_xl_period(&losses, &nulled, &mut out_b);
+        assert!((ann_a - 70.0).abs() < 1e-9);
+        assert!((ann_a - ann_b).abs() < 1e-9);
+        assert_eq!(rip_a, 0.0);
+        assert_eq!(rip_b, 0.0);
     }
 }

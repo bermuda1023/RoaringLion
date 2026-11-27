@@ -14,6 +14,7 @@ Implements:
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -53,25 +54,29 @@ DEFAULT_RETURN_PERIODS = [10.0, 20.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0]
 # Content-addressed LRU cache for DAG intermediate node outputs:
 # key -> (ev_out, ann, mx, rip, ep_dict)
 _NODE_CACHE: OrderedDict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]] = OrderedDict()
-_MAX_CACHE_ENTRIES = 128
+_NODE_CACHE_LOCK = threading.Lock()
+_MAX_CACHE_ENTRIES = 48
 
 
 def clear_dag_cache() -> None:
-    _NODE_CACHE.clear()
+    with _NODE_CACHE_LOCK:
+        _NODE_CACHE.clear()
 
 
 def _cache_get(key: str):
-    if key in _NODE_CACHE:
-        _NODE_CACHE.move_to_end(key)
-        return _NODE_CACHE[key]
-    return None
+    with _NODE_CACHE_LOCK:
+        if key in _NODE_CACHE:
+            _NODE_CACHE.move_to_end(key)
+            return _NODE_CACHE[key]
+        return None
 
 
 def _cache_put(key: str, val) -> None:
-    _NODE_CACHE[key] = val
-    _NODE_CACHE.move_to_end(key)
-    while len(_NODE_CACHE) > _MAX_CACHE_ENTRIES:
-        _NODE_CACHE.popitem(last=False)
+    with _NODE_CACHE_LOCK:
+        _NODE_CACHE[key] = val
+        _NODE_CACHE.move_to_end(key)
+        while len(_NODE_CACHE) > _MAX_CACHE_ENTRIES:
+            _NODE_CACHE.popitem(last=False)
 
 
 def _serialize_uplift_rules(uplift_set: UpliftSet) -> str:
@@ -117,10 +122,39 @@ def _check_finite_numbers(value: Any, path: str) -> None:
             _check_finite_numbers(v, f"{path}[{i}]")
 
 
+def _is_blank_param(raw: Any) -> bool:
+    return raw is None or (isinstance(raw, str) and raw.strip() == "")
+
+
+def _opt_float(raw: Any, default: float = 0.0) -> float:
+    if _is_blank_param(raw):
+        return default
+    return float(raw)
+
+
+def _opt_nullable_float(node: Any, key: str) -> float | None:
+    raw = node.params.get(key)
+    if _is_blank_param(raw):
+        return None
+    if isinstance(raw, bool):
+        raise ValueError(f"Node {node.node_id} param '{key}' must be numeric")
+    try:
+        val = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Node {node.node_id} param '{key}' must be numeric") from exc
+    if not np.isfinite(val):
+        raise ValueError(f"Node {node.node_id} param '{key}' must be finite")
+    return val
+
+
 def _num(node: Any, key: str, default: float | None = None) -> float:
     raw = node.params.get(key, default)
-    if raw is None:
+    if _is_blank_param(raw):
+        if default is not None:
+            return float(default)
         raise ValueError(f"Node {node.node_id} ({node.node_type.value}) requires numeric param '{key}'")
+    if isinstance(raw, bool):
+        raise ValueError(f"Node {node.node_id} param '{key}' must be numeric")
     try:
         val = float(raw)
     except (TypeError, ValueError) as exc:
@@ -180,8 +214,8 @@ def _validate_node_params(node: Any) -> None:
         rip = _num(node, "ripRate", 0.0)
         if not 0.0 <= rip <= 5.0:
             raise ValueError(f"Node {node.node_id} ripRate must be between 0 and 5")
-        reinst = node.params.get("reinstatements")
-        if reinst is not None and float(reinst) < 0:
+        reinst = _opt_nullable_float(node, "reinstatements")
+        if reinst is not None and reinst < 0:
             raise ValueError(f"Node {node.node_id} reinstatements must be >= 0")
     elif t == NodeType.AGG_XL:
         if _num(node, "aggLimit") <= 0:
@@ -190,16 +224,20 @@ def _validate_node_params(node: Any) -> None:
             raise ValueError(f"Node {node.node_id} aggAttachment must be >= 0")
         if _num(node, "perEventFranchise", 0.0) < 0:
             raise ValueError(f"Node {node.node_id} perEventFranchise must be >= 0")
-        cap = node.params.get("perEventCap")
-        if cap is not None and float(cap) <= 0:
+        if _num(node, "depositPremium", 0.0) < 0:
+            raise ValueError(f"Node {node.node_id} depositPremium must be >= 0")
+        cap = _opt_nullable_float(node, "perEventCap")
+        if cap is not None and cap <= 0:
             raise ValueError(f"Node {node.node_id} perEventCap must be > 0")
     elif t in (NodeType.QUOTA_SHARE, NodeType.AGG_QUOTA_SHARE):
         cession = _num(node, "cessionShare", 0.25)
         if not 0.0 <= cession <= 1.0:
             raise ValueError(f"Node {node.node_id} cessionShare must be between 0 and 1")
+        if _num(node, "depositPremium", 0.0) < 0:
+            raise ValueError(f"Node {node.node_id} depositPremium must be >= 0")
         for key in ("eventCap", "aggCap"):
-            v = node.params.get(key)
-            if v is not None and float(v) <= 0:
+            v = _opt_nullable_float(node, key)
+            if v is not None and v <= 0:
                 raise ValueError(f"Node {node.node_id} {key} must be > 0")
     elif t == NodeType.SURPLUS_SHARE:
         if _num(node, "retentionLine", 25.0) <= 0:
@@ -207,32 +245,36 @@ def _validate_node_params(node: Any) -> None:
         lines = _num(node, "numLines", 4.0)
         if not 0.0 < lines <= 100.0:
             raise ValueError(f"Node {node.node_id} numLines must be between 0 and 100")
+        if _num(node, "depositPremium", 0.0) < 0:
+            raise ValueError(f"Node {node.node_id} depositPremium must be >= 0")
     elif t == NodeType.ILW_OPTION:
         trig = _num(node, "trigger", 40.0)
         if trig < 0:
             raise ValueError(f"Node {node.node_id} trigger must be >= 0")
         if _num(node, "limit", 25.0) <= 0:
             raise ValueError(f"Node {node.node_id} limit must be > 0")
-        exh = node.params.get("exhaustion")
-        if exh is not None and exh != "" and float(exh) < trig:
+        if _num(node, "depositPremium", 0.0) < 0:
+            raise ValueError(f"Node {node.node_id} depositPremium must be >= 0")
+        exh = _opt_nullable_float(node, "exhaustion")
+        if exh is not None and exh < trig:
             raise ValueError(f"Node {node.node_id} exhaustion must be >= trigger")
     elif t == NodeType.CASCADING_TOWER:
         layers = node.params.get("layers") or []
         if not layers:
             raise ValueError(f"Node {node.node_id} cascading tower needs at least one layer")
         for i, layer in enumerate(layers):
-            if float(layer.get("occLimit", 0) or 0) <= 0:
+            if _opt_float(layer.get("occLimit"), 0.0) <= 0:
                 raise ValueError(f"Node {node.node_id} layer {i} occLimit must be > 0")
-            if float(layer.get("occAttachment", 0) or 0) < 0:
+            if _opt_float(layer.get("occAttachment"), 0.0) < 0:
                 raise ValueError(f"Node {node.node_id} layer {i} occAttachment must be >= 0")
-            if float(layer.get("depositPremium", 0) or 0) < 0:
+            if _opt_float(layer.get("depositPremium"), 0.0) < 0:
                 raise ValueError(f"Node {node.node_id} layer {i} depositPremium must be >= 0")
     elif t == NodeType.EVENT_ORDER_FILTER:
         min_order = _num(node, "minOrder", 2.0)
         if min_order < 1:
             raise ValueError(f"Node {node.node_id} minOrder must be >= 1")
-        max_order = node.params.get("maxOrder")
-        if max_order is not None and float(max_order) < min_order:
+        max_order = _opt_nullable_float(node, "maxOrder")
+        if max_order is not None and max_order < min_order:
             raise ValueError(f"Node {node.node_id} maxOrder must be >= minOrder")
         if _num(node, "minLossThreshold", 0.0) < 0:
             raise ValueError(f"Node {node.node_id} minLossThreshold must be >= 0")
@@ -245,8 +287,8 @@ def _validate_node_params(node: Any) -> None:
         min_l = _num(node, "minLoss", 0.0)
         if min_l < 0:
             raise ValueError(f"Node {node.node_id} minLoss must be >= 0")
-        max_l = node.params.get("maxLoss")
-        if max_l is not None and float(max_l) < min_l:
+        max_l = _opt_nullable_float(node, "maxLoss")
+        if max_l is not None and max_l < min_l:
             raise ValueError(f"Node {node.node_id} maxLoss must be >= minLoss")
     elif t == NodeType.REGION_PERIL_FILTER:
         for key in node.params.get("regionPerils", []) or []:
@@ -265,7 +307,7 @@ def _validate_node_params(node: Any) -> None:
             raise ValueError(f"Node {node.node_id} uplift factor must be >= 0")
     for key in placed_keys:
         if key in node.params:
-            share = float(node.params[key])
+            share = _num(node, key, 1.0)
             if not 0.0 <= share <= 1.5:
                 raise ValueError(f"Node {node.node_id} placedShare must be between 0 and 1.5")
 
@@ -425,8 +467,8 @@ def evaluate_programme_dag(
                     mx = np.zeros(yelt.num_trials, dtype=np.float64)
                     np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
                 elif node.node_type == NodeType.DATE_WINDOW_FILTER:
-                    start_day = int(node.params.get("startDay", 1))
-                    end_day = int(node.params.get("endDay", 365))
+                    start_day = int(_opt_float(node.params.get("startDay"), 1.0))
+                    end_day = int(_opt_float(node.params.get("endDay"), 365.0))
                     if start_day <= end_day:
                         mask = (yelt.day_of_year >= start_day) & (yelt.day_of_year <= end_day)
                     else:
@@ -436,20 +478,21 @@ def evaluate_programme_dag(
                     mx = np.zeros(yelt.num_trials, dtype=np.float64)
                     np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
                 elif node.node_type == NodeType.LOSS_SIZE_FILTER:
-                    min_l = float(node.params.get("minLoss", 0.0))
-                    max_l = node.params.get("maxLoss", None)
+                    min_l = _opt_float(node.params.get("minLoss"), 0.0)
+                    max_l = _opt_nullable_float(node, "maxLoss")
                     mask = combined >= min_l
                     if max_l is not None:
-                        mask &= combined <= float(max_l)
+                        mask &= combined <= max_l
                     ev_out = np.where(mask, combined, 0.0)
                     ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
                     mx = np.zeros(yelt.num_trials, dtype=np.float64)
                     np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
                 elif node.node_type == NodeType.EVENT_ORDER_FILTER:
+                    max_ord = _opt_nullable_float(node, "maxOrder")
                     eo_json = json.dumps({
-                        "min_order": int(node.params.get("minOrder", 2)),
-                        "max_order": node.params.get("maxOrder", None),
-                        "min_loss_threshold": float(node.params.get("minLossThreshold", 0.0)),
+                        "min_order": int(_opt_float(node.params.get("minOrder"), 2.0)),
+                        "max_order": int(max_ord) if max_ord is not None else None,
+                        "min_loss_threshold": _opt_float(node.params.get("minLossThreshold"), 0.0),
                     })
                     ev_out = rle.eval_event_order_filter_yelt(
                         yelt.trial_ids,
@@ -461,8 +504,8 @@ def evaluate_programme_dag(
                     mx = np.zeros(yelt.num_trials, dtype=np.float64)
                     np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
                 elif node.node_type == NodeType.UPLIFT:
-                    factor = float(node.params.get("factor", 1.0))
-                    add_load = float(node.params.get("additiveLoad", 0.0))
+                    factor = _opt_float(node.params.get("factor"), 1.0)
+                    add_load = _opt_float(node.params.get("additiveLoad"), 0.0)
                     ev_out = np.where(combined > 0.0, np.maximum(combined * factor + add_load, 0.0), 0.0)
                     ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
                     mx = np.zeros(yelt.num_trials, dtype=np.float64)
@@ -471,11 +514,11 @@ def evaluate_programme_dag(
                     p_json = json.dumps({
                         "occ_limit": float(node.params["occLimit"]),
                         "occ_attachment": float(node.params["occAttachment"]),
-                        "occ_franchise": float(node.params.get("occFranchise", 0.0)),
-                        "reinstatements": node.params.get("reinstatements", None),
-                        "rip_rate": float(node.params.get("ripRate", 0.0)),
-                        "deposit_premium": float(node.params.get("depositPremium", 0.0)),
-                        "placed_share": float(node.params.get("placedShare", 1.0)),
+                        "occ_franchise": _opt_float(node.params.get("occFranchise"), 0.0),
+                        "reinstatements": _opt_nullable_float(node, "reinstatements"),
+                        "rip_rate": _opt_float(node.params.get("ripRate"), 0.0),
+                        "deposit_premium": _opt_float(node.params.get("depositPremium"), 0.0),
+                        "placed_share": _opt_float(node.params.get("placedShare"), 1.0),
                     })
                     ev_out, ann, mx, rip = rle.eval_occ_xl_yelt(
                         yelt.trial_ids,
@@ -487,9 +530,9 @@ def evaluate_programme_dag(
                     p_json = json.dumps({
                         "agg_limit": float(node.params["aggLimit"]),
                         "agg_attachment": float(node.params["aggAttachment"]),
-                        "per_event_franchise": float(node.params.get("perEventFranchise", 0.0)),
-                        "per_event_cap": node.params.get("perEventCap", None),
-                        "placed_share": float(node.params.get("placedShare", 1.0)),
+                        "per_event_franchise": _opt_float(node.params.get("perEventFranchise"), 0.0),
+                        "per_event_cap": _opt_nullable_float(node, "perEventCap"),
+                        "placed_share": _opt_float(node.params.get("placedShare"), 1.0),
                     })
                     ev_out, ann, mx = rle.eval_agg_xl_yelt(
                         yelt.trial_ids,
@@ -499,10 +542,10 @@ def evaluate_programme_dag(
                     )
                 elif node.node_type in (NodeType.QUOTA_SHARE, NodeType.AGG_QUOTA_SHARE):
                     p_json = json.dumps({
-                        "cession_share": float(node.params.get("cessionShare", 0.25)),
-                        "event_cap": node.params.get("eventCap", None),
-                        "agg_cap": node.params.get("aggCap", None),
-                        "placed_share": float(node.params.get("placedShare", 1.0)),
+                        "cession_share": _opt_float(node.params.get("cessionShare"), 0.25),
+                        "event_cap": _opt_nullable_float(node, "eventCap"),
+                        "agg_cap": _opt_nullable_float(node, "aggCap"),
+                        "placed_share": _opt_float(node.params.get("placedShare"), 1.0),
                     })
                     ev_out, ann, mx = rle.eval_quota_share_yelt(
                         yelt.trial_ids,
@@ -512,9 +555,9 @@ def evaluate_programme_dag(
                     )
                 elif node.node_type == NodeType.SURPLUS_SHARE:
                     p_json = json.dumps({
-                        "retention_line": float(node.params.get("retentionLine", 25.0)),
-                        "num_lines": float(node.params.get("numLines", 4.0)),
-                        "placed_share": float(node.params.get("placedShare", 1.0)),
+                        "retention_line": _opt_float(node.params.get("retentionLine"), 25.0),
+                        "num_lines": _opt_float(node.params.get("numLines"), 4.0),
+                        "placed_share": _opt_float(node.params.get("placedShare"), 1.0),
                     })
                     ev_out, ann, mx = rle.eval_surplus_share_yelt(
                         yelt.trial_ids,
@@ -523,11 +566,11 @@ def evaluate_programme_dag(
                         p_json,
                     )
                 elif node.node_type == NodeType.ILW_OPTION:
-                    trig = float(node.params.get("trigger", 40.0))
-                    lim = float(node.params.get("limit", 25.0))
-                    placed = float(node.params.get("placedShare", 1.0))
-                    raw_exh = node.params.get("exhaustion")
-                    exh = float(raw_exh) if (raw_exh is not None and raw_exh != "" and float(raw_exh) > trig) else trig
+                    trig = _opt_float(node.params.get("trigger"), 40.0)
+                    lim = _opt_float(node.params.get("limit"), 25.0)
+                    placed = _opt_float(node.params.get("placedShare"), 1.0)
+                    raw_exh = _opt_nullable_float(node, "exhaustion")
+                    exh = raw_exh if (raw_exh is not None and raw_exh > trig) else trig
                     trig_type = str(node.params.get("triggerType") or "BINARY").upper()
                     cap = lim * placed
                     trial_idx = yelt.trial_ids - 1
@@ -587,11 +630,15 @@ def evaluate_programme_dag(
                         {
                             "occ_limit": float(l["occLimit"]),
                             "occ_attachment": float(l["occAttachment"]),
-                            "occ_franchise": float(l.get("occFranchise", 0.0)),
-                            "reinstatements": l.get("reinstatements", 0.0),
-                            "rip_rate": float(l.get("ripRate", 0.0)),
-                            "deposit_premium": float(l.get("depositPremium", 0.0)),
-                            "placed_share": float(l.get("placedShare", 1.0)),
+                            "occ_franchise": _opt_float(l.get("occFranchise"), 0.0),
+                            "reinstatements": (
+                                0.0
+                                if "reinstatements" not in l
+                                else (None if _is_blank_param(l.get("reinstatements")) else float(l["reinstatements"]))
+                            ),
+                            "rip_rate": _opt_float(l.get("ripRate"), 0.0),
+                            "deposit_premium": _opt_float(l.get("depositPremium"), 0.0),
+                            "placed_share": _opt_float(l.get("placedShare"), 1.0),
                         }
                         for l in raw_layers
                     ])
@@ -620,8 +667,13 @@ def evaluate_programme_dag(
 
             max_occ_val = float(np.max(mx)) if len(mx) else 0.0
             exp_rip = float(np.mean(rip))
-            prem = float(node.params.get("depositPremium", 0.0)) * float(node.params.get("placedShare", 1.0))
-            lim = float(node.params.get("occLimit", node.params.get("aggLimit", node.params.get("limit", 0.0)))) * float(node.params.get("placedShare", 1.0))
+            placed_share = _opt_float(node.params.get("placedShare"), 1.0)
+            prem = _opt_float(node.params.get("depositPremium"), 0.0) * placed_share
+            raw_lim = next(
+                (node.params.get(k) for k in ("occLimit", "aggLimit", "limit") if not _is_blank_param(node.params.get(k))),
+                0.0,
+            )
+            lim = _opt_float(raw_lim, 0.0) * placed_share
             rol = (prem / lim) if lim > 0 and prem > 0 else None
             # Loss ratio needs this node's own premium. Pass-through outputs inherit RIP
             # from upstream terms; dividing EL by that RIP alone invents a ratio.
@@ -1191,20 +1243,20 @@ def evaluate_deterministic_run(
             p_json = json.dumps({
                 "occ_limit": float(node.params["occLimit"]),
                 "occ_attachment": float(node.params["occAttachment"]),
-                "occ_franchise": float(node.params.get("occFranchise", 0.0)),
-                "reinstatements": node.params.get("reinstatements", None),
-                "rip_rate": float(node.params.get("ripRate", 0.0)),
-                "deposit_premium": float(node.params.get("depositPremium", 0.0)),
-                "placed_share": float(node.params.get("placedShare", 1.0)),
+                "occ_franchise": _opt_float(node.params.get("occFranchise"), 0.0),
+                "reinstatements": _opt_nullable_float(node, "reinstatements"),
+                "rip_rate": _opt_float(node.params.get("ripRate"), 0.0),
+                "deposit_premium": _opt_float(node.params.get("depositPremium"), 0.0),
+                "placed_share": _opt_float(node.params.get("placedShare"), 1.0),
             })
             raw_steps = json.loads(rle.trace_occ_xl(subject.tolist(), p_json))
         else:
             p_json = json.dumps({
                 "agg_limit": float(node.params["aggLimit"]),
                 "agg_attachment": float(node.params["aggAttachment"]),
-                "per_event_franchise": float(node.params.get("perEventFranchise", 0.0)),
-                "per_event_cap": node.params.get("perEventCap", None),
-                "placed_share": float(node.params.get("placedShare", 1.0)),
+                "per_event_franchise": _opt_float(node.params.get("perEventFranchise"), 0.0),
+                "per_event_cap": _opt_nullable_float(node, "perEventCap"),
+                "placed_share": _opt_float(node.params.get("placedShare"), 1.0),
             })
             raw_steps = json.loads(rle.trace_agg_xl(subject.tolist(), p_json))
 

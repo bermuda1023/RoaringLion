@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from pathlib import Path
 
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.db.database import init_engine
 from app.engine.ilw import evaluate_ilw_trial_payouts, price_ilw_with_portfolio_hedge
@@ -69,6 +71,8 @@ from app.services.portfolio_snapshot import (
 from app.services.sim_sets import SimSetStore
 from app.routes_extended import create_extended_router
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(
     title="RoaringLion Catastrophe Reinsurance Platform",
     version="0.2.0",
@@ -81,6 +85,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Ensure unexpected 500s still return JSON + CORS headers instead of browser 'Failed to fetch'."""
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    origin = request.headers.get("origin")
+    headers = (
+        {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        }
+        if origin
+        else {"Access-Control-Allow-Origin": "*"}
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {type(exc).__name__}: {exc}"},
+        headers=headers,
+    )
 
 # Initialize persistent SQLite/Postgres store + Parquet simulation-set catalog
 init_engine()

@@ -278,23 +278,23 @@ def _blank_templates() -> list[GraphTemplate]:
     rows: list[tuple[str, str, str, str, dict[str, Any]]] = [
         ("blank-occ-xl", "Financial Terms", "Occurrence XL", "OCC_XL", {
             "occLimit": "", "occAttachment": "", "occFranchise": 0.0, "reinstatements": 0.0,
-            "ripRate": 0.0, "depositPremium": "", "placedShare": 1.0,
+            "ripRate": 0.0, "placedShare": 1.0,
         }),
         ("blank-agg-xl", "Financial Terms", "Aggregate XL", "AGG_XL", {
             "aggLimit": "", "aggAttachment": "", "perEventFranchise": 0.0, "perEventCap": "",
-            "depositPremium": "", "placedShare": 1.0,
+            "placedShare": 1.0,
         }),
         ("blank-qs", "Financial Terms", "Quota Share", "AGG_QUOTA_SHARE", {
-            "cessionShare": "", "eventCap": "", "aggCap": "", "depositPremium": "", "placedShare": 1.0,
+            "cessionShare": "", "eventCap": "", "aggCap": "", "placedShare": 1.0,
         }),
         ("blank-surplus", "Financial Terms", "Surplus Share", "SURPLUS_SHARE", {
-            "retentionLine": "", "numLines": "", "depositPremium": "", "placedShare": 1.0,
+            "retentionLine": "", "numLines": "", "placedShare": 1.0,
         }),
         ("blank-cascading", "Financial Terms", "Cascading Tower", "CASCADING_TOWER", {
-            "occLimit": "", "depositPremium": "", "placedShare": 1.0, "layers": [],
+            "occLimit": "", "placedShare": 1.0, "layers": [],
         }),
         ("blank-ilw", "Financial Terms", "ILW Option", "ILW_OPTION", {
-            "limit": 25.0, "trigger": 40.0, "triggerType": "BINARY", "depositPremium": "", "placedShare": 1.0,
+            "limit": 25.0, "trigger": 40.0, "triggerType": "BINARY", "placedShare": 1.0,
         }),
         ("blank-src-industry", "Sources", "Industry Loss Run", "INDUSTRY_INDEX_SOURCE", {
             "simSetId": "ind-synth-cat-v1-100k", "sourceKind": "INDUSTRY_LOSS_RUN",

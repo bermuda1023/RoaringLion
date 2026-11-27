@@ -6,7 +6,7 @@ mod py_bindings {
     use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
     use pyo3::prelude::*;
 
-    use crate::metrics::{compute_ep_stats, compute_euler_cotvar};
+    use crate::metrics::{compute_ep_stats, compute_euler_cotvar, compute_euler_cotvar_multi};
     use crate::terms::{
         apply_uplifts_parallel, eval_agg_xl_parallel, eval_cascading_parallel,
         eval_event_order_filter_parallel, eval_occ_xl_parallel, eval_quota_share_parallel,
@@ -128,6 +128,25 @@ mod py_bindings {
     }
 
     #[pyfunction]
+    fn euler_cotvar_multi<'py>(
+        py: Python<'py>,
+        layer_matrix: PyReadonlyArray2<'py, f64>,
+        return_periods: Vec<f64>,
+    ) -> PyResult<Vec<(f64, f64, Bound<'py, PyArray1<f64>>)>> {
+        let shape = layer_matrix.shape();
+        let num_layers = shape[0];
+        let num_trials = shape[1];
+        let slice = layer_matrix.as_slice()?;
+        let results = py.allow_threads(|| {
+            compute_euler_cotvar_multi(slice, num_layers, num_trials, &return_periods)
+        });
+        Ok(results
+            .into_iter()
+            .map(|(var, tvar, co)| (var, tvar, co.into_pyarray_bound(py)))
+            .collect())
+    }
+
+    #[pyfunction]
     fn eval_quota_share_yelt<'py>(
         py: Python<'py>,
         trial_ids: PyReadonlyArray1<'py, u32>,
@@ -235,6 +254,7 @@ mod py_bindings {
         m.add_function(wrap_pyfunction!(trace_agg_xl, m)?)?;
         m.add_function(wrap_pyfunction!(ep_stats, m)?)?;
         m.add_function(wrap_pyfunction!(euler_cotvar, m)?)?;
+        m.add_function(wrap_pyfunction!(euler_cotvar_multi, m)?)?;
         Ok(())
     }
 }
