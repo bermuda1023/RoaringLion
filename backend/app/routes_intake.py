@@ -23,7 +23,7 @@ from app.models.intake import (
 )
 from app.models.phase1 import ContractFull
 from app.services.contracts import ContractStore
-from app.services.intake import DraftValidationError, SubmissionIntakeService
+from app.services.intake import DraftValidationError, PayloadTooLargeError, SubmissionIntakeService
 from app.services.intake_parsers import MAX_UPLOAD_BYTES, MAX_UPLOAD_MB
 from app.services.lineage import LineageRegistry
 from app.services.sim_sets import SimSetStore
@@ -104,6 +104,8 @@ def create_intake_router(
         """Ingest an email message (live webhook or fixture test message) through the unified pipeline."""
         try:
             return svc.ingest_email_message(msg)
+        except PayloadTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

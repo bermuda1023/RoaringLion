@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,12 +61,21 @@ from app.services.lineage import LineageRegistry, canonical_hash
 from app.services.sim_sets import SimSetStore
 
 SUPPORTED_INTAKE_EXTS = {".pdf", ".xlsx", ".xlsm", ".csv", ".parquet", ".txt"}
+MAX_EMAIL_ATTACHMENTS = int(os.getenv("ROARING_LION_INTAKE_MAX_ATTACHMENTS", "10"))
 
 logger = logging.getLogger(__name__)
 
 
 class DraftValidationError(ValueError):
     """Raised when a draft fails validation on confirm (maps to HTTP 422)."""
+
+
+class PayloadTooLargeError(ValueError):
+    """Raised when an intake payload exceeds bounded size or attachment-count limits (maps to HTTP 413)."""
+
+
+def _max_base64_chars(max_bytes: int) -> int:
+    return ((max_bytes + 2) // 3) * 4
 
 
 def _layer_spec_from_draft(
@@ -611,60 +621,59 @@ class SubmissionIntakeService:
             ),
         )
 
-    def ingest_email_message(self, msg: EmailMessageInput) -> list[SubmissionDraftOut]:
-        """Process one email message (live or fixture): match programme and file drafts.
-
-        Each attachment/body draft commits its dedup key in the same transaction as the draft,
-        so retrying the same `messageId` (even after a partial failure) returns the existing
-        draft(s) without creating duplicates.
-        """
-        attachment_names = " ".join(a.filename for a in msg.attachments)
-        matched = self.match_existing_programme(msg.subject, msg.body_text, attachment_names)
+    def _ingest_email_parts(
+        self,
+        *,
+        message_id: str | None,
+        sender: str,
+        subject: str,
+        body_text: str,
+        raw_attachments: list[tuple[int, str, bytes]],
+        rejected_attachments: list[str] | None = None,
+    ) -> list[SubmissionDraftOut]:
+        """Ingest decoded email attachments (or body text) through the unified pipeline."""
+        attachment_names = " ".join(fname for _, fname, _ in raw_attachments)
+        matched = self.match_existing_programme(subject, body_text, attachment_names)
         target_prog_id = matched.programme_id if matched else None
-        source_ref = f"Email from {msg.sender}: {msg.subject}"
+        source_ref = f"Email from {sender}: {subject}"
 
         drafts: list[SubmissionDraftOut] = []
 
-        if msg.attachments:
-            decoded: list[tuple[int, EmailAttachmentInput, bytes]] = []
-            for idx, att in enumerate(msg.attachments):
-                raw = base64.b64decode(att.content_base64)
-                decoded.append((idx, att, raw))
-
+        if raw_attachments:
             # First ingest any modelling attachments so their sim_set_id can attach to sibling PDF/Excel drafts
             modelling_exts = {".csv", ".parquet"}
             attached_sim_id: str | None = None
-            doc_items: list[tuple[int, EmailAttachmentInput, bytes]] = []
+            doc_items: list[tuple[int, str, bytes]] = []
             modelling_drafts: list[SubmissionDraftOut] = []
 
-            for idx, att, raw in decoded:
-                ext = Path(att.filename).suffix.lower()
-                item_key = f"email:{msg.message_id}:att:{idx}:{att.filename}" if msg.message_id else None
+            for idx, fname, raw in raw_attachments:
+                ext = Path(fname).suffix.lower()
+                item_key = f"email:{message_id}:att:{idx}:{fname}" if message_id else None
                 if ext in modelling_exts:
                     d = self.ingest_file(
                         raw_bytes=raw,
-                        filename=att.filename,
+                        filename=fname,
                         door=IntakeDoor.EMAIL,
                         source_ref=source_ref,
                         target_programme_id=target_prog_id,
-                        hint_subject=f"{msg.subject}\n{msg.body_text}",
+                        hint_subject=f"{subject}\n{body_text}",
                         dedup_key=item_key,
                     )
                     if d.sim_set_id:
                         attached_sim_id = d.sim_set_id
                     modelling_drafts.append(d)
                 else:
-                    doc_items.append((idx, att, raw))
+                    doc_items.append((idx, fname, raw))
 
-            for idx, att, raw in doc_items:
-                item_key = f"email:{msg.message_id}:att:{idx}:{att.filename}" if msg.message_id else None
+            for idx, fname, raw in doc_items:
+                item_key = f"email:{message_id}:att:{idx}:{fname}" if message_id else None
                 d = self.ingest_file(
                     raw_bytes=raw,
-                    filename=att.filename,
+                    filename=fname,
                     door=IntakeDoor.EMAIL,
                     source_ref=source_ref,
                     target_programme_id=target_prog_id,
-                    hint_subject=f"{msg.subject}\n{msg.body_text}",
+                    hint_subject=f"{subject}\n{body_text}",
                     attach_sim_set_id=attached_sim_id,
                     dedup_key=item_key,
                 )
@@ -675,26 +684,93 @@ class SubmissionIntakeService:
             else:
                 drafts = modelling_drafts + drafts
         else:
-            raw_body = (msg.body_text or msg.subject).encode("utf-8")
-            body_key = f"email:{msg.message_id}:body" if msg.message_id else None
+            effective_body = body_text or subject
+            if rejected_attachments:
+                effective_body = (
+                    f"{effective_body}\nRejected oversized attachment(s): {', '.join(rejected_attachments)}"
+                ).strip()
+            raw_body = effective_body.encode("utf-8")[:MAX_UPLOAD_BYTES]
+            body_key = f"email:{message_id}:body" if message_id else None
             d = self.ingest_file(
                 raw_bytes=raw_body,
                 filename="email_body.txt",
                 door=IntakeDoor.EMAIL,
                 source_ref=source_ref,
                 target_programme_id=target_prog_id,
-                hint_subject=msg.subject,
+                hint_subject=subject,
                 dedup_key=body_key,
             )
             drafts.append(d)
 
+        if rejected_attachments and drafts:
+            note = f"Skipped oversized attachment(s) exceeding {MAX_UPLOAD_MB} MB limit: {', '.join(rejected_attachments)}"
+            with get_session() as db:
+                for d in drafts:
+                    rec = db.get(SubmissionDraftRecord, d.draft_id)
+                    if rec:
+                        ext_data = IntakeExtractedData(**json.loads(rec.extracted_json or "{}"))
+                        if note not in ext_data.warnings:
+                            ext_data.warnings.append(note)
+                            rec.extracted_json = ext_data.model_dump_json()
+                db.commit()
+            drafts = [self.get_draft(d.draft_id) or d for d in drafts]
+
         return drafts
+
+    def ingest_email_message(self, msg: EmailMessageInput) -> list[SubmissionDraftOut]:
+        """Process one email message (live or fixture): match programme and file drafts.
+
+        Validates attachment count and encoded payload sizes BEFORE base64 decoding to avoid
+        unbounded memory allocation. Each attachment/body draft commits its dedup key in the
+        same transaction as the draft so retries return existing draft(s) without duplicates.
+        """
+        if len(msg.attachments) > MAX_EMAIL_ATTACHMENTS:
+            raise PayloadTooLargeError(
+                f"Email contains {len(msg.attachments)} attachments, exceeding the {MAX_EMAIL_ATTACHMENTS}-attachment limit."
+            )
+
+        max_b64 = _max_base64_chars(MAX_UPLOAD_BYTES)
+        raw_attachments: list[tuple[int, str, bytes]] = []
+        total_decoded = 0
+
+        for idx, att in enumerate(msg.attachments):
+            # Guard before base64 decoding so oversized payloads are never allocated.
+            if len(att.content_base64) > max_b64 * 2:
+                raise PayloadTooLargeError(
+                    f"Attachment '{att.filename}' exceeds the {MAX_UPLOAD_MB} MB intake limit."
+                )
+            compact = "".join(att.content_base64.split())
+            if len(compact) > max_b64:
+                raise PayloadTooLargeError(
+                    f"Attachment '{att.filename}' exceeds the {MAX_UPLOAD_MB} MB intake limit."
+                )
+            raw = base64.b64decode(compact, validate=True)
+            if len(raw) > MAX_UPLOAD_BYTES:
+                raise PayloadTooLargeError(
+                    f"Attachment '{att.filename}' exceeds the {MAX_UPLOAD_MB} MB intake limit."
+                )
+            total_decoded += len(raw)
+            if total_decoded > MAX_UPLOAD_BYTES:
+                raise PayloadTooLargeError(
+                    f"Total email attachment payload exceeds the {MAX_UPLOAD_MB} MB intake limit."
+                )
+            raw_attachments.append((idx, att.filename, raw))
+
+        return self._ingest_email_parts(
+            message_id=msg.message_id,
+            sender=msg.sender,
+            subject=msg.subject,
+            body_text=msg.body_text,
+            raw_attachments=raw_attachments,
+        )
 
     def poll_email_inbox(self, max_messages: int = 20) -> EmailPollResult:
         """Poll configured IMAP inbox if credentials exist; otherwise report disconnected cleanly.
 
-        Fetches messages with BODY.PEEK[] so \\Seen is NOT set prematurely. Marks \\Seen only
-        after ingest succeeds; any parse, size, or ingest error leaves the message UNSEEN for retry.
+        Uses verified TLS (`ssl.create_default_context()`), fetches with `BODY.PEEK[]` so
+        `\\Seen` is not set prematurely, skips oversized attachments while ingesting valid
+        siblings (without base64 round-tripping), and marks `\\Seen` only after ingest succeeds.
+        Transient parse/ingest errors leave the message `UNSEEN` for retry on the next poll.
         """
         status = self.get_email_status()
         if not status.connected:
@@ -714,8 +790,10 @@ class SubmissionIntakeService:
         drafts: list[SubmissionDraftOut] = []
         processed = 0
         skipped = 0
+        max_b64 = _max_base64_chars(MAX_UPLOAD_BYTES)
+        ssl_ctx = ssl.create_default_context()
 
-        with imaplib.IMAP4_SSL(host, port) as imap:
+        with imaplib.IMAP4_SSL(host, port, ssl_context=ssl_ctx) as imap:
             imap.login(user, password)
             imap.select("INBOX")
             _, msg_nums = imap.search(None, "UNSEEN")
@@ -731,47 +809,65 @@ class SubmissionIntakeService:
                     sender = str(parsed_mail.get("From") or "unknown")
                     subject = str(parsed_mail.get("Subject") or "(No Subject)")
                     body_parts: list[str] = []
-                    attachments: list[EmailAttachmentInput] = []
+                    raw_attachments: list[tuple[int, str, bytes]] = []
+                    rejected_attachments: list[str] = []
+                    total_bytes = 0
+                    att_idx = 0
 
                     for part in parsed_mail.walk():
                         disp = str(part.get("Content-Disposition") or "")
                         fname = part.get_filename()
                         if fname or "attachment" in disp.lower():
+                            safe_name = fname or f"attachment_{att_idx}.bin"
+                            if len(raw_attachments) >= MAX_EMAIL_ATTACHMENTS:
+                                logger.warning("Skipping extra attachment '%s' on IMAP message %s (limit %d)", safe_name, num, MAX_EMAIL_ATTACHMENTS)
+                                rejected_attachments.append(safe_name)
+                                att_idx += 1
+                                continue
+                            # Check encoded payload length before decoding to avoid allocating huge buffers
+                            raw_encoded = part.get_payload(decode=False)
+                            if isinstance(raw_encoded, str) and len(raw_encoded) > max_b64 * 2:
+                                logger.warning("Skipping oversized attachment '%s' on IMAP message %s", safe_name, num)
+                                rejected_attachments.append(safe_name)
+                                att_idx += 1
+                                continue
                             payload = part.get_payload(decode=True)
                             if payload is None:
+                                att_idx += 1
                                 continue
-                            if len(payload) > MAX_UPLOAD_BYTES:
-                                raise ValueError(
-                                    f"Attachment '{fname or 'attachment.bin'}' exceeds {MAX_UPLOAD_MB} MB limit."
+                            if len(payload) > MAX_UPLOAD_BYTES or (total_bytes + len(payload)) > MAX_UPLOAD_BYTES:
+                                logger.warning(
+                                    "Skipping oversized attachment '%s' (%d bytes) on IMAP message %s",
+                                    safe_name,
+                                    len(payload),
+                                    num,
                                 )
-                            attachments.append(
-                                EmailAttachmentInput(
-                                    filename=fname or "attachment.bin",
-                                    content_base64=base64.b64encode(payload).decode("ascii"),
-                                    content_type=part.get_content_type(),
-                                )
-                            )
+                                rejected_attachments.append(safe_name)
+                                att_idx += 1
+                                continue
+                            total_bytes += len(payload)
+                            raw_attachments.append((att_idx, safe_name, payload))
+                            att_idx += 1
                         elif part.get_content_type() == "text/plain":
                             payload = part.get_payload(decode=True)
                             if payload:
                                 body_parts.append(payload.decode("utf-8", errors="replace"))
 
-                    created = self.ingest_email_message(
-                        EmailMessageInput(
-                            message_id=msg_id,
-                            sender=sender,
-                            subject=subject,
-                            body_text="\n".join(body_parts),
-                            attachments=attachments,
-                        )
+                    created = self._ingest_email_parts(
+                        message_id=msg_id,
+                        sender=sender,
+                        subject=subject,
+                        body_text="\n".join(body_parts),
+                        raw_attachments=raw_attachments,
+                        rejected_attachments=rejected_attachments,
                     )
                 except Exception as exc:
-                    # Leave message UNSEEN so the next poll retries it.
+                    # Leave message UNSEEN so transient failures are retried on the next poll.
                     logger.warning("Failed to ingest IMAP message %s; leaving UNSEEN for retry: %s", num, exc)
                     skipped += 1
                     continue
 
-                # Only mark \Seen after ingest succeeded.
+                # Only mark \Seen after handling (including skipping any oversized attachments) succeeded.
                 imap.store(num, "+FLAGS", "\\Seen")
                 if created:
                     processed += 1

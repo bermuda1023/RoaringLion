@@ -401,8 +401,11 @@ def test_watched_folder_door_pickup_and_idempotency(tmp_path: Path, monkeypatch)
     client.put("/api/intake/programmes/prog-farmers-us-27/watched-folder", json={"watchedFolder": None})
 
 
-def test_poll_email_inbox_uses_body_peek_and_marks_seen_only_on_success(monkeypatch):
-    """Bugbot #1: IMAP fetch must use BODY.PEEK[] and mark \\Seen only after ingest succeeds."""
+def test_poll_email_inbox_uses_body_peek_verified_tls_and_handles_oversized_and_transient_errors(monkeypatch):
+    """Bugbot #1 + #7 + #9: IMAP uses verified TLS (CERT_REQUIRED + check_hostname), fetches with
+    BODY.PEEK[], skips oversized attachments while ingesting valid siblings and marking \\Seen,
+    and leaves transient ingest failures UNSEEN for retry."""
+    import ssl
     from email.message import EmailMessage
 
     monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
@@ -410,27 +413,48 @@ def test_poll_email_inbox_uses_body_peek_and_marks_seen_only_on_success(monkeypa
     monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
     monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
 
-    msg_fail = EmailMessage()
-    msg_fail["Message-ID"] = "<imap-fail-001@test>"
-    msg_fail["From"] = "broker@example.com"
-    msg_fail["Subject"] = "Oversized slip"
-    msg_fail.set_content("Body")
-    msg_fail.add_attachment(b"x" * 200, maintype="application", subtype="pdf", filename="oversized.pdf")
+    # Message 1: transient ingest failure -> must remain UNSEEN
+    msg_transient = EmailMessage()
+    msg_transient["Message-ID"] = "<imap-transient-001@test>"
+    msg_transient["From"] = "broker@example.com"
+    msg_transient["Subject"] = "Transient failure message"
+    msg_transient.set_content("Body that triggers transient error")
 
+    # Message 2: oversized attachment + valid sibling YELT -> skip oversized, ingest sibling, mark \Seen
+    msg_mixed = EmailMessage()
+    msg_mixed["Message-ID"] = "<imap-mixed-002@test>"
+    msg_mixed["From"] = "broker@example.com"
+    msg_mixed["Subject"] = "Mixed oversized and valid sibling"
+    msg_mixed.set_content("Contains one oversized PDF and one valid YELT CSV.")
+    msg_mixed.add_attachment(b"x" * 400, maintype="application", subtype="pdf", filename="huge_slip.pdf")
+    msg_mixed.add_attachment(
+        b"trial_id,event_id,loss_amount\n1,1001,25.0\n",
+        maintype="text",
+        subtype="csv",
+        filename="valid_sibling.csv",
+    )
+
+    # Message 3: normal valid message -> ingested and marked \Seen (not starved by msg 2)
     msg_ok = EmailMessage()
-    msg_ok["Message-ID"] = "<imap-ok-002@test>"
+    msg_ok["Message-ID"] = "<imap-ok-003@test>"
     msg_ok["From"] = "broker@example.com"
     msg_ok["Subject"] = "Valid submission"
     msg_ok.set_content("Cedent: Beacon Re\nProgramme: Beacon FL Cat XL 2027\nInception: 2027-01-01\nRegion: US-FL-WS\nLayer 1: $10M xs $20M | ROL 15%")
 
-    raw_by_num = {b"1": msg_fail.as_bytes(), b"2": msg_ok.as_bytes()}
+    raw_by_num = {
+        b"1": msg_transient.as_bytes(),
+        b"2": msg_mixed.as_bytes(),
+        b"3": msg_ok.as_bytes(),
+    }
     fetch_commands: list[str] = []
     marked_seen: list[bytes] = []
+    captured_ssl: list[ssl.SSLContext | None] = []
 
     class FakeIMAP:
-        def __init__(self, host: str, port: int):
+        def __init__(self, host: str, port: int, ssl_context: ssl.SSLContext | None = None):
             self.host = host
             self.port = port
+            captured_ssl.append(ssl_context)
 
         def __enter__(self):
             return self
@@ -442,11 +466,11 @@ def test_poll_email_inbox_uses_body_peek_and_marks_seen_only_on_success(monkeypa
             return ("OK", [b"Logged in"])
 
         def select(self, mailbox: str):
-            return ("OK", [b"2"])
+            return ("OK", [b"3"])
 
         def search(self, charset, criterion: str):
             assert criterion == "UNSEEN"
-            return ("OK", [b"1 2"])
+            return ("OK", [b"1 2 3"])
 
         def fetch(self, num: bytes, cmd: str):
             fetch_commands.append(cmd)
@@ -459,24 +483,88 @@ def test_poll_email_inbox_uses_body_peek_and_marks_seen_only_on_success(monkeypa
 
     import app.services.intake as intake_mod
 
+    orig_parts = intake_mod.SubmissionIntakeService._ingest_email_parts
+
+    def flaky_parts(self, **kwargs):
+        if kwargs.get("message_id") == "<imap-transient-001@test>":
+            raise RuntimeError("Simulated transient DB failure")
+        return orig_parts(self, **kwargs)
+
     monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeIMAP)
-    # 200-byte attachment fails size check while small body-only message 2 succeeds
-    monkeypatch.setattr(intake_mod, "MAX_UPLOAD_BYTES", 150)
+    monkeypatch.setattr(intake_mod.SubmissionIntakeService, "_ingest_email_parts", flaky_parts)
+    # Cap at 200 bytes so 400-byte huge_slip.pdf is skipped while valid_sibling.csv & msg_ok succeed
+    monkeypatch.setattr(intake_mod, "MAX_UPLOAD_BYTES", 200)
 
     res = client.post("/api/intake/email/poll")
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["connected"] is True
-    assert body["processedCount"] == 1
+    assert body["processedCount"] == 2
     assert body["skippedCount"] == 1
 
+    # Verified TLS context passed to IMAP4_SSL
+    assert len(captured_ssl) == 1 and captured_ssl[0] is not None
+    assert captured_ssl[0].verify_mode == ssl.CERT_REQUIRED
+    assert captured_ssl[0].check_hostname is True
+
     # Must use BODY.PEEK[] (never RFC822)
-    assert fetch_commands == ["(BODY.PEEK[])", "(BODY.PEEK[])"]
-    # Failed message 1 must remain UNSEEN; successful message 2 must be marked \Seen
-    assert marked_seen == [b"2"]
+    assert fetch_commands == ["(BODY.PEEK[])", "(BODY.PEEK[])", "(BODY.PEEK[])"]
+    # Message 1 (transient error) remains UNSEEN; Messages 2 & 3 are marked \Seen
+    assert marked_seen == [b"2", b"3"]
+
+    # Message 2 ingested the valid sibling CSV and recorded a warning about huge_slip.pdf
+    sibling_draft = next(d for d in body["drafts"] if d["sourceFilename"] == "valid_sibling.csv")
+    assert sibling_draft["sourceFileType"] == "YELT"
+    assert any("huge_slip.pdf" in w for w in sibling_draft["extracted"]["warnings"])
 
     for d in body["drafts"]:
         client.post(f"/api/intake/drafts/{d['draftId']}/discard")
+
+
+def test_email_ingest_caps_attachment_count_and_rejects_oversized_before_decode(monkeypatch):
+    """Bugbot #8: /api/intake/email/ingest returns 413 on attachment-count or pre-decode size overflow."""
+    import app.services.intake as intake_mod
+
+    # 1. Attachment count limit -> 413
+    monkeypatch.setattr(intake_mod, "MAX_EMAIL_ATTACHMENTS", 2)
+    tiny_b64 = base64.b64encode(b"hello").decode("ascii")
+    too_many = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "cap-count-001",
+            "sender": "broker@example.com",
+            "subject": "Too many attachments",
+            "attachments": [
+                {"filename": f"f{i}.txt", "contentBase64": tiny_b64}
+                for i in range(3)
+            ],
+        },
+    )
+    assert too_many.status_code == 413
+
+    # 2. Oversized payload rejected BEFORE base64.b64decode is called -> 413
+    monkeypatch.setattr(intake_mod, "MAX_UPLOAD_BYTES", 64)
+    decode_called = {"n": 0}
+    orig_b64decode = intake_mod.base64.b64decode
+
+    def spy_b64decode(*args, **kwargs):
+        decode_called["n"] += 1
+        return orig_b64decode(*args, **kwargs)
+
+    monkeypatch.setattr(intake_mod.base64, "b64decode", spy_b64decode)
+
+    oversized_b64 = "A" * 200  # > max_base64_chars(64) = 88
+    too_big = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "cap-size-002",
+            "sender": "broker@example.com",
+            "subject": "Oversized attachment",
+            "attachments": [{"filename": "huge.pdf", "contentBase64": oversized_b64}],
+        },
+    )
+    assert too_big.status_code == 413
+    assert decode_called["n"] == 0
 
 
 def test_parquet_yelt_reads_actual_trial_count():
