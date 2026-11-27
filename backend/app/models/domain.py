@@ -8,7 +8,17 @@ from typing import Any
 from pydantic import Field, field_validator
 
 from .common import CamelModel
-from .enums import LinkType, LossSourceType, NodeType, PerilCode, ProgrammeStatus, ViewOfRisk
+from .enums import (
+    ContractDirection,
+    InstrumentType,
+    LinkType,
+    LossSourceType,
+    NodeType,
+    PerilCode,
+    ProgrammeStatus,
+    StructureType,
+    ViewOfRisk,
+)
 
 
 class BreadcrumbStep(CamelModel):
@@ -115,6 +125,11 @@ class ProgrammeDeal(CamelModel):
     underwriter: str
     broker: str
     status: ProgrammeStatus
+    direction: ContractDirection = ContractDirection.ASSUMED
+    is_hedge: bool = False
+    structure: StructureType = StructureType.OCC_XL
+    instrument: InstrumentType = InstrumentType.UNL
+    portfolio_snapshot_date: str | None = None
     currency: str = "USD"
     sim_set_id: str
     uplift_set: UpliftSet
@@ -143,6 +158,8 @@ class PricingEconomics(CamelModel):
     contract_id: str
     contract_code: str
     contract_name: str
+    direction: str = "ASSUMED"
+    is_hedge: bool = False
     layer_node_id: str
     layer_code: str = ""
     layer_label: str
@@ -207,6 +224,8 @@ class LayerAllocationRow(CamelModel):
     layer_id: str
     layer_name: str
     cedent_name: str
+    direction: str = "ASSUMED"
+    is_hedge: bool = False
     limit: float
     premium: float
     signed_line: float
@@ -238,15 +257,21 @@ class PortfolioRollupResponse(CamelModel):
     currency: str
     num_trials: int
     compute_ms: float
+    include_hedges: bool = True
+    hedge_count: int = 0
     total_capital: float
     deployed_collateral: float
     gross_premium: float
+    hedge_premium: float = 0.0
+    net_premium: float = 0.0
     expected_rip: float
     expected_loss: float
+    expected_hedge_recovery: float = 0.0
     expected_profit: float
     mean_roc_pct: float
     no_event_roc_pct: float
     break_even_prob_pct: float
+    return_on_tvar_pct: float = 0.0
     portfolio_var_250: float
     portfolio_tvar_250: float
     cotvar_sum_check_diff: float
@@ -254,6 +279,37 @@ class PortfolioRollupResponse(CamelModel):
     quantiles: dict[str, float]
     guidelines: list[GuidelineCheck]
     layer_allocations: list[LayerAllocationRow]
+    manifest: RunManifest
+
+
+class HedgeAccretionSummary(CamelModel):
+    has_hedges: bool
+    hedge_layer_count: int
+    hedge_premium_m: float
+    expected_hedge_recovery_m: float
+    net_hedge_cost_m: float
+    delta_expected_profit_m: float
+    delta_mean_roc_pct: float
+    delta_no_event_roc_pct: float
+    delta_break_even_prob_pct: float
+    delta_var_250_m: float
+    delta_tvar_250_m: float
+    tvar_250_reduction_m: float
+    gross_return_on_tvar_pct: float
+    net_return_on_tvar_pct: float
+    delta_return_on_tvar_pct: float
+    cost_per_dollar_tvar_saved: float | None = None
+    guidelines_breached_without: int
+    guidelines_breached_with: int
+    is_accretive: bool
+    accretion_verdict: str
+    accretion_reason: str
+
+
+class PortfolioHedgeComparisonResponse(CamelModel):
+    with_hedges: PortfolioRollupResponse
+    without_hedges: PortfolioRollupResponse
+    accretion: HedgeAccretionSummary
     manifest: RunManifest
 
 

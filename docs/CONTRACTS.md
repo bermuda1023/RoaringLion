@@ -46,7 +46,7 @@ Columnar sorted by `(trial_id, day_of_year, event_id)`:
   - Dropping a CMS layer suggestion — by clicking it or dragging it onto the canvas — creates the layer only when that node is not already on the canvas, and ensures exactly one Pricing Output already joined by an edge. New nodes sit on the layer column (x of the existing layers, otherwise 600) with the Pricing Output on the same row. They are outside the blank-canvas drop zone (x 420–560 and y 80–260). If the 320 offset would fall inside that zone, the Pricing Output moves to x 600 on the same row. A layer already on the canvas is left where it is. A layer that already feeds a Pricing Output keeps that node and is not given a second one. The structuring palette shows that pair as a small tree (the layer, then its Pricing Output) before it is placed.
   - A Pricing Output accepts one incoming connection. Saving a second edge into a Pricing Output is rejected. Disconnect that edge the same way as any other edge, then connect the Pricing Output to a different graph layer. `contractId` and `layerNodeId` stay on the CMS layer that was bought. Rollup keeps that CMS layer's id, terms, signed line and premium, and uses the attached graph layer's losses. Premium and ROL are entered on the CMS layer. The graph layer shows deposit premium read-only through the pricing output attached to it. An unlinked Pricing Output can still be wired for a canvas preview and stays out of selective rollup.
   - A pricing output that already has a CMS identity and an incoming edge is bound. It is not offered again on a suggestion, click, drag, reconnect, or save, including on another programme. `GET /api/pricing-bindings` lists those bound CMS layers. The message is "This Pricing Output is already bound and cannot be used for another layer." Moving the feeder edge on the same graph does not change the CMS identity and is not a second bind.
-  - A `LOSS_SOURCE` carries `lossFiles` from the ELT/YELT uploads on its sim set (region, peril, optional vendor such as RMS, AIR or KCC). A `REGION_PERIL_FILTER` offers only the regions, perils and exact pairs on the upstream loss source. Saving a selection outside that set is rejected. Empty means unfiltered.
+  - A `LOSS_SOURCE` carries `lossFiles` from the ELT/YELT uploads on its sim set (region, peril, optional vendor such as RMS, AIR or KCC). An `INDUSTRY_INDEX_SOURCE` carries all `lossFiles` from the industry loss run so ILW programmes automatically expose every industry peril and region filter out of the box. A `PORTFOLIO_ROLLUP` carries `asOfDate` (point-in-time UNL portfolio snapshot date) and `lossFiles` from our own UNL portfolio so normal retro hedges automatically filter and price against our own UNL book at that point in time. A `REGION_PERIL_FILTER` offers only the regions, perils and exact pairs on the upstream source (`LOSS_SOURCE`, `INDUSTRY_INDEX_SOURCE`, or `PORTFOLIO_ROLLUP`). Saving a selection outside that set is rejected. Empty means unfiltered.
   - `GET /api/programmes/{id}/related` returns the renewal chain of that programme (same `chainId` or a `priorContractId` link), including the open programme. The structuring page uses that list. It does not load every programme.
   - `YELT_OUTPUT` param `view` (`ADJUSTED` | `UNADJUSTED`). `GET /api/programmes/{id}/nodes/{nodeId}/yelt` summarises the node's event losses, `/yelt/export?format=csv|parquet` downloads them, and `POST /yelt/save` registers them as a `DERIVED` simulation set.
 
@@ -54,10 +54,16 @@ Edge semantics:
 - `sign`: `+1` (solid additive) or `-1` (dashed subtractive / inuring / deductible offset)
 - `weight`: `float64` (default `1.0`)
 
-## 5. Programme & Contract Status (`ProgrammeStatus`)
+## 5. Programme & Contract Status (`ProgrammeStatus`) & Direction (`ContractDirection`)
 
 Aligned with ExposureEclipse (`BOUND` + dates in force = active portfolio):
 - `SUBMISSION`, `INDICATIVE`, `QUOTED`, `AUTHORIZED`, `FIRM_ORDER`, `BOUND`, `BOUND_FOR_OPS`, `DECLINED`, `NTU`, `EXPIRED`, `PLANNED`
+
+Contract direction (`ContractDirection` + `isHedge`):
+- `ASSUMED` (`isHedge: false`) — **Long** (we sell coverage; adds risk, limit/collateral, and premium to portfolio).
+- `EXTERNAL_RETRO` / `INTERNAL_CEDED` (`isHedge: true`) — **Hedge** (we buy coverage; pays hedge premium and reduces portfolio tail loss via recoveries).
+- ILWs (`structure: ILW`, `instrument: INDUSTRY_INDEX`) live as regular programmes in Contracts and participate in portfolio rollups with their direction sign.
+- Portfolio comparison endpoints: `GET /api/portfolio/rollup?includeHedges=true|false` and `GET /api/portfolio/comparison` return gross/long-only (`withoutHedges`), net-of-hedges (`withHedges`), and `accretion` metrics.
 
 The Portfolio Optimizer chooses its deals by status:
 - `includedStatuses` lists the statuses whose deals form the portfolio. Any status is allowed, including `DECLINED`, `NTU` and `EXPIRED`. It is a body field on `POST /api/optimizer/solve`, `/frontier` and `/explore`, and a repeated query parameter on `GET /api/optimizer/candidates` and `/layers`.

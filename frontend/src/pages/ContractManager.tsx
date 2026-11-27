@@ -18,12 +18,21 @@ interface LedgerColumn {
 
 const LAYER_NODE_TYPES = ['OCC_XL', 'AGG_XL', 'QUOTA_SHARE', 'AGG_QUOTA_SHARE', 'SURPLUS_SHARE', 'CASCADING_TOWER', 'ILW_OPTION'];
 const layerCount = (c: ContractFull) => c.graph?.nodes.filter((n) => LAYER_NODE_TYPES.includes(n.nodeType)).length ?? 0;
+const isHedgeContract = (c: { isHedge?: boolean; direction?: string }) =>
+  Boolean(c.isHedge) || c.direction === 'EXTERNAL_RETRO' || c.direction === 'INTERNAL_CEDED';
+const contractTypeLabel = (c: { structure?: string; instrument?: string; isHedge?: boolean; direction?: string }) => {
+  if (c.structure === 'ILW' || c.instrument === 'INDUSTRY_INDEX') return 'ILW';
+  if (isHedgeContract(c)) return 'Retro UNL';
+  return 'UNL';
+};
 
 // Numeric filters are entered in the units shown: percentages as 0–100, money in $M.
 const LEDGER_COLUMNS: LedgerColumn[] = [
   { key: 'code', label: 'Code', title: 'Unique code', kind: 'text', get: (c) => c.profile?.uniqueCode || c.programmeId },
   { key: 'cedent', label: 'Cedent', kind: 'text', get: (c) => c.cedentName },
   { key: 'programme', label: 'Programme', kind: 'text', get: (c) => c.programmeName },
+  { key: 'dir', label: 'Dir', title: 'Long (sell / assumed) vs Hedge (buy / ceded)', kind: 'select', get: (c) => (isHedgeContract(c) ? 'Hedge' : 'Long') },
+  { key: 'type', label: 'Type', title: 'Programme basis (UNL, ILW, Retro UNL)', kind: 'select', get: (c) => contractTypeLabel(c) },
   { key: 'period', label: 'Per', title: 'Renewal period', kind: 'text', get: (c) => c.renewalPeriod },
   { key: 'uw', label: 'UW', title: 'Underwriter and office', kind: 'text', get: (c) => `${c.underwriter} (${c.office})` },
   { key: 'status', label: 'Status', kind: 'select', get: (c) => String(c.status) },
@@ -146,6 +155,10 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   const [showNew, setShowNew] = useState(false);
   const [cedentName, setCedentName] = useState('Coastal Shield Ins');
   const [programmeName, setProgrammeName] = useState('FL Peak Cat XL 2027');
+  const [newDirection, setNewDirection] = useState<'ASSUMED' | 'EXTERNAL_RETRO'>('ASSUMED');
+  const [newDealBasis, setNewDealBasis] = useState<'UNL' | 'ILW'>('UNL');
+  const [newIlwTriggerType, setNewIlwTriggerType] = useState<'BINARY' | 'PRO_RATA' | 'AGGREGATE' | 'SECOND_EVENT'>('BINARY');
+  const [newSnapshotDate, setNewSnapshotDate] = useState('2027-01-01');
   const [newLayers, setNewLayers] = useState<NewDealLayer[]>([
     { layerCode: 'L1', name: '', layerType: 'OCC_XL', limit: 25, attachment: 90, rolPct: 21, brokeragePct: 10, writtenPct: 15, signedPct: 10, rarcPct: '' },
   ]);
@@ -155,6 +168,9 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   const [activeId, setActiveId] = useState<string>('prog-farmers-us-27');
   const [dossierTab, setDossierTab] = useState<DossierTab>('profile');
   const [draftProfile, setDraftProfile] = useState<ProgrammeProfile | null>(null);
+  const [draftDirection, setDraftDirection] = useState<'ASSUMED' | 'EXTERNAL_RETRO' | 'INTERNAL_CEDED'>('ASSUMED');
+  const [draftStructure, setDraftStructure] = useState<string>('OCC_XL');
+  const [draftSnapshotDate, setDraftSnapshotDate] = useState<string>('2027-01-01');
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
   // Underwriting notes composer
@@ -169,7 +185,11 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
     queryFn: () => api.listContracts(),
   });
 
-  const statusOptions = Array.from(new Set((contractsQ.data ?? []).map((c) => String(c.status)))).sort();
+  const selectOptionsByCol: Record<string, string[]> = {
+    status: Array.from(new Set((contractsQ.data ?? []).map((c) => String(c.status)))).sort(),
+    dir: ['Long', 'Hedge'],
+    type: ['UNL', 'ILW', 'Retro UNL'],
+  };
   const activeFilterCount = Object.values(colFilters).filter((v) => v.trim()).length;
   const visibleContracts = (() => {
     const q = search.trim().toLowerCase();
@@ -209,6 +229,12 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   useEffect(() => {
     if (dossierQ.data?.contract?.profile) {
       setDraftProfile(dossierQ.data.contract.profile);
+      const rawDir = String(dossierQ.data.contract.direction || 'ASSUMED');
+      setDraftDirection(
+        rawDir === 'INTERNAL_CEDED' || rawDir === 'EXTERNAL_RETRO' ? rawDir : 'ASSUMED',
+      );
+      setDraftStructure(String(dossierQ.data.contract.structure || 'OCC_XL'));
+      setDraftSnapshotDate(String(dossierQ.data.contract.portfolioSnapshotDate || dossierQ.data.contract.inceptionDate || '2027-01-01'));
       setSavedMsg(null);
     }
   }, [dossierQ.data?.contract?.programmeId, dossierQ.data?.contract?.version]);
@@ -245,8 +271,11 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
     setNewLayers((ls) => ls.map((l, j) => (j === i ? { ...l, ...patch } : l)));
 
   const createMut = useMutation({
-    mutationFn: () =>
-      api.createContract({
+    mutationFn: () => {
+      const isIlw = newDealBasis === 'ILW';
+      const isHedge = newDirection === 'EXTERNAL_RETRO';
+      const rps = regionPeril === 'ALL' ? [] : [regionPeril];
+      return api.createContract({
         cedentName,
         programmeName,
         treatyYear: 2027,
@@ -255,34 +284,51 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
         underwriter: 'Lead Underwriter',
         broker: 'Broker A',
         status: 'QUOTED',
-        direction: 'ASSUMED',
-        structure: newLayers[0].layerType,
+        direction: newDirection,
+        isHedge,
+        structure: isIlw ? 'ILW' : newLayers[0].layerType,
+        instrument: isIlw ? 'INDUSTRY_INDEX' : 'UNL',
+        portfolioSnapshotDate: !isIlw && isHedge ? newSnapshotDate || '2027-01-01' : null,
         limit: newDealTotals.limit,
         attachment: newDealTotals.attachment,
         depositPremium: newDealTotals.premium,
         rol: newDealTotals.limit ? newDealTotals.premium / newDealTotals.limit : 0,
-        collateralRequired: newDealTotals.limit,
+        collateralRequired: isHedge ? 0 : newDealTotals.limit,
         layers: newLayers.map((l) => ({
           layerCode: l.layerCode.trim() || undefined,
           name: l.name.trim() || undefined,
-          layerType: l.layerType,
+          layerType: isIlw ? 'ILW_OPTION' : l.layerType,
           limit: l.limit,
           attachment: l.attachment,
           depositPremium: Number(((l.limit * l.rolPct) / 100).toFixed(4)),
+          triggerType: isIlw ? newIlwTriggerType : undefined,
           brokeragePct: l.brokeragePct / 100,
           writtenLine: l.writtenPct / 100,
           signedLine: l.signedPct / 100,
           rarcPct: l.rarcPct.trim() === '' ? undefined : Number(l.rarcPct),
         })),
-        regionPerils: [regionPeril],
-        perils: [regionPeril.endsWith('EQ') ? 'EQ' : 'WS'],
-      }),
+        regionPerils: rps,
+        perils: rps.length ? [rps[0].endsWith('EQ') ? 'EQ' : 'WS'] : ['WS', 'EQ'],
+        ilwSpec: isIlw
+          ? {
+              industrySimSetId: 'ind-synth-cat-v1-100k',
+              regionPerils: rps.length ? rps : ['ALL'],
+              triggerType: newIlwTriggerType,
+              triggerBn: newLayers[0].attachment,
+              limitM: newLayers[0].limit,
+              rol: newLayers[0].rolPct / 100,
+              direction: newDirection,
+            }
+          : null,
+      });
+    },
     onSuccess: (created) => {
       setShowNew(false);
       setActiveId(created.programmeId);
       qc.invalidateQueries({ queryKey: ['contracts'] });
       qc.invalidateQueries({ queryKey: ['programmes'] });
       qc.invalidateQueries({ queryKey: ['graphTemplates'] });
+      qc.invalidateQueries({ queryKey: ['portfolio'] });
     },
   });
 
@@ -297,10 +343,24 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   });
 
   const saveProfileMut = useMutation({
-    mutationFn: () => api.updateContract(activeId, { profile: draftProfile }),
+    mutationFn: () => {
+      const isIlw = draftStructure === 'ILW';
+      const isHedge = draftDirection === 'EXTERNAL_RETRO' || draftDirection === 'INTERNAL_CEDED';
+      return api.updateContract(activeId, {
+        direction: draftDirection,
+        isHedge,
+        structure: draftStructure,
+        instrument: isIlw ? 'INDUSTRY_INDEX' : 'UNL',
+        portfolioSnapshotDate: !isIlw && isHedge ? draftSnapshotDate || '2027-01-01' : null,
+        profile: draftProfile,
+      });
+    },
     onSuccess: () => {
-      setSavedMsg('Programme profile saved & versioned.');
+      setSavedMsg('Programme profile, direction & DAG loss source saved.');
       qc.invalidateQueries({ queryKey: ['contracts'] });
+      qc.invalidateQueries({ queryKey: ['programmes'] });
+      qc.invalidateQueries({ queryKey: ['portfolio'] });
+      qc.invalidateQueries({ queryKey: ['dagEval'] });
       qc.invalidateQueries({ queryKey: ['contractDossier', activeId] });
     },
   });
@@ -364,7 +424,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
     d?.notes.filter((n) => (noteScope === 'cedent' ? true : n.programmeId === activeId)) ?? [];
 
   const termAdjNodes = (d?.pricingLink.adjustedNodes ?? []).filter((n) =>
-    ['OCC_XL', 'AGG_XL', 'QUOTA_SHARE', 'AGG_QUOTA_SHARE', 'SURPLUS_SHARE', 'CASCADING_TOWER'].includes(n.nodeType),
+    ['OCC_XL', 'AGG_XL', 'QUOTA_SHARE', 'AGG_QUOTA_SHARE', 'SURPLUS_SHARE', 'CASCADING_TOWER', 'ILW_OPTION'].includes(n.nodeType),
   );
   const unadjById = Object.fromEntries((d?.pricingLink.unadjustedNodes ?? []).map((n) => [n.nodeId, n]));
   const totalAdjEl = termAdjNodes.reduce((s, n) => s + Number(n.el ?? 0), 0);
@@ -421,14 +481,70 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               border: '1px solid var(--border-strong)',
             }}
           >
-            <input value={cedentName} onChange={(e) => setCedentName(e.target.value)} placeholder="Cedent" />
+            <input value={cedentName} onChange={(e) => setCedentName(e.target.value)} placeholder="Cedent / Counterparty" />
             <input
               value={programmeName}
               onChange={(e) => setProgrammeName(e.target.value)}
               placeholder="Programme Name"
               style={{ width: 180 }}
             />
-            <select value={regionPeril} onChange={(e) => setRegionPeril(e.target.value)}>
+            <select
+              aria-label="Deal direction"
+              value={newDirection}
+              onChange={(e) => {
+                const nextDir = e.target.value as 'ASSUMED' | 'EXTERNAL_RETRO';
+                setNewDirection(nextDir);
+                if (nextDir === 'EXTERNAL_RETRO' && newDealBasis === 'UNL') {
+                  setRegionPeril('ALL');
+                }
+              }}
+            >
+              <option value="ASSUMED">Long (Sell / Assumed)</option>
+              <option value="EXTERNAL_RETRO">Hedge (Buy / Ceded)</option>
+            </select>
+            <select
+              aria-label="Programme basis"
+              value={newDealBasis}
+              onChange={(e) => {
+                const nextBasis = e.target.value as 'UNL' | 'ILW';
+                setNewDealBasis(nextBasis);
+                if (nextBasis === 'ILW') {
+                  setNewLayers((ls) =>
+                    ls.map((l, idx) => (idx === 0 ? { ...l, attachment: 40, limit: 25, rolPct: 16, brokeragePct: 0, writtenPct: 100, signedPct: 100 } : l)),
+                  );
+                }
+              }}
+            >
+              <option value="UNL">Treaty (UNL)</option>
+              <option value="ILW">ILW (Industry Index)</option>
+            </select>
+            {newDealBasis === 'ILW' && (
+              <select
+                aria-label="ILW trigger type"
+                value={newIlwTriggerType}
+                onChange={(e) =>
+                  setNewIlwTriggerType(e.target.value as 'BINARY' | 'PRO_RATA' | 'AGGREGATE' | 'SECOND_EVENT')
+                }
+              >
+                <option value="BINARY">Binary Trigger</option>
+                <option value="PRO_RATA">Pro-Rata Trigger</option>
+                <option value="AGGREGATE">Aggregate Trigger</option>
+                <option value="SECOND_EVENT">Second Event</option>
+              </select>
+            )}
+            {newDealBasis === 'UNL' && newDirection === 'EXTERNAL_RETRO' && (
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--text-muted)' }}>
+                UNL Snapshot As-Of
+                <input
+                  type="date"
+                  value={newSnapshotDate}
+                  onChange={(e) => setNewSnapshotDate(e.target.value)}
+                  style={{ width: 136 }}
+                />
+              </label>
+            )}
+            <select aria-label="Initial region peril filter" value={regionPeril} onChange={(e) => setRegionPeril(e.target.value)}>
+              <option value="ALL">All Zones &amp; Perils (Unfiltered)</option>
               <option value="US-FL-WS">US-FL-WS</option>
               <option value="US-TX-WS">US-TX-WS</option>
               <option value="US-SE-WS">US-SE-WS</option>
@@ -436,6 +552,13 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               <option value="JP-KANTO-EQ">JP-KANTO-EQ</option>
               <option value="EU-DE-WS">EU-DE-WS</option>
             </select>
+            <div style={{ width: '100%', fontSize: 11, color: 'var(--teal)' }}>
+              {newDealBasis === 'ILW'
+                ? 'DAG Auto-Wire: connects directly to the Industry Loss Run with all industry perils & regions available on the filter.'
+                : newDirection === 'EXTERNAL_RETRO'
+                  ? `DAG Auto-Wire: connects directly to our own UNL Portfolio Snapshot as of ${newSnapshotDate || '2027-01-01'}.`
+                  : 'DAG Auto-Wire: connects to standard cedent UNL Loss Source.'}
+            </div>
             <div className="layer-rows">
               {newLayers.map((l, i) => (
                 <div className="layer-row" key={i}>
@@ -453,24 +576,30 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     Layer {i + 1}
                     <input
                       value={l.name}
-                      placeholder={`${i + 1}${['st', 'nd', 'rd'][i] ?? 'th'} ${l.layerType === 'AGG_XL' ? 'Agg' : 'Cat'} XL`}
+                      placeholder={
+                        newDealBasis === 'ILW'
+                          ? `${i + 1}${['st', 'nd', 'rd'][i] ?? 'th'} ILW`
+                          : `${i + 1}${['st', 'nd', 'rd'][i] ?? 'th'} ${l.layerType === 'AGG_XL' ? 'Agg' : 'Cat'} XL`
+                      }
                       onChange={(e) => setNewLayer(i, { name: e.target.value })}
                       style={{ width: 150 }}
                     />
                   </label>
-                  <label>
-                    Type
-                    <select value={l.layerType} onChange={(e) => setNewLayer(i, { layerType: e.target.value as NewDealLayer['layerType'] })}>
-                      <option value="OCC_XL">Occurrence XL</option>
-                      <option value="AGG_XL">Aggregate XL</option>
-                    </select>
-                  </label>
+                  {newDealBasis !== 'ILW' && (
+                    <label>
+                      Type
+                      <select value={l.layerType} onChange={(e) => setNewLayer(i, { layerType: e.target.value as NewDealLayer['layerType'] })}>
+                        <option value="OCC_XL">Occurrence XL</option>
+                        <option value="AGG_XL">Aggregate XL</option>
+                      </select>
+                    </label>
+                  )}
                   <label>
                     Limit ($M)
                     <input type="number" value={l.limit} onChange={(e) => setNewLayer(i, { limit: Number(e.target.value) })} style={{ width: 72 }} />
                   </label>
                   <label>
-                    Xs ($M)
+                    {newDealBasis === 'ILW' ? 'Trigger ($B)' : 'Xs ($M)'}
                     <input type="number" value={l.attachment} onChange={(e) => setNewLayer(i, { attachment: Number(e.target.value) })} style={{ width: 72 }} />
                   </label>
                   <label>
@@ -558,13 +687,14 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     {col.kind === 'select' ? (
                       <select
                         className="col-filter"
+                        aria-label={`Filter ${col.label}`}
                         value={colFilters[col.key] ?? ''}
                         onChange={(e) => setColFilters((f) => ({ ...f, [col.key]: e.target.value }))}
                       >
                         <option value="">All</option>
-                        {statusOptions.map((st) => (
-                          <option key={st} value={st}>
-                            {st}
+                        {(selectOptionsByCol[col.key] ?? []).map((opt) => (
+                          <option key={opt} value={opt}>
+                            {opt}
                           </option>
                         ))}
                       </select>
@@ -594,6 +724,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               {visibleContracts.map((c) => {
                 const isSelected = c.programmeId === activeId;
                 const rarc = c.profile?.rarcTotalPct ?? 0;
+                const hedge = isHedgeContract(c);
+                const typeLbl = contractTypeLabel(c);
                 return (
                   <tr
                     key={c.programmeId}
@@ -606,6 +738,16 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </td>
                     <td style={{ fontWeight: 600 }}>{c.cedentName}</td>
                     <td>{c.programmeName}</td>
+                    <td>
+                      <span className={`badge ${hedge ? 'badge-hedge' : 'badge-long'}`}>
+                        {hedge ? 'Hedge' : 'Long'}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={`badge ${typeLbl === 'ILW' ? 'badge-ilw' : ''}`}>
+                        {typeLbl}
+                      </span>
+                    </td>
                     <td>{c.renewalPeriod}</td>
                     <td style={{ color: 'var(--text-muted)' }}>
                       {c.underwriter} ({c.office})
@@ -660,6 +802,12 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               </span>
               <span>
                 {d.contract.cedentName} — {d.contract.programmeName}
+              </span>
+              <span className={`badge ${isHedgeContract(d.contract) ? 'badge-hedge' : 'badge-long'}`}>
+                {isHedgeContract(d.contract) ? 'Hedge' : 'Long'}
+              </span>
+              <span className={`badge ${contractTypeLabel(d.contract) === 'ILW' ? 'badge-ilw' : ''}`}>
+                {contractTypeLabel(d.contract)}
               </span>
               <span className={`badge status-${String(d.contract.status).toLowerCase()}`}>{d.contract.status}</span>
               <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
@@ -777,6 +925,44 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     Programme Identification, Counterparty &amp; Team
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(145px, 1fr))', gap: 8 }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      Direction
+                      <select
+                        value={draftDirection}
+                        onChange={(e) =>
+                          setDraftDirection(e.target.value as 'ASSUMED' | 'EXTERNAL_RETRO' | 'INTERNAL_CEDED')
+                        }
+                        style={{ width: '100%', marginTop: 3 }}
+                      >
+                        <option value="ASSUMED">Long (Sell / Assumed)</option>
+                        <option value="EXTERNAL_RETRO">Hedge — External Retro (Buy)</option>
+                        <option value="INTERNAL_CEDED">Hedge — Internal Ceded</option>
+                      </select>
+                    </label>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      Structure / Basis
+                      <select
+                        value={draftStructure}
+                        onChange={(e) => setDraftStructure(e.target.value)}
+                        style={{ width: '100%', marginTop: 3 }}
+                      >
+                        <option value="OCC_XL">Occurrence XL (UNL)</option>
+                        <option value="AGG_XL">Aggregate XL (UNL)</option>
+                        <option value="ILW">ILW (Industry Loss Index)</option>
+                        <option value="QUOTA_SHARE">Quota Share (UNL)</option>
+                      </select>
+                    </label>
+                    {(draftDirection === 'EXTERNAL_RETRO' || draftDirection === 'INTERNAL_CEDED') && draftStructure !== 'ILW' && (
+                      <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        UNL Snapshot As-Of
+                        <input
+                          type="date"
+                          value={draftSnapshotDate}
+                          onChange={(e) => setDraftSnapshotDate(e.target.value)}
+                          style={{ width: '100%', marginTop: 3 }}
+                        />
+                      </label>
+                    )}
                     <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                       Unique Code
                       <input

@@ -51,7 +51,7 @@ from app.engine.pricing_periods_fx import (
 from app.engine.slice_runner import evaluate_portfolio_rollup, evaluate_programme_dag
 from app.engine.synthetic import SyntheticLossRequest, generate_synthetic_freq_sev
 from app.models.domain import DeterministicRunResponse, ProgrammeDeal
-from app.models.enums import NodeType, ProgrammeStatus, StructureType, ViewOfRisk
+from app.models.enums import NodeType, ProgrammeStatus, StructureType, ViewOfRisk, is_hedge_direction
 from app.models.phase1 import (
     ContractFull,
     ContractNoteCreate,
@@ -73,6 +73,8 @@ from app.services.node_outputs import resolve_pricing_links
 from app.services.exports import build_portfolio_csv, build_portfolio_tearsheet_html, build_programme_tearsheet_html
 from app.services.fund_ops import CashEntry, EventReserve, FundOpsStore, InvestorSeries, MarketMark, SlipIntakeDraft, check_permission
 from app.services.lineage import LineageRegistry
+from app.services.node_outputs import resolve_pricing_links
+from app.services.portfolio_snapshot import compute_unl_portfolio_events, select_unl_snapshot_contracts
 from app.services.sim_sets import SimSetStore
 
 
@@ -114,8 +116,34 @@ def create_extended_router(
         return [
             contract_to_programme_deal(c)
             for c in contract_store.list_contracts(status=ProgrammeStatus.BOUND)
-            if c.structure != StructureType.ILW
+            if not is_hedge_direction(c.direction) and c.structure != StructureType.ILW
         ]
+
+    def _bound_all_deals():
+        return [
+            contract_to_programme_deal(c)
+            for c in contract_store.list_contracts(status=ProgrammeStatus.BOUND)
+        ]
+
+    def _make_unl_resolver(*, exclude_programme_id: str | None = None):
+        cache: dict[tuple[str, str], tuple] = {}
+
+        def _resolve(as_of_date: str | None, view: ViewOfRisk):
+            key = ((as_of_date or "").strip(), view.value)
+            if key not in cache:
+                all_c = contract_store.list_contracts()
+                all_d = {c.programme_id: contract_to_programme_deal(c) for c in all_c}
+                snap_c = select_unl_snapshot_contracts(all_c, as_of_date=as_of_date, exclude_programme_id=exclude_programme_id)
+                cache[key] = compute_unl_portfolio_events(
+                    [all_d[c.programme_id] for c in snap_c],
+                    sim_store.get_yelt(base_sim_id),
+                    view,
+                    all_deals=all_d,
+                    as_of_date=as_of_date,
+                )
+            return cache[key]
+
+        return _resolve
 
     def _optimizer_universe(
         mode: OptimizerMode,
@@ -363,8 +391,8 @@ def create_extended_router(
             limit=limit,
             offset=offset,
             programme_ids=[d.programme_id for d in deals],
-            layers=[l for l in layers if l.direction != "EXTERNAL_RETRO"],
-            retro_candidate=next((l for l in layers if l.direction == "EXTERNAL_RETRO"), None),
+            layers=[l for l in layers if l.layer_key != "cand-retro-ilw-fl" and l.direction == "ASSUMED"],
+            retro_candidate=next((l for l in layers if l.layer_key == "cand-retro-ilw-fl"), None),
         )
 
     @router.post("/api/optimizer/explore", response_model=FrontierExplorerResponse)
@@ -497,15 +525,21 @@ def create_extended_router(
     def export_portfolio_csv(
         view: ViewOfRisk = Query(default=ViewOfRisk.ADJUSTED),
         total_capital: float = Query(default=160.0, alias="totalCapital", gt=0),
+        include_hedges: bool = Query(default=True, alias="includeHedges"),
     ) -> PlainTextResponse:
+        all_deals = {c.programme_id: contract_to_programme_deal(c) for c in contract_store.list_contracts()}
         rollup = evaluate_portfolio_rollup(
             portfolio_id="fund-main-j27",
             portfolio_name="RoaringLion Collateralized Cat Fund — J27",
-            programmes=_bound_deals(),
+            programmes=_bound_all_deals(),
             yelt=sim_store.get_yelt(base_sim_id),
             view=view,
             total_capital=total_capital,
             lineage=lineage,
+            all_programmes=all_deals,
+            industry_yelt=sim_store.get_yelt(ind_sim_id),
+            portfolio_unl_resolver=_make_unl_resolver(),
+            include_hedges=include_hedges,
         )
         csv_body = build_portfolio_csv(rollup)
         return PlainTextResponse(
@@ -518,15 +552,21 @@ def create_extended_router(
     def export_portfolio_tearsheet(
         view: ViewOfRisk = Query(default=ViewOfRisk.ADJUSTED),
         total_capital: float = Query(default=160.0, alias="totalCapital", gt=0),
+        include_hedges: bool = Query(default=True, alias="includeHedges"),
     ) -> HTMLResponse:
+        all_deals = {c.programme_id: contract_to_programme_deal(c) for c in contract_store.list_contracts()}
         rollup = evaluate_portfolio_rollup(
             portfolio_id="fund-main-j27",
             portfolio_name="RoaringLion Collateralized Cat Fund — J27",
-            programmes=_bound_deals(),
+            programmes=_bound_all_deals(),
             yelt=sim_store.get_yelt(base_sim_id),
             view=view,
             total_capital=total_capital,
             lineage=lineage,
+            all_programmes=all_deals,
+            industry_yelt=sim_store.get_yelt(ind_sim_id),
+            portfolio_unl_resolver=_make_unl_resolver(),
+            include_hedges=include_hedges,
         )
         return HTMLResponse(content=build_portfolio_tearsheet_html(rollup))
 
@@ -536,11 +576,14 @@ def create_extended_router(
         if not c:
             raise HTTPException(status_code=404, detail="Programme not found")
         prog = contract_to_programme_deal(c)
+        links = resolve_pricing_links(prog.graph, c, contract_store.get_contract)
         dag_eval, _ = evaluate_programme_dag(
             prog,
             sim_store.get_yelt(prog.sim_set_id),
             lineage,
             industry_yelt=sim_store.get_yelt(ind_sim_id),
+            pricing_links=links,
+            portfolio_unl_resolver=_make_unl_resolver(exclude_programme_id=c.programme_id),
         )
         return HTMLResponse(content=build_programme_tearsheet_html(prog, dag_eval))
 
@@ -579,6 +622,7 @@ def create_extended_router(
             LineageRegistry(persist=False),
             industry_yelt=sim_store.get_yelt(ind_sim_id),
             pricing_links=pricing_links,
+            portfolio_unl_resolver=_make_unl_resolver(exclude_programme_id=c.programme_id),
         )
         adj_nodes = dag_eval.views.get("ADJUSTED", [])
         programme_loss_ratio = compute_programme_loss_ratio(

@@ -27,13 +27,18 @@ def build_portfolio_csv(rollup: PortfolioRollupResponse) -> str:
     w.writerow(["Metric", "Value"])
     w.writerow(["Total Capital ($M)", rollup.total_capital])
     w.writerow(["Deployed Collateral ($M)", rollup.deployed_collateral])
+    w.writerow(["Include Hedges", rollup.include_hedges])
     w.writerow(["Gross Premium ($M)", rollup.gross_premium])
+    w.writerow(["Hedge Premium ($M)", rollup.hedge_premium])
+    w.writerow(["Net Premium ($M)", rollup.net_premium])
     w.writerow(["Expected RIP ($M)", rollup.expected_rip])
     w.writerow(["Expected Loss ($M)", rollup.expected_loss])
+    w.writerow(["Expected Hedge Recovery ($M)", rollup.expected_hedge_recovery])
     w.writerow(["Expected Profit ($M)", rollup.expected_profit])
     w.writerow(["Mean ROC (%)", rollup.mean_roc_pct])
     w.writerow(["No-Event ROC (%)", rollup.no_event_roc_pct])
     w.writerow(["Break-Even Prob (%)", rollup.break_even_prob_pct])
+    w.writerow(["Return on 1-in-250 TVaR (%)", rollup.return_on_tvar_pct])
     w.writerow(["1-in-250 VaR ($M)", rollup.portfolio_var_250])
     w.writerow(["1-in-250 TVaR ($M)", rollup.portfolio_tvar_250])
     w.writerow(["Euler Co-TVaR Conservation Diff", rollup.cotvar_sum_check_diff])
@@ -50,6 +55,7 @@ def build_portfolio_csv(rollup: PortfolioRollupResponse) -> str:
         "Programme ID",
         "Cedent",
         "Layer",
+        "Direction",
         "Limit ($M)",
         "Premium ($M)",
         "Signed Line",
@@ -65,6 +71,7 @@ def build_portfolio_csv(rollup: PortfolioRollupResponse) -> str:
             r.programme_id,
             r.cedent_name,
             r.layer_name,
+            "Hedge" if r.is_hedge else "Long",
             r.limit,
             r.premium,
             r.signed_line,
@@ -95,6 +102,7 @@ def build_portfolio_tearsheet_html(rollup: PortfolioRollupResponse) -> str:
     )
     alloc_rows = "".join(
         f"<tr><td>{esc(r.cedent_name)}</td><td>{esc(r.layer_name)}</td>"
+        f"<td>{'Hedge' if r.is_hedge else 'Long'}</td>"
         f"<td class='num'>${r.limit:.1f}m</td><td class='num'>${r.premium:.2f}m</td>"
         f"<td class='num'>${r.el:.2f}m</td><td class='num'>${r.standalone_tvar_250:.2f}m</td>"
         f"<td class='num'><b>${r.euler_cotvar_250:.2f}m</b></td>"
@@ -136,8 +144,8 @@ def build_portfolio_tearsheet_html(rollup: PortfolioRollupResponse) -> str:
 </div>
 <div class="kpis">
   <div class="kpi"><div class="lbl">Mean ROC</div><div class="val">{rollup.mean_roc_pct:.2f}%</div></div>
-  <div class="kpi"><div class="lbl">No-Event ROC</div><div class="val">{rollup.no_event_roc_pct:.2f}%</div></div>
-  <div class="kpi"><div class="lbl">Break-Even Prob</div><div class="val">{rollup.break_even_prob_pct:.1f}%</div></div>
+  <div class="kpi"><div class="lbl">Return on 1-in-250 TVaR</div><div class="val">{rollup.return_on_tvar_pct:.2f}%</div></div>
+  <div class="kpi"><div class="lbl">Net / Hedge Prem</div><div class="val">${rollup.net_premium:.2f}m / ${rollup.hedge_premium:.2f}m</div></div>
   <div class="kpi"><div class="lbl">Expected Profit</div><div class="val">${rollup.expected_profit:.2f}m</div></div>
   <div class="kpi"><div class="lbl">1-in-250 TVaR</div><div class="val">${rollup.portfolio_tvar_250:.2f}m</div></div>
   <div class="kpi"><div class="lbl">Total Capital</div><div class="val">${rollup.total_capital:.0f}m</div></div>
@@ -145,7 +153,7 @@ def build_portfolio_tearsheet_html(rollup: PortfolioRollupResponse) -> str:
 <h2>Risk Appetite Guidelines</h2>
 <table><thead><tr><th>Percentile</th><th class="num">Threshold</th><th class="num">Actual</th><th class="num">Status</th></tr></thead><tbody>{guideline_rows}</tbody></table>
 <h2>Euler Co-TVaR Marginal Capital Allocation (1-in-250 / 99.6th%)</h2>
-<table><thead><tr><th>Cedent</th><th>Layer</th><th class="num">Limit</th><th class="num">Premium</th><th class="num">EL</th><th class="num">Standalone TVaR</th><th class="num">Euler Co-TVaR</th><th class="num">Div Credit</th><th class="num">Marginal ROC</th></tr></thead><tbody>{alloc_rows}</tbody></table>
+<table><thead><tr><th>Cedent</th><th>Layer</th><th>Dir</th><th class="num">Limit</th><th class="num">Premium</th><th class="num">EL</th><th class="num">Standalone TVaR</th><th class="num">Euler Co-TVaR</th><th class="num">Div Credit</th><th class="num">Marginal ROC</th></tr></thead><tbody>{alloc_rows}</tbody></table>
 <div class="crumb"><b>Breadcrumb Provenance:</b> {crumbs}</div>
 </body></html>"""
 
@@ -186,7 +194,7 @@ def build_programme_tearsheet_html(programme: ProgrammeDeal, dag_eval: DagEvalRe
 <div class="no-print"><button onclick="window.print()">Print / Save as PDF</button></div>
 <div class="hdr">
   <div><h1>ROARING LION — Underwriting Deal Tear-Sheet</h1>
-  <div class="meta">{esc(programme.cedent_name)} — {esc(programme.programme_name)} ({esc(programme.renewal_period)}) · Status: <b>{esc(programme.status.value)}</b> · UW: {esc(programme.underwriter)} · Broker: {esc(programme.broker)}</div></div>
+  <div class="meta">{esc(programme.cedent_name)} — {esc(programme.programme_name)} ({esc(programme.renewal_period)}) · Direction: <b>{'Hedge (Ceded)' if programme.is_hedge else 'Long (Assumed)'}</b> · Status: <b>{esc(programme.status.value)}</b> · UW: {esc(programme.underwriter)} · Broker: {esc(programme.broker)}</div></div>
   <div class="meta">Graph v{dag_eval.graph_version} · Manifest: <code>{esc(dag_eval.manifest.manifest_id)}</code></div>
 </div>
 <table><thead><tr><th>Node</th><th>Type</th><th class="num">Unadj EL</th><th class="num">Adj EL</th><th class="num">Uplift Δ</th><th class="num">Adj SD</th><th class="num">Exp RIP</th><th class="num">1-in-250 TVaR</th><th class="num">Adj ELR</th></tr></thead><tbody>{"".join(rows)}</tbody></table>

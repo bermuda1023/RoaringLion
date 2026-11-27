@@ -2,7 +2,17 @@ import * as echarts from 'echarts';
 import { useEffect, useRef } from 'react';
 import type { PortfolioRollupResponse } from '../types/contracts';
 
-export function RocCdfChart({ data }: { data: PortfolioRollupResponse }) {
+export function RocCdfChart({
+  data,
+  comparisonData,
+  primaryLabel,
+  comparisonLabel,
+}: {
+  data: PortfolioRollupResponse;
+  comparisonData?: PortfolioRollupResponse | null;
+  primaryLabel?: string;
+  comparisonLabel?: string;
+}) {
   const ref = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -24,8 +34,38 @@ export function RocCdfChart({ data }: { data: PortfolioRollupResponse }) {
       },
     }));
 
+    const series: echarts.SeriesOption[] = [
+      {
+        name: primaryLabel ?? `Net ROC (${data.view})`,
+        type: 'line',
+        smooth: false,
+        showSymbol: false,
+        lineStyle: { color: '#e8a84a', width: 2.5 },
+        data: data.cdfCurve.map((p) => [p.cumulativeProb, p.rocPct]),
+        markLine: { silent: true, symbol: 'none', data: markLines },
+      },
+    ];
+
+    if (comparisonData) {
+      series.push({
+        name: comparisonLabel ?? `Without Hedges (${comparisonData.view})`,
+        type: 'line',
+        smooth: false,
+        showSymbol: false,
+        lineStyle: { color: '#6e9cd4', width: 2, type: 'dashed' },
+        data: comparisonData.cdfCurve.map((p) => [p.cumulativeProb, p.rocPct]),
+      });
+    }
+
     chart.setOption({
       backgroundColor: 'transparent',
+      legend: comparisonData
+        ? {
+            top: 0,
+            right: 8,
+            textStyle: { color: '#9a9082', fontSize: 11 },
+          }
+        : undefined,
       tooltip: {
         trigger: 'axis',
         confine: true,
@@ -33,13 +73,19 @@ export function RocCdfChart({ data }: { data: PortfolioRollupResponse }) {
         borderColor: '#3a3229',
         textStyle: { color: '#f7f1e6', fontSize: 12 },
         formatter: (params: unknown) => {
-          const arr = params as { data: [number, number] }[];
-          const pt = arr?.[0]?.data;
-          if (!pt) return '';
-          return `Cumulative Prob: <b>${pt[0].toFixed(2)}%</b><br/>Return on Capital: <b>${pt[1].toFixed(2)}%</b>`;
+          const arr = params as { seriesName: string; data: [number, number] }[];
+          const first = arr?.[0]?.data;
+          if (!first) return '';
+          const lines = [`Cumulative Prob: <b>${first[0].toFixed(2)}%</b>`];
+          for (const item of arr) {
+            if (item?.data) {
+              lines.push(`${item.seriesName}: <b>${item.data[1].toFixed(2)}%</b>`);
+            }
+          }
+          return lines.join('<br/>');
         },
       },
-      grid: { left: isNarrow ? 50 : 55, right: isNarrow ? 34 : 30, top: 28, bottom: 45 },
+      grid: { left: isNarrow ? 50 : 55, right: isNarrow ? 34 : 30, top: comparisonData ? 34 : 28, bottom: 45 },
       xAxis: {
         type: 'value',
         min: 0,
@@ -56,17 +102,7 @@ export function RocCdfChart({ data }: { data: PortfolioRollupResponse }) {
         axisLabel: { color: '#9a9082', formatter: '{value}%' },
         splitLine: { lineStyle: { color: '#2a241e' } },
       },
-      series: [
-        {
-          name: `Net ROC (${data.view})`,
-          type: 'line',
-          smooth: false,
-          showSymbol: false,
-          lineStyle: { color: '#e8a84a', width: 2.5 },
-          data: data.cdfCurve.map((p) => [p.cumulativeProb, p.rocPct]),
-          markLine: { silent: true, symbol: 'none', data: markLines },
-        },
-      ],
+      series,
     });
 
     const onResize = () => chart.resize();
@@ -78,7 +114,7 @@ export function RocCdfChart({ data }: { data: PortfolioRollupResponse }) {
       window.removeEventListener('resize', onResize);
       chart.dispose();
     };
-  }, [data]);
+  }, [data, comparisonData, primaryLabel, comparisonLabel]);
 
   return <div ref={ref} className="chart-box" />;
 }

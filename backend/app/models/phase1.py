@@ -162,11 +162,11 @@ class ContractLayerUpdate(CamelModel):
 
 
 class ContractLayerSpec(CamelModel):
-    """A new excess-of-loss layer on a programme (amounts in $M at 100%, lines as 0..1)."""
+    """A new excess-of-loss or ILW layer on a programme (amounts in $M at 100%, ILW trigger in $B, lines as 0..1)."""
 
     layer_code: str | None = None
     name: str | None = None
-    layer_type: Literal["OCC_XL", "AGG_XL"] = "OCC_XL"
+    layer_type: Literal["OCC_XL", "AGG_XL", "ILW_OPTION"] = "OCC_XL"
     limit: float = Field(gt=0, allow_inf_nan=False)
     attachment: float = Field(ge=0, allow_inf_nan=False)
     deposit_premium: float = Field(default=0.0, ge=0, allow_inf_nan=False)
@@ -174,6 +174,8 @@ class ContractLayerSpec(CamelModel):
     reinstatements: float | None = Field(default=1.0, ge=0)
     rip_rate: float = Field(default=1.0, ge=0, le=5)
     per_event_cap: float | None = Field(default=None, gt=0)
+    trigger_type: IlwTriggerType | None = None
+    exhaustion: float | None = Field(default=None, gt=0)
     written_line: float | None = Field(default=None, ge=0, le=1)
     signed_line: float | None = Field(default=None, ge=0, le=1)
     brokerage_pct: float | None = Field(default=None, ge=0, le=0.9)
@@ -213,6 +215,9 @@ class RelatedProgramme(CamelModel):
     treaty_year: int
     renewal_period: str
     status: str
+    direction: str = "ASSUMED"
+    is_hedge: bool = False
+    structure: str = "OCC_XL"
 
 
 class PricingBinding(CamelModel):
@@ -237,11 +242,13 @@ class ContractCreate(CamelModel):
     collateral_cell: str | None = None
     status: ProgrammeStatus = ProgrammeStatus.QUOTED
     direction: ContractDirection = ContractDirection.ASSUMED
+    is_hedge: bool | None = None
     structure: StructureType = StructureType.OCC_XL
     instrument: InstrumentType = InstrumentType.UNL
     placement: PlacementType = PlacementType.OPEN_MARKET
     inception_date: str | None = "2027-01-01"
     expiry_date: str | None = "2027-12-31"
+    portfolio_snapshot_date: str | None = None
     hours_clause: int = 72
     written_line: float = 1.0
     signed_line: float = 1.0
@@ -268,6 +275,10 @@ class ContractCreate(CamelModel):
 class ContractUpdate(CamelModel):
     status: ProgrammeStatus | None = None
     direction: ContractDirection | None = None
+    is_hedge: bool | None = None
+    structure: StructureType | None = None
+    instrument: InstrumentType | None = None
+    portfolio_snapshot_date: str | None = None
     sim_set_id: str | None = None
     written_line: float | None = None
     signed_line: float | None = None
@@ -304,11 +315,13 @@ class ContractFull(CamelModel):
     collateral_cell: str | None = None
     status: ProgrammeStatus
     direction: ContractDirection = ContractDirection.ASSUMED
+    is_hedge: bool = False
     structure: StructureType = StructureType.OCC_XL
     instrument: InstrumentType = InstrumentType.UNL
     placement: PlacementType = PlacementType.OPEN_MARKET
     inception_date: str | None = None
     expiry_date: str | None = None
+    portfolio_snapshot_date: str | None = None
     hours_clause: int = 72
     written_line: float = 1.0
     signed_line: float = 1.0
@@ -429,6 +442,7 @@ class SliceRollupRequest(CamelModel):
     portfolio_name: str = "Custom CMS Slice Rollup"
     view: ViewOfRisk = ViewOfRisk.ADJUSTED
     total_capital: float = 160.0
+    include_hedges: bool = True
     statuses: list[ProgrammeStatus] | None = None
     directions: list[ContractDirection] | None = None
     underwriters: list[str] | None = None

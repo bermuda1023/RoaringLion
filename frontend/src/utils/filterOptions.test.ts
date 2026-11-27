@@ -74,4 +74,67 @@ describe('filter choices from upstream loss files', () => {
     expect(choices.regionPerils).toEqual([]);
     expect(choices.sourceLabels).toEqual([]);
   });
+
+  it('recognizes auto-wired INDUSTRY_INDEX_SOURCE for ILW programmes with all industry perils', () => {
+    const spec: GraphSpec = {
+      graphId: 'g-ilw',
+      name: 'ILW',
+      version: 1,
+      currency: 'USD',
+      contentHash: '',
+      nodes: [
+        {
+          nodeId: 'src-ind',
+          nodeType: 'INDUSTRY_INDEX_SOURCE',
+          label: 'Industry Loss Run',
+          params: {
+            simSetId: 'ind-synth-cat-v1-100k',
+            lossFiles: [
+              { region: 'US-FL', peril: 'WS', regionPeril: 'US-FL-WS' },
+              { region: 'JP-KANTO', peril: 'EQ', regionPeril: 'JP-KANTO-EQ' },
+              { region: 'EU-DE', peril: 'WS', regionPeril: 'EU-DE-WS' },
+            ],
+          },
+          position: { x: 40, y: 100 },
+        },
+        { nodeId: 'flt-ilw', nodeType: 'REGION_PERIL_FILTER', label: 'Filter', params: {}, position: { x: 300, y: 100 } },
+      ],
+      edges: [{ edgeId: 'e1', source: 'src-ind', target: 'flt-ilw', sign: 1, weight: 1 }],
+    };
+    const choices = filterChoices(spec, 'flt-ilw', {}, 'ind-synth-cat-v1-100k');
+    expect(choices.regionPerils).toEqual(['EU-DE-WS', 'JP-KANTO-EQ', 'US-FL-WS']);
+    expect(choices.perils.map((p) => p.code)).toEqual(['EQ', 'WS']);
+    expect(choices.zones).toEqual(['EU-DE', 'JP-KANTO', 'US-FL']);
+  });
+
+  it('recognizes auto-wired PORTFOLIO_ROLLUP for UNL retro hedges with snapshot perils', () => {
+    const spec: GraphSpec = {
+      graphId: 'g-retro',
+      name: 'UNL Retro',
+      version: 1,
+      currency: 'USD',
+      contentHash: '',
+      nodes: [
+        {
+          nodeId: 'src-port',
+          nodeType: 'PORTFOLIO_ROLLUP',
+          label: 'UNL Portfolio Snapshot — 2027-01-01',
+          params: {
+            asOfDate: '2027-01-01',
+            sourceKind: 'UNL_PORTFOLIO_SNAPSHOT',
+            lossFiles: [
+              { region: 'US-FL', peril: 'WS', regionPeril: 'US-FL-WS' },
+              { region: 'US-CA', peril: 'EQ', regionPeril: 'US-CA-EQ' },
+            ],
+          },
+          position: { x: 40, y: 100 },
+        },
+        { nodeId: 'flt-retro', nodeType: 'REGION_PERIL_FILTER', label: 'Filter', params: {}, position: { x: 300, y: 100 } },
+      ],
+      edges: [{ edgeId: 'e1', source: 'src-port', target: 'flt-retro', sign: 1, weight: 1 }],
+    };
+    const choices = filterChoices(spec, 'flt-retro', {}, 'sim-synth-cat-v1-100k');
+    expect(choices.regionPerils).toEqual(['US-CA-EQ', 'US-FL-WS']);
+    expect(choices.zones).toEqual(['US-CA', 'US-FL']);
+  });
 });

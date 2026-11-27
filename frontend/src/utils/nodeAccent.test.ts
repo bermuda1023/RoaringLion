@@ -5,6 +5,7 @@ describe('node accents', () => {
   it('shifts sources blue, pricing and EP teal, filters and combination gray, and layers magenta', () => {
     expect(nodeAccent('LOSS_SOURCE')).toBe(NODE_ACCENT.source);
     expect(nodeAccent('INDUSTRY_INDEX_SOURCE')).toBe(NODE_ACCENT.source);
+    expect(nodeAccent('PORTFOLIO_ROLLUP')).toBe(NODE_ACCENT.source);
     expect(nodeAccent('PRICING_OUTPUT')).toBe(NODE_ACCENT.pricing);
     expect(nodeAccent('EP_OUTPUT')).toBe(NODE_ACCENT.pricing);
     expect(nodeAccent('COMBINATION')).toBe(NODE_ACCENT.filter);

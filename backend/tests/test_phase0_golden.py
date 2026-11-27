@@ -145,13 +145,17 @@ def test_api_first_slice_end_to_end():
     assert r_man.status_code == 200
     assert len(r_man.json()["breadcrumb"]) >= 4
 
-    # Portfolio rollup
+    # Portfolio rollup (with bound hedges and long-only without hedges)
     r_port = client.get("/api/portfolio/rollup?view=ADJUSTED&totalCapital=160")
     assert r_port.status_code == 200
     pbody = r_port.json()
     assert pbody["cotvarSumCheckDiff"] < 1e-9
     assert len(pbody["cdfCurve"]) > 20
-    assert len(pbody["layerAllocations"]) == 4
+    assert len([r for r in pbody["layerAllocations"] if not r["isHedge"]]) == 4
+
+    r_gross = client.get("/api/portfolio/rollup?view=ADJUSTED&totalCapital=160&includeHedges=false")
+    assert r_gross.status_code == 200
+    assert len(r_gross.json()["layerAllocations"]) == 4
 
     # Deterministic run
     r_det = client.post(

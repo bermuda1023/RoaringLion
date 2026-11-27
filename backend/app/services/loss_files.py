@@ -107,6 +107,13 @@ def files_for_loss_source(
     return list(sim_files.get(sim_set_id) or [])
 
 
+SOURCE_NODE_TYPES = (
+    NodeType.LOSS_SOURCE,
+    NodeType.INDUSTRY_INDEX_SOURCE,
+    NodeType.PORTFOLIO_ROLLUP,
+)
+
+
 def _upstream_sources(graph: GraphSpec, start_id: str) -> list[Any]:
     incoming: dict[str, list[str]] = {}
     for edge in graph.edges:
@@ -123,7 +130,7 @@ def _upstream_sources(graph: GraphSpec, start_id: str) -> list[Any]:
         node = by_id.get(node_id)
         if node is None:
             continue
-        if node.node_type == NodeType.LOSS_SOURCE:
+        if node.node_type in SOURCE_NODE_TYPES:
             sources.append(node)
             continue
         stack.extend(incoming.get(node_id, []))

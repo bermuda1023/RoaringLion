@@ -66,6 +66,9 @@ def init_engine(db_url: str | None = None):
         if "technical_rol" in cols:
             with _engine.begin() as conn:
                 conn.execute(text("ALTER TABLE contracts DROP COLUMN technical_rol"))
+        if "portfolio_snapshot_date" not in cols:
+            with _engine.begin() as conn:
+                conn.execute(text("ALTER TABLE contracts ADD COLUMN portfolio_snapshot_date VARCHAR(30)"))
     if "sim_sets" in insp.get_table_names():
         sim_cols = {c["name"] for c in insp.get_columns("sim_sets")}
         if "loss_files_json" not in sim_cols:

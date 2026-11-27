@@ -92,7 +92,7 @@ function initialText(layer: ContractLayer, field: Field): string {
 interface NewLayerDraft {
   layerCode: string;
   name: string;
-  layerType: 'OCC_XL' | 'AGG_XL';
+  layerType: 'OCC_XL' | 'AGG_XL' | 'ILW_OPTION';
   limit: string;
   attachment: string;
   depositPremium: string;
@@ -691,6 +691,7 @@ export function ContractLayersEditor({
                         >
                           <option value="OCC_XL">Occ</option>
                           <option value="AGG_XL">Agg</option>
+                          <option value="ILW_OPTION">ILW</option>
                         </select>
                       </td>
                       <td>

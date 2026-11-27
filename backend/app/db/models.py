@@ -53,6 +53,7 @@ class ContractRecord(Base):
     currency: Mapped[str] = mapped_column(String(8), default="USD")
 
     sim_set_id: Mapped[str] = mapped_column(String(80), index=True)
+    portfolio_snapshot_date: Mapped[str | None] = mapped_column(String(30), nullable=True)
     exposure_eclipse_programme_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
     region_perils_json: Mapped[str] = mapped_column(Text, default="[]")

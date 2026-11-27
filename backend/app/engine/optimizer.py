@@ -330,7 +330,11 @@ def _with_full_share(programme: ProgrammeDeal, layer_ids: frozenset[str] | set[s
 
 
 def _evaluate_for_rollup(
-    programme: ProgrammeDeal, yelt: YeltTable, view: ViewOfRisk
+    programme: ProgrammeDeal,
+    yelt: YeltTable,
+    view: ViewOfRisk,
+    *,
+    industry_yelt: YeltTable | None = None,
 ) -> tuple[ProgrammeDeal, dict[str, np.ndarray], dict[str, np.ndarray], set[str]]:
     """Evaluate a programme's graph and make its unplaced layers scalable.
 
@@ -344,7 +348,9 @@ def _evaluate_for_rollup(
     Returns the programme with its unplaced layers at 100%, the annual and RIP vectors by node, and
     the ids of the unplaced layers, whose current share stays 0.
     """
-    _, out = evaluate_programme_dag(programme, yelt, LineageRegistry(persist=False), views=[view])
+    _, out = evaluate_programme_dag(
+        programme, yelt, LineageRegistry(persist=False), views=[view], industry_yelt=industry_yelt
+    )
     ann, rip = out["annual"][view.value], out["rip"][view.value]
     unplaced = {n.node_id for n in programme.graph.nodes if _is_unplaced(n, programme.signed_line)}
     if not unplaced:
@@ -409,7 +415,7 @@ def _build_vectors(
     rollup_progs: list[ProgrammeDeal] = []
     unplaced_layers: set[tuple[str, str]] = set()
     for p in active_progs:
-        restated, ann, rip, unplaced = _evaluate_for_rollup(p, yelt, req.view)
+        restated, ann, rip, unplaced = _evaluate_for_rollup(p, yelt, req.view, industry_yelt=ind_yelt)
         rollup_progs.append(restated)
         ann_by_prog[p.programme_id] = ann
         rip_by_prog[p.programme_id] = rip
@@ -443,16 +449,16 @@ def _build_vectors(
                 "cedent_name": entry.cedent_name,
                 "programme_name": entry.programme_name,
                 "layer_name": entry.layer_name,
-                "direction": "ASSUMED",
+                "direction": entry.direction,
                 "status": entry.status,
                 "current_share": entry.signed_line,
-                "limit_1x": entry.limit_1x,
+                "limit_1x": 0.0 if entry.is_hedge else entry.limit_1x,
                 "prem_1x": entry.prem_1x,
                 "el_1x": el_1x,
-                "profit_1x": entry.prem_1x + rip_1x - el_1x,
+                "profit_1x": (el_1x - entry.prem_1x - rip_1x) if entry.is_hedge else (entry.prem_1x + rip_1x - el_1x),
                 "region_perils": entry.region_perils,
             })
-            vecs.append(loss_1x)
+            vecs.append(-loss_1x if entry.is_hedge else loss_1x)
     else:
         by_prog: dict[str, list] = {}
         for entry in rollup_entries:
@@ -485,6 +491,8 @@ def _build_vectors(
                 prem_1x = p.deposit_premium * scale
                 lim_1x = p.limit * scale
             el_1x = float(np.mean(loss_1x))
+            p_dir = p.direction.value if hasattr(p.direction, "value") else str(p.direction)
+            p_is_hedge = bool(getattr(p, "is_hedge", False))
             items.append({
                 "layer_key": p.programme_id,
                 "programme_id": p.programme_id,
@@ -492,16 +500,16 @@ def _build_vectors(
                 "cedent_name": p.cedent_name,
                 "programme_name": p.programme_name,
                 "layer_name": p.programme_name,
-                "direction": "ASSUMED",
+                "direction": p_dir,
                 "status": p.status.value,
                 "current_share": 0.0 if no_line_held else p.signed_line,
-                "limit_1x": lim_1x,
+                "limit_1x": 0.0 if p_is_hedge else lim_1x,
                 "prem_1x": prem_1x,
                 "el_1x": el_1x,
-                "profit_1x": prem_1x + rip_1x - el_1x,
+                "profit_1x": (el_1x - prem_1x - rip_1x) if p_is_hedge else (prem_1x + rip_1x - el_1x),
                 "region_perils": p.region_perils,
             })
-            vecs.append(loss_1x)
+            vecs.append(-loss_1x if p_is_hedge else loss_1x)
 
     if req.include_retro_ilw_candidate and req.retro_ilw_limit_m > 0:
         ilw_req = IlwPriceRequest(

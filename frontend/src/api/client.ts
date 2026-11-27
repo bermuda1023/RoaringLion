@@ -3,7 +3,9 @@ import type {
   DeterministicLossRow,
   DeterministicRunResponse,
   GraphTemplate,
+  PortfolioHedgeComparisonResponse,
   PortfolioRollupResponse,
+  PortfolioSnapshotInfo,
   ProgrammeDeal,
   RunManifest,
   UpliftRule,
@@ -53,11 +55,13 @@ export interface ProgrammeProfile {
 export interface ContractFull extends ProgrammeDeal {
   chainId: string;
   direction: string;
+  isHedge: boolean;
   structure: string;
   instrument: string;
   placement: string;
   inceptionDate?: string | null;
   expiryDate?: string | null;
+  portfolioSnapshotDate?: string | null;
   hoursClause: number;
   attachment: number;
   brokeragePct: number;
@@ -86,6 +90,9 @@ export interface RelatedProgramme {
   treatyYear: number;
   renewalPeriod: string;
   status: string;
+  direction?: string;
+  isHedge?: boolean;
+  structure?: string;
 }
 
 export interface PricingBinding {
@@ -247,9 +254,17 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(rules),
     }),
-  getPortfolioRollup: (view: ViewOfRisk, totalCapital: number) =>
+  getPortfolioRollup: (view: ViewOfRisk, totalCapital: number, includeHedges = true) =>
     fetchJson<PortfolioRollupResponse>(
-      `/api/portfolio/rollup?view=${view}&totalCapital=${totalCapital}`,
+      `/api/portfolio/rollup?view=${view}&totalCapital=${totalCapital}&includeHedges=${includeHedges}`,
+    ),
+  getPortfolioComparison: (view: ViewOfRisk, totalCapital: number) =>
+    fetchJson<PortfolioHedgeComparisonResponse>(
+      `/api/portfolio/comparison?view=${view}&totalCapital=${totalCapital}`,
+    ),
+  getPortfolioSnapshotInfo: (asOfDate?: string | null) =>
+    fetchJson<PortfolioSnapshotInfo>(
+      `/api/portfolio/snapshot-info${asOfDate ? `?asOfDate=${encodeURIComponent(asOfDate)}` : ''}`,
     ),
   runDeterministic: (payload: {
     programmeId: string;

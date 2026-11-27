@@ -154,16 +154,24 @@ export function PricingOutputPanel({
     .filter((edge) => edge.target === node.nodeId)
     .map((edge) => graph.nodes.find((item) => item.nodeId === edge.source))
     .find((item): item is GraphNodeSpec => Boolean(item));
+  const isHedge = Boolean(adjusted?.pricing?.isHedge ?? unadjusted?.pricing?.isHedge);
   const fact = (metrics: NodeViewMetrics | undefined, label: string) => (
     <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
       {label}
       <div style={{ color: 'var(--text)' }}>
-        {metrics ? `EL ${fmtMoneyM(metrics.el, 2)} · ELR ${fmtRatioPct(metrics.elr, 1)}` : 'Not evaluated'}
+        {metrics
+          ? `${isHedge ? 'Exp Rec' : 'EL'} ${fmtMoneyM(metrics.el, 2)} · ${isHedge ? 'Rec/Cost' : 'ELR'} ${fmtRatioPct(metrics.elr, 1)}`
+          : 'Not evaluated'}
       </div>
     </div>
   );
   return (
     <div data-testid="pricing-output-panel" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span className={`badge ${isHedge ? 'badge-hedge' : 'badge-long'}`}>
+          {isHedge ? 'Hedge (Ceded)' : 'Long (Assumed)'}
+        </span>
+      </div>
       <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
         Identity
         <div className="mono" style={{ color: 'var(--text)' }}>{node.nodeId}</div>

@@ -107,7 +107,24 @@ export function nodeTerms(nodeType: string, params: Params | undefined): string 
       const lim = num(p.limit);
       const trig = num(p.trigger);
       if (lim == null || trig == null) return null;
-      return `${amt(lim)} @ ${trim(trig)}bn industry` + shareSuffix(p);
+      const trigType = String(p.triggerType ?? 'BINARY').toUpperCase();
+      const typeSuffix =
+        trigType === 'PRO_RATA'
+          ? ' · Pro-Rata'
+          : trigType === 'AGGREGATE'
+            ? ' · Agg'
+            : trigType === 'SECOND_EVENT'
+              ? ' · 2nd Event'
+              : '';
+      return `${amt(lim)} @ ${trim(trig)}bn industry${typeSuffix}` + shareSuffix(p);
+    }
+    case 'INDUSTRY_INDEX_SOURCE': {
+      const simId = typeof p.simSetId === 'string' ? p.simSetId.trim() : '';
+      return simId ? `Industry Loss Run · ${simId}` : 'Industry Loss Run';
+    }
+    case 'PORTFOLIO_ROLLUP': {
+      const asOf = typeof p.asOfDate === 'string' ? p.asOfDate.trim() : '';
+      return asOf ? `UNL Portfolio Snapshot · ${asOf}` : 'UNL Portfolio Snapshot';
     }
     case 'CASCADING_TOWER': {
       const layers = (Array.isArray(p.layers) ? p.layers : []).filter((l) => l && typeof l === 'object') as Params[];

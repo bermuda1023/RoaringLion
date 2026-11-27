@@ -113,6 +113,7 @@ export const NODE_PARAM_META: Record<string, ParamFieldMeta> = {
   retentionLine: { label: 'Retention Line', unit: '$M', placeholder: 'e.g. 25' },
   numLines: { label: 'Number of Lines', unit: 'count', placeholder: 'e.g. 4' },
   trigger: { label: 'Industry Loss Trigger', unit: '$B', placeholder: 'e.g. 40' },
+  exhaustion: { label: 'Industry Loss Exhaustion', unit: '$B', placeholder: 'Optional' },
   limit: { label: 'Limit', unit: '$M', placeholder: 'e.g. 25' },
   minOrder: { label: 'Min Event Order', unit: 'count', placeholder: '2' },
   maxOrder: { label: 'Max Event Order (Optional)', unit: 'count', placeholder: 'No max' },

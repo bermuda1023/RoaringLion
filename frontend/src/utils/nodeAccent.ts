@@ -24,7 +24,9 @@ const LAYER_TYPES = new Set([
 ]);
 
 export function nodeAccent(nodeType: string): string {
-  if (nodeType === 'LOSS_SOURCE' || nodeType === 'INDUSTRY_INDEX_SOURCE') return NODE_ACCENT.source;
+  if (nodeType === 'LOSS_SOURCE' || nodeType === 'INDUSTRY_INDEX_SOURCE' || nodeType === 'PORTFOLIO_ROLLUP') {
+    return NODE_ACCENT.source;
+  }
   if (nodeType === 'PRICING_OUTPUT' || nodeType === 'EP_OUTPUT') return NODE_ACCENT.pricing;
   if (nodeType.includes('FILTER') || nodeType === 'COMBINATION' || nodeType === 'UPLIFT') return NODE_ACCENT.filter;
   if (LAYER_TYPES.has(nodeType)) return NODE_ACCENT.layer;

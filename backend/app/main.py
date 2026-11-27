@@ -16,6 +16,7 @@ from app.engine.ilw import evaluate_ilw_trial_payouts, price_ilw_with_portfolio_
 from app.engine.pricing_link import extract_rollup_layers
 from app.engine.slice_runner import (
     evaluate_deterministic_run,
+    evaluate_portfolio_hedge_comparison,
     evaluate_portfolio_rollup,
     evaluate_programme_dag,
     validate_dag_acyclic,
@@ -26,12 +27,13 @@ from app.models.domain import (
     DeterministicRunRequest,
     DeterministicRunResponse,
     GraphSpec,
+    PortfolioHedgeComparisonResponse,
     PortfolioRollupResponse,
     ProgrammeDeal,
     RunManifest,
     UpliftRule,
 )
-from app.models.enums import ContractDirection, ProgrammeStatus, StructureType, ViewOfRisk
+from app.models.enums import ContractDirection, ProgrammeStatus, StructureType, ViewOfRisk, is_hedge_direction
 from app.models.phase1 import (
     ContractCreate,
     ContractFull,
@@ -58,6 +60,12 @@ from app.services.contracts import (
 from app.services.graph_templates import GraphTemplate, build_graph_templates
 from app.services.lineage import LineageRegistry
 from app.services.node_outputs import node_yelt_table, resolve_pricing_links, yelt_export_bytes, yelt_summary
+from app.services.portfolio_snapshot import (
+    compute_unl_portfolio_events,
+    is_ilw_programme,
+    select_unl_snapshot_contracts,
+    snapshot_loss_files,
+)
 from app.services.sim_sets import SimSetStore
 from app.routes_extended import create_extended_router
 
@@ -335,13 +343,61 @@ def evaluate_programme(programme_id: str) -> DagEvalResponse:
     return resp
 
 
+def _make_portfolio_unl_resolver(*, exclude_programme_id: str | None = None):
+    cache: dict[tuple[str, str], tuple[np.ndarray, str]] = {}
+
+    def _resolve(as_of_date: str | None, view: ViewOfRisk) -> tuple[np.ndarray, str]:
+        key = ((as_of_date or "").strip(), view.value)
+        if key not in cache:
+            all_contracts = CONTRACT_STORE.list_contracts()
+            all_deals = {c.programme_id: contract_to_programme_deal(c) for c in all_contracts}
+            snap_contracts = select_unl_snapshot_contracts(
+                all_contracts,
+                as_of_date=as_of_date,
+                exclude_programme_id=exclude_programme_id,
+            )
+            snap_deals = [all_deals[c.programme_id] for c in snap_contracts]
+            base_yelt = SIM_STORE.get_yelt(_base_yelt.sim_set_id)
+            cache[key] = compute_unl_portfolio_events(
+                snap_deals,
+                base_yelt,
+                view,
+                all_deals=all_deals,
+                as_of_date=as_of_date,
+            )
+        return cache[key]
+
+    return _resolve
+
+
 def _evaluate_contract(c: ContractFull, lineage: LineageRegistry, views: list[ViewOfRisk] | None = None):
     prog = contract_to_programme_deal(c)
     yelt = SIM_STORE.get_yelt(prog.sim_set_id)
-    ind_yelt = SIM_STORE.get_yelt(_ind_yelt.sim_set_id)
-    links = resolve_pricing_links(prog.graph, c, CONTRACT_STORE.get_contract)
+    ind_sim_id = _ind_yelt.sim_set_id
+    for node in prog.graph.nodes:
+        if node.node_type.value == "INDUSTRY_INDEX_SOURCE":
+            custom_id = str(node.params.get("simSetId") or "").strip()
+            if custom_id:
+                ind_sim_id = custom_id
+                break
     try:
-        resp, vecs = evaluate_programme_dag(prog, yelt, lineage, views=views, industry_yelt=ind_yelt, pricing_links=links)
+        ind_yelt = SIM_STORE.get_yelt(ind_sim_id)
+    except KeyError:
+        ind_yelt = SIM_STORE.get_yelt(_ind_yelt.sim_set_id)
+    if any(n.node_type.value == "INDUSTRY_INDEX_SOURCE" for n in prog.graph.nodes) and len(ind_yelt.losses) != len(yelt.losses):
+        yelt = ind_yelt
+    links = resolve_pricing_links(prog.graph, c, CONTRACT_STORE.get_contract)
+    unl_resolver = _make_portfolio_unl_resolver(exclude_programme_id=c.programme_id)
+    try:
+        resp, vecs = evaluate_programme_dag(
+            prog,
+            yelt,
+            lineage,
+            views=views,
+            industry_yelt=ind_yelt,
+            pricing_links=links,
+            portfolio_unl_resolver=unl_resolver,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return resp, vecs, yelt
@@ -523,44 +579,112 @@ def promote_ilw_to_cms(req: IlwPriceRequest) -> ContractFull:
 def get_portfolio_rollup(
     view: ViewOfRisk = Query(default=ViewOfRisk.ADJUSTED),
     total_capital: float = Query(default=160.0, alias="totalCapital", gt=0),
+    include_hedges: bool = Query(default=True, alias="includeHedges"),
 ) -> PortfolioRollupResponse:
     all_contracts = CONTRACT_STORE.list_contracts()
     all_deals = {c.programme_id: contract_to_programme_deal(c) for c in all_contracts}
-    bound = [
-        all_deals[c.programme_id]
-        for c in all_contracts
-        if c.status == ProgrammeStatus.BOUND and c.structure != StructureType.ILW
-    ]
+    bound = [all_deals[c.programme_id] for c in all_contracts if c.status == ProgrammeStatus.BOUND]
     yelt = SIM_STORE.get_yelt(_base_yelt.sim_set_id)
-    return evaluate_portfolio_rollup(
-        portfolio_id="fund-main-j27",
-        portfolio_name="RoaringLion Collateralized Cat Fund — J27",
-        programmes=bound,
-        yelt=yelt,
-        view=view,
-        total_capital=total_capital,
-        lineage=LINEAGE,
-        all_programmes=all_deals,
-    )
+    ind_yelt = SIM_STORE.get_yelt(_ind_yelt.sim_set_id)
+    try:
+        return evaluate_portfolio_rollup(
+            portfolio_id="fund-main-j27",
+            portfolio_name="RoaringLion Collateralized Cat Fund — J27",
+            programmes=bound,
+            yelt=yelt,
+            view=view,
+            total_capital=total_capital,
+            lineage=LINEAGE,
+            all_programmes=all_deals,
+            industry_yelt=ind_yelt,
+            portfolio_unl_resolver=_make_portfolio_unl_resolver(),
+            include_hedges=include_hedges,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/portfolio/comparison", response_model=PortfolioHedgeComparisonResponse)
+def get_portfolio_comparison(
+    view: ViewOfRisk = Query(default=ViewOfRisk.ADJUSTED),
+    total_capital: float = Query(default=160.0, alias="totalCapital", gt=0),
+) -> PortfolioHedgeComparisonResponse:
+    all_contracts = CONTRACT_STORE.list_contracts()
+    all_deals = {c.programme_id: contract_to_programme_deal(c) for c in all_contracts}
+    bound = [all_deals[c.programme_id] for c in all_contracts if c.status == ProgrammeStatus.BOUND]
+    yelt = SIM_STORE.get_yelt(_base_yelt.sim_set_id)
+    ind_yelt = SIM_STORE.get_yelt(_ind_yelt.sim_set_id)
+    try:
+        return evaluate_portfolio_hedge_comparison(
+            portfolio_id="fund-main-j27",
+            portfolio_name="RoaringLion Collateralized Cat Fund — J27",
+            programmes=bound,
+            yelt=yelt,
+            view=view,
+            total_capital=total_capital,
+            lineage=LINEAGE,
+            all_programmes=all_deals,
+            industry_yelt=ind_yelt,
+            portfolio_unl_resolver=_make_portfolio_unl_resolver(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/portfolio/snapshot-info")
+def get_portfolio_snapshot_info(
+    as_of_date: str | None = Query(default=None, alias="asOfDate"),
+) -> dict:
+    all_contracts = CONTRACT_STORE.list_contracts()
+    selected = select_unl_snapshot_contracts(all_contracts, as_of_date=as_of_date)
+    loss_files = snapshot_loss_files(selected, as_of_date=as_of_date, fallback_sim_set_id=_base_yelt.sim_set_id)
+    return {
+        "asOfDate": (as_of_date or "").strip() or None,
+        "programmeCount": len(selected),
+        "programmes": [
+            {
+                "programmeId": c.programme_id,
+                "uniqueCode": c.profile.unique_code or c.programme_id,
+                "cedentName": c.cedent_name,
+                "programmeName": c.programme_name,
+                "treatyYear": c.treaty_year,
+                "status": c.status.value,
+                "limit": c.limit,
+                "regionPerils": c.region_perils,
+            }
+            for c in selected
+        ],
+        "regionPerils": sorted({item["regionPeril"] for item in loss_files}),
+        "lossFiles": loss_files,
+    }
 
 
 @app.post("/api/portfolio/rollup/slice", response_model=PortfolioRollupResponse)
 def rollup_cms_slice(req: SliceRollupRequest) -> PortfolioRollupResponse:
-    selected = [c for c in CONTRACT_STORE.select_slice(req) if c.structure != StructureType.ILW]
+    selected = CONTRACT_STORE.select_slice(req)
+    if not req.include_hedges:
+        selected = [c for c in selected if not is_hedge_direction(c.direction)]
     if not selected:
-        raise HTTPException(status_code=400, detail="No matching non-ILW contracts in slice")
+        raise HTTPException(status_code=400, detail="No matching contracts in slice")
     all_deals = {c.programme_id: contract_to_programme_deal(c) for c in CONTRACT_STORE.list_contracts()}
     yelt = SIM_STORE.get_yelt(_base_yelt.sim_set_id)
-    return evaluate_portfolio_rollup(
-        portfolio_id="slice-rollup",
-        portfolio_name=req.portfolio_name,
-        programmes=[contract_to_programme_deal(c) for c in selected],
-        yelt=yelt,
-        view=req.view,
-        total_capital=req.total_capital,
-        lineage=LINEAGE,
-        all_programmes=all_deals,
-    )
+    ind_yelt = SIM_STORE.get_yelt(_ind_yelt.sim_set_id)
+    try:
+        return evaluate_portfolio_rollup(
+            portfolio_id="slice-rollup",
+            portfolio_name=req.portfolio_name,
+            programmes=[contract_to_programme_deal(c) for c in selected],
+            yelt=yelt,
+            view=req.view,
+            total_capital=req.total_capital,
+            lineage=LINEAGE,
+            all_programmes=all_deals,
+            industry_yelt=ind_yelt,
+            portfolio_unl_resolver=_make_portfolio_unl_resolver(),
+            include_hedges=req.include_hedges,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # ─────────────────────────── Deterministic & Lineage ───────────────────────────

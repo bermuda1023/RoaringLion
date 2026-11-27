@@ -1,4 +1,8 @@
 export type ViewOfRisk = 'UNADJUSTED' | 'ADJUSTED';
+export type ContractDirection = 'ASSUMED' | 'INTERNAL_CEDED' | 'EXTERNAL_RETRO';
+export type StructureType = 'OCC_XL' | 'AGG_XL' | 'QUOTA_SHARE' | 'STOP_LOSS' | 'CASCADING' | 'ILW' | 'CAT_BOND';
+export type InstrumentType = 'UNL' | 'INDUSTRY_INDEX' | 'PARAMETRIC' | 'HYBRID';
+export type IlwTriggerType = 'BINARY' | 'PRO_RATA' | 'AGGREGATE' | 'SECOND_EVENT';
 
 export interface BreadcrumbStep {
   entityType: string;
@@ -79,6 +83,11 @@ export interface ProgrammeDeal {
   underwriter: string;
   broker: string;
   status: string;
+  direction?: string;
+  isHedge?: boolean;
+  structure?: string;
+  instrument?: string;
+  portfolioSnapshotDate?: string | null;
   currency: string;
   simSetId: string;
   upliftSet: UpliftSet;
@@ -121,6 +130,8 @@ export interface PricingEconomics {
   contractId: string;
   contractCode: string;
   contractName: string;
+  direction?: string;
+  isHedge?: boolean;
   layerNodeId: string;
   layerCode?: string;
   layerLabel: string;
@@ -186,6 +197,8 @@ export interface LayerAllocationRow {
   layerId: string;
   layerName: string;
   cedentName: string;
+  direction?: string;
+  isHedge?: boolean;
   limit: number;
   premium: number;
   signedLine: number;
@@ -204,15 +217,21 @@ export interface PortfolioRollupResponse {
   currency: string;
   numTrials: number;
   computeMs: number;
+  includeHedges?: boolean;
+  hedgeCount?: number;
   totalCapital: number;
   deployedCollateral: number;
   grossPremium: number;
+  hedgePremium?: number;
+  netPremium?: number;
   expectedRip: number;
   expectedLoss: number;
+  expectedHedgeRecovery?: number;
   expectedProfit: number;
   meanRocPct: number;
   noEventRocPct: number;
   breakEvenProbPct: number;
+  returnOnTvarPct?: number;
   portfolioVar250: number;
   portfolioTvar250: number;
   cotvarSumCheckDiff: number;
@@ -227,6 +246,62 @@ export interface PortfolioRollupResponse {
   }[];
   layerAllocations: LayerAllocationRow[];
   manifest: RunManifest;
+}
+
+export interface HedgeAccretionSummary {
+  hasHedges: boolean;
+  hedgeLayerCount: number;
+  hedgePremiumM: number;
+  expectedHedgeRecoveryM: number;
+  netHedgeCostM: number;
+  deltaExpectedProfitM: number;
+  deltaMeanRocPct: number;
+  deltaNoEventRocPct: number;
+  deltaBreakEvenProbPct: number;
+  deltaVar250M: number;
+  deltaTvar250M: number;
+  tvar250ReductionM: number;
+  grossReturnOnTvarPct: number;
+  netReturnOnTvarPct: number;
+  deltaReturnOnTvarPct: number;
+  costPerDollarTvarSaved?: number | null;
+  guidelinesBreachedWithout: number;
+  guidelinesBreachedWith: number;
+  isAccretive: boolean;
+  accretionVerdict: string;
+  accretionReason: string;
+}
+
+export interface PortfolioHedgeComparisonResponse {
+  withHedges: PortfolioRollupResponse;
+  withoutHedges: PortfolioRollupResponse;
+  accretion: HedgeAccretionSummary;
+  manifest: RunManifest;
+}
+
+export interface PortfolioSnapshotInfo {
+  asOfDate: string | null;
+  programmeCount: number;
+  programmes: {
+    programmeId: string;
+    uniqueCode: string;
+    cedentName: string;
+    programmeName: string;
+    treatyYear: number;
+    status: string;
+    limit: number;
+    regionPerils: string[];
+  }[];
+  regionPerils: string[];
+  lossFiles?: {
+    fileId: string;
+    simSetId: string;
+    name: string;
+    region: string;
+    peril: string;
+    regionPeril: string;
+    vendor?: string | null;
+  }[];
 }
 
 export interface DeterministicLossRow {
