@@ -32,6 +32,8 @@ MAX_EXCEL_ROWS_PER_SHEET = 2_000
 MAX_EXCEL_COLS = 30
 MAX_TEXT_CHARS = 120_000
 MAX_ELT_ROWS = 50_000
+MIN_YELT_TRIALS = 1
+MAX_YELT_TRIALS = 1_000_000
 
 _TRIAL_COLS = {"trial_id", "trial", "sim_year", "simulation_year", "year_id"}
 _EVENT_COLS = {"event_id", "eventid", "event", "evt_id"}
@@ -160,7 +162,11 @@ def _detect_parquet_yelt(raw_bytes: bytes) -> DetectedYeltSpec:
                 default_rp = str(rp_val).strip()
         pa.default_memory_pool().release_unused()
 
-    num_trials = max_trial if max_trial > 0 else 10_000
+    if max_trial > MAX_YELT_TRIALS:
+        raise ValueError(
+            f"YELT Parquet trial_id ({max_trial:,}) exceeds the maximum allowed num_trials ({MAX_YELT_TRIALS:,})."
+        )
+    num_trials = max_trial if max_trial >= MIN_YELT_TRIALS else 10_000
     return DetectedYeltSpec(
         trial_col=trial_col,
         event_col=event_col,
@@ -204,13 +210,23 @@ def _detect_csv_modelling(raw_bytes: bytes) -> tuple[IntakeFileKind | None, Dete
                 break
             try:
                 t_val = int(float(row.get(trial_col) or 0))
+                if t_val > MAX_YELT_TRIALS:
+                    raise ValueError(
+                        f"YELT CSV trial_id ({t_val:,}) exceeds the maximum allowed num_trials ({MAX_YELT_TRIALS:,})."
+                    )
                 if t_val > max_trial:
                     max_trial = t_val
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as exc:
+                if "exceeds the maximum allowed num_trials" in str(exc):
+                    raise
                 pass
             if idx == 0 and rp_col and row.get(rp_col):
                 default_rp = str(row[rp_col]).strip()
-        num_trials = max(max_trial, 100) if max_trial > 0 else 10_000
+        num_trials = max(max_trial, 100) if max_trial >= MIN_YELT_TRIALS else 10_000
+        if not (MIN_YELT_TRIALS <= num_trials <= MAX_YELT_TRIALS):
+            raise ValueError(
+                f"YELT CSV num_trials ({num_trials:,}) must be between {MIN_YELT_TRIALS} and {MAX_YELT_TRIALS:,}."
+            )
         return (
             IntakeFileKind.YELT,
             DetectedYeltSpec(

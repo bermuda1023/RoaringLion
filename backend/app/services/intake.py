@@ -56,7 +56,13 @@ from app.models.phase1 import (
     LossFileRecord,
 )
 from app.services.contracts import ContractStore, ensure_layer_codes, relabel_graph
-from app.services.intake_parsers import MAX_UPLOAD_BYTES, MAX_UPLOAD_MB, parse_submission_bytes
+from app.services.intake_parsers import (
+    MAX_UPLOAD_BYTES,
+    MAX_UPLOAD_MB,
+    MAX_YELT_TRIALS,
+    MIN_YELT_TRIALS,
+    parse_submission_bytes,
+)
 from app.services.lineage import LineageRegistry, canonical_hash
 from app.services.sim_sets import SimSetStore
 
@@ -471,6 +477,10 @@ class SubmissionIntakeService:
         # YELT / ELT modelling files skip any LLM and go directly through existing SimSetStore ingest
         if parsed.file_kind == IntakeFileKind.YELT and parsed.yelt_spec is not None:
             spec = parsed.yelt_spec
+            if not (MIN_YELT_TRIALS <= spec.num_trials <= MAX_YELT_TRIALS):
+                raise ValueError(
+                    f"YELT num_trials ({spec.num_trials:,}) must be between {MIN_YELT_TRIALS} and {MAX_YELT_TRIALS:,}."
+                )
             sim_detail = self.sim_store.ingest_yelt_bytes(
                 raw_bytes=raw_bytes,
                 filename=filename,

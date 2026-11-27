@@ -262,6 +262,9 @@ class SimSetStore:
     ) -> SimSetDetail:
         import polars as pl
 
+        if not (1 <= int(num_trials) <= 1_000_000):
+            raise ValueError(f"num_trials ({num_trials}) must be between 1 and 1,000,000.")
+
         if filename.lower().endswith(".parquet"):
             df = pl.read_parquet(io.BytesIO(raw_bytes))
         else:

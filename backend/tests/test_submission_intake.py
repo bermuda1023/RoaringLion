@@ -967,6 +967,38 @@ def test_email_ingest_rejects_oversized_raw_body_before_pydantic_parses(monkeypa
     assert parse_calls["n"] == 0
 
 
+def test_yelt_trial_id_above_1m_is_rejected_without_storing_sim_set():
+    """Security review: YELT CSV/Parquet with trial_id > 1,000,000 must be rejected and never persisted."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    before_sims = {s["simSetId"] for s in client.get("/api/sim-sets").json()}
+
+    # 1. Tiny CSV with trial_id = 5,000,000
+    bad_csv = b"trial_id,event_id,day_of_year,region_peril_key,loss_amount\n5000000,1001,240,US-FL-WS,10.0\n"
+    r_csv = client.post("/api/intake/drop-in", files={"file": ("oom_trials.csv", bad_csv, "text/csv")})
+    assert r_csv.status_code == 422
+    assert "1,000,000" in r_csv.json()["detail"]
+
+    # 2. Tiny Parquet with trial_id = 50,000,000
+    tbl = pa.table({
+        "trial_id": pa.array([1, 50_000_000], type=pa.uint32()),
+        "event_id": pa.array([101, 102], type=pa.uint64()),
+        "day_of_year": pa.array([210, 240], type=pa.uint16()),
+        "region_peril_key": pa.array(["US-FL-WS", "US-FL-WS"]),
+        "loss_amount": pa.array([10.0, 20.0], type=pa.float64()),
+    })
+    buf = io.BytesIO()
+    pq.write_table(tbl, buf)
+    r_pq = client.post("/api/intake/drop-in", files={"file": ("oom_trials.parquet", buf.getvalue(), "application/octet-stream")})
+    assert r_pq.status_code == 422
+    assert "1,000,000" in r_pq.json()["detail"]
+
+    # Verify zero sim sets were stored
+    after_sims = {s["simSetId"] for s in client.get("/api/sim-sets").json()}
+    assert after_sims == before_sims
+
+
 def test_parquet_yelt_reads_actual_trial_count():
     """Bugbot #2: Parquet YELT detection must read actual trial count instead of hardcoding 10,000."""
     import pyarrow as pa
