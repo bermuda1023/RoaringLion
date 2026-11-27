@@ -21,19 +21,19 @@ const layerCount = (c: ContractFull) => c.graph?.nodes.filter((n) => LAYER_NODE_
 
 // Numeric filters are entered in the units shown: percentages as 0–100, money in $M.
 const LEDGER_COLUMNS: LedgerColumn[] = [
-  { key: 'code', label: 'Unique Code', kind: 'text', get: (c) => c.profile?.uniqueCode || c.programmeId },
+  { key: 'code', label: 'Code', title: 'Unique code', kind: 'text', get: (c) => c.profile?.uniqueCode || c.programmeId },
   { key: 'cedent', label: 'Cedent', kind: 'text', get: (c) => c.cedentName },
   { key: 'programme', label: 'Programme', kind: 'text', get: (c) => c.programmeName },
-  { key: 'period', label: 'Period', kind: 'text', get: (c) => c.renewalPeriod },
-  { key: 'uw', label: 'UW / Office', kind: 'text', get: (c) => `${c.underwriter} (${c.office})` },
+  { key: 'period', label: 'Per', title: 'Renewal period', kind: 'text', get: (c) => c.renewalPeriod },
+  { key: 'uw', label: 'UW', title: 'Underwriter and office', kind: 'text', get: (c) => `${c.underwriter} (${c.office})` },
   { key: 'status', label: 'Status', kind: 'select', get: (c) => String(c.status) },
-  { key: 'written', label: 'Written', kind: 'num', get: (c) => c.writtenLine * 100 },
-  { key: 'signed', label: 'Signed', kind: 'num', get: (c) => c.signedLine * 100 },
-  { key: 'layers', label: 'Layers', kind: 'num', get: (c) => layerCount(c) },
-  { key: 'limit', label: 'Limit ($M)', kind: 'num', get: (c) => c.limit },
-  { key: 'prem', label: 'Prem ($M)', kind: 'num', get: (c) => c.depositPremium },
-  { key: 'rol', label: 'ROL', kind: 'num', get: (c) => c.rol * 100 },
-  { key: 'rarc', label: 'RARC', title: 'Risk-Adjusted Rate Change', kind: 'num', get: (c) => c.profile?.rarcTotalPct ?? 0 },
+  { key: 'written', label: 'Writ', title: 'Written line, percent', kind: 'num', get: (c) => c.writtenLine * 100 },
+  { key: 'signed', label: 'Sign', title: 'Signed line, percent', kind: 'num', get: (c) => c.signedLine * 100 },
+  { key: 'layers', label: 'Lyr', title: 'Number of layers', kind: 'num', get: (c) => layerCount(c) },
+  { key: 'limit', label: 'Lim', title: 'Limit, $M', kind: 'num', get: (c) => c.limit },
+  { key: 'prem', label: 'Prem', title: 'Deposit premium, $M', kind: 'num', get: (c) => c.depositPremium },
+  { key: 'rol', label: 'ROL', title: 'Rate on line, percent', kind: 'num', get: (c) => c.rol * 100 },
+  { key: 'rarc', label: 'RARC', title: 'Risk-adjusted rate change', kind: 'num', get: (c) => c.profile?.rarcTotalPct ?? 0 },
 ];
 
 interface NewDealLayer {
@@ -512,7 +512,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
         )}
 
         <div className="table-wrap">
-          <table className="ledger-table">
+          <table className="ledger-table dense-table">
             <thead>
               <tr>
                 {LEDGER_COLUMNS.map((col) => (
@@ -999,20 +999,20 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </button>
                   </div>
                 </div>
-                <div className="table-wrap"><table>
+                <div className="table-wrap"><table className="dense-table">
                   <thead>
                     <tr>
-                      <th>UY</th>
-                      <th>Unique Code</th>
+                      <th title="Underwriting year">UY</th>
+                      <th title="Unique code">Code</th>
                       <th>Programme</th>
                       <th>Status</th>
-                      <th className="num">Limit ($M)</th>
-                      <th className="num">YoY Lim Δ</th>
-                      <th className="num">GWP ($M)</th>
-                      <th className="num">ROL</th>
-                      <th className="num">YoY ROL Δ</th>
-                      <th className="num">Signed</th>
-                      <th className="num">RARC</th>
+                      <th className="num" title="Limit, $M">Lim</th>
+                      <th className="num" title="Year on year limit change, $M">Δ Lim</th>
+                      <th className="num" title="Gross written premium, $M">GWP</th>
+                      <th className="num" title="Rate on line">ROL</th>
+                      <th className="num" title="Year on year ROL change, points">Δ ROL</th>
+                      <th className="num" title="Signed line">Sign</th>
+                      <th className="num" title="Risk-adjusted rate change">RARC</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1172,15 +1172,15 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                     </a>
                   </div>
                 </div>
-                <div className="table-wrap"><table>
+                <div className="table-wrap"><table className="dense-table">
                   <thead>
                     <tr>
                       <th>Layer</th>
-                      <th className="num">Unadj EL</th>
-                      <th className="num">Adj EL</th>
-                      <th className="num">Exp RIP</th>
-                      <th className="num">1-in-250 TVaR</th>
-                      <th className="num">Adj ELR</th>
+                      <th className="num" title="Unadjusted expected loss">EL U</th>
+                      <th className="num" title="Adjusted expected loss">EL A</th>
+                      <th className="num" title="Expected reinstatement premium">RIP</th>
+                      <th className="num" title="1-in-250 tail value at risk">TVaR</th>
+                      <th className="num" title="Adjusted expected loss ratio">ELR</th>
                     </tr>
                   </thead>
                   <tbody>
