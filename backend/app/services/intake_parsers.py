@@ -32,6 +32,8 @@ MAX_EXCEL_ROWS_PER_SHEET = 2_000
 MAX_EXCEL_COLS = 30
 MAX_TEXT_CHARS = 120_000
 MAX_ELT_ROWS = 50_000
+MAX_ELT_ANNUAL_RATE = 1_000.0
+MAX_ELT_EXPECTED_EVENTS = 2_000_000
 MIN_YELT_TRIALS = 1
 MAX_YELT_TRIALS = 1_000_000
 
@@ -249,6 +251,8 @@ def _detect_csv_modelling(raw_bytes: bytes) -> tuple[IntakeFileKind | None, Dete
         sd_c_col = _find_col(col_map, _SD_CORR_COLS)
         max_col = _find_col(col_map, _MAX_LOSS_COLS)
         rows: list[EltRowInput] = []
+        elt_num_trials = 10_000
+        cumulative_rate = 0.0
         text_stream = io.StringIO(raw_bytes.decode("utf-8-sig", errors="replace"))
         dict_reader = csv.DictReader(text_stream)
         for idx, row in enumerate(dict_reader):
@@ -262,6 +266,15 @@ def _detect_csv_modelling(raw_bytes: bytes) -> tuple[IntakeFileKind | None, Dete
                 continue
             if rate <= 0 or mean < 0:
                 continue
+            if not (rate == rate) or rate > MAX_ELT_ANNUAL_RATE:
+                raise ValueError(
+                    f"ELT annual_rate ({rate}) exceeds the maximum allowed rate ({MAX_ELT_ANNUAL_RATE:g} events/year)."
+                )
+            cumulative_rate += rate
+            if cumulative_rate * elt_num_trials > MAX_ELT_EXPECTED_EVENTS:
+                raise ValueError(
+                    f"ELT expected simulated events ({cumulative_rate * elt_num_trials:,.0f}) exceeds the maximum allowed ({MAX_ELT_EXPECTED_EVENTS:,})."
+                )
             sdi = _safe_float(row.get(sd_i_col), 0.0) if sd_i_col else 0.0
             sdc = _safe_float(row.get(sd_c_col), 0.0) if sd_c_col else 0.0
             mx = _safe_float(row.get(max_col), None) if max_col else None

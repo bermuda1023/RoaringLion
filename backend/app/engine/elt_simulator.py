@@ -28,6 +28,22 @@ def simulate_elt_to_yelt(
 
     Returns (yelt_table, theoretical_elt_aal).
     """
+    max_rate = 1_000.0
+    max_expected_events = 2_000_000
+    total_rate = 0.0
+    for row in rows:
+        if row.annual_rate <= 0.0 or row.mean_loss <= 0.0:
+            continue
+        if not np.isfinite(row.annual_rate) or row.annual_rate > max_rate:
+            raise ValueError(
+                f"ELT annual_rate ({row.annual_rate}) exceeds maximum allowed rate ({max_rate:g} events/year)."
+            )
+        total_rate += float(row.annual_rate)
+    if total_rate * num_trials > max_expected_events:
+        raise ValueError(
+            f"ELT expected simulated events ({total_rate * num_trials:,.0f}) exceeds maximum allowed ({max_expected_events:,})."
+        )
+
     rng = np.random.default_rng(seed)
     t_parts: list[np.ndarray] = []
     e_parts: list[np.ndarray] = []

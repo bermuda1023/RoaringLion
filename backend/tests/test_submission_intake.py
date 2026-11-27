@@ -925,6 +925,11 @@ def test_imap_poll_checks_rfc822_size_and_skips_oversized_message_without_fetchi
                 if num == b"1":
                     return ("OK", [b"1 (RFC822.SIZE 999999999)"])
                 return ("OK", [f"2 (RFC822.SIZE {len(raw_ok)})".encode("ascii")])
+            if "HEADER.FIELDS" in cmd:
+                return ("OK", [(b"1 (BODY[HEADER.FIELDS] {40})", b"Message-ID: <huge-no-bs@test>\r\nFrom: a@b.com\r\nSubject: Huge\r\n\r\n")])
+            if "BODYSTRUCTURE" in cmd:
+                # Unparseable/missing BODYSTRUCTURE on oversized message -> must skip & mark \Seen without BODY.PEEK[]
+                return ("OK", [b"1 ()"])
             body_fetched_nums.append(num)
             assert num == b"2", "Must NOT fetch BODY.PEEK[] for oversized message 1"
             return ("OK", [(b"2 (BODY[] {100})", raw_ok)])
@@ -1059,6 +1064,178 @@ def test_message_id_with_sql_wildcard_does_not_retarget_unrelated_pending_draft(
 
     client.post(f"/api/intake/drafts/{innocent_draft['draftId']}/discard")
     client.post(f"/api/intake/drafts/{wild_draft['draftId']}/discard")
+
+
+def test_imap_bodystructure_fetches_only_small_pdf_and_skips_500mb_part(monkeypatch):
+    """Bugbot: Large IMAP message uses BODYSTRUCTURE + per-part BODY.PEEK[section], never loading oversized parts."""
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "bs-secret")
+
+    small_pdf = _make_minimal_pdf([
+        "Cedent: Bodystructure Mutual",
+        "Programme: Florida Cat XL 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $15M xs $30M | Premium $2.7M",
+    ])
+    small_pdf_b64 = base64.b64encode(small_pdf)
+    plain_body = b"Please review attached Florida Cat XL slip."
+
+    bs_response = (
+        b'1 (BODYSTRUCTURE ('
+        b'("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 43 1 NIL NIL NIL)'
+        b'("APPLICATION" "PDF" ("NAME" "giant_500mb.pdf") NIL NIL "BASE64" 500000000 NIL ("ATTACHMENT" ("FILENAME" "giant_500mb.pdf")) NIL)'
+        + f'("APPLICATION" "PDF" ("NAME" "small_slip.pdf") NIL NIL "BASE64" {len(small_pdf_b64)} NIL ("ATTACHMENT" ("FILENAME" "small_slip.pdf")) NIL)'.encode("ascii")
+        + b' "MIXED" ("BOUNDARY" "bnd") NIL NIL))'
+    )
+
+    fetched_cmds: list[str] = []
+    marked_seen: list[bytes] = []
+
+    class FakeBodyStructureIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            return ("OK", [b"1"])
+
+        def fetch(self, num: bytes, cmd: str):
+            fetched_cmds.append(cmd)
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [b"1 (RFC822.SIZE 500005000)"])
+            if "HEADER.FIELDS" in cmd:
+                hdr = b"Message-ID: <imap-bs-500mb@test>\r\nFrom: broker@example.com\r\nSubject: Huge + Small PDF\r\n\r\n"
+                return ("OK", [(b"1 (BODY[HEADER.FIELDS] {90})", hdr)])
+            if "BODYSTRUCTURE" in cmd:
+                return ("OK", [bs_response])
+            if cmd == "(BODY.PEEK[1])":
+                return ("OK", [(b"1 (BODY[1] {43})", plain_body)])
+            if cmd == "(BODY.PEEK[3])":
+                return ("OK", [(b"1 (BODY[3] {999})", small_pdf_b64)])
+            raise AssertionError(f"Unexpected IMAP fetch command (must not download full message or 500MB part 2): {cmd}")
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                marked_seen.append(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeBodyStructureIMAP)
+
+    res = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "bs-secret"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["processedCount"] == 1
+    assert len(body["drafts"]) == 1
+
+    # Never downloaded full message or 500 MB part 2
+    assert "(BODY.PEEK[])" not in fetched_cmds
+    assert "(BODY.PEEK[2])" not in fetched_cmds
+    assert "(BODY.PEEK[3])" in fetched_cmds
+
+    draft = body["drafts"][0]
+    assert draft["sourceFilename"] == "small_slip.pdf"
+    assert draft["extracted"]["cedentName"] == "Bodystructure Mutual"
+    assert any("giant_500mb.pdf" in w for w in draft["extracted"]["warnings"])
+    assert marked_seen == [b"1"]
+
+    client.post(f"/api/intake/drafts/{draft['draftId']}/discard")
+
+
+def test_elt_enormous_annual_rate_is_rejected_before_poisson_and_stores_no_sim_set():
+    """Security review: Tiny ELT CSV with huge annual_rate must be rejected without OOM or storing a sim set."""
+    before_sims = {s["simSetId"] for s in client.get("/api/sim-sets").json()}
+    bad_elt = b"event_id,annual_rate,mean_loss,region_peril_key\n1001,1000000,25.0,US-FL-WS\n"
+    res = client.post("/api/intake/drop-in", files={"file": ("oom_elt.csv", bad_elt, "text/csv")})
+    assert res.status_code == 422
+    assert "annual_rate" in res.json()["detail"] or "1000" in res.json()["detail"]
+    after_sims = {s["simSetId"] for s in client.get("/api/sim-sets").json()}
+    assert after_sims == before_sims
+
+
+def test_imap_missing_rfc822_size_fails_closed_to_bodystructure(monkeypatch):
+    """Security review: Missing/unparsable RFC822.SIZE must NOT fall back to BODY.PEEK[]; use BODYSTRUCTURE."""
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "nosize-secret")
+
+    small_pdf = _make_minimal_pdf([
+        "Cedent: FailClosed Re",
+        "Programme: FailClosed Wind 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $10M xs $20M | Premium $2.0M",
+    ])
+    small_pdf_b64 = base64.b64encode(small_pdf)
+    bs_response = (
+        b'1 (BODYSTRUCTURE ('
+        + f'("APPLICATION" "PDF" ("NAME" "safe.pdf") NIL NIL "BASE64" {len(small_pdf_b64)} NIL ("ATTACHMENT" ("FILENAME" "safe.pdf")) NIL)'.encode("ascii")
+        + b' "MIXED" ("BOUNDARY" "b") NIL NIL))'
+    )
+    fetched_cmds: list[str] = []
+
+    class FakeNoSizeIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            return ("OK", [b"1"])
+
+        def fetch(self, num: bytes, cmd: str):
+            fetched_cmds.append(cmd)
+            if "RFC822.SIZE" in cmd:
+                # Missing / unparsable size response
+                return ("OK", [b"1 ()"])
+            if "HEADER.FIELDS" in cmd:
+                return ("OK", [(b"1 (BODY[HEADER.FIELDS] {80})", b"Message-ID: <nosize@test>\r\nFrom: a@b.com\r\nSubject: NoSize\r\n\r\n")])
+            if "BODYSTRUCTURE" in cmd:
+                return ("OK", [bs_response])
+            if cmd == "(BODY.PEEK[1])":
+                return ("OK", [(b"1 (BODY[1] {999})", small_pdf_b64)])
+            raise AssertionError(f"Must not call BODY.PEEK[] when RFC822.SIZE is missing: {cmd}")
+
+        def store(self, num: bytes, op: str, flags: str):
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeNoSizeIMAP)
+    res = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "nosize-secret"})
+    assert res.status_code == 200, res.text
+    assert "(BODY.PEEK[])" not in fetched_cmds
+    assert "(BODYSTRUCTURE)" in fetched_cmds
+    assert len(res.json()["drafts"]) == 1
+    client.post(f"/api/intake/drafts/{res.json()['drafts'][0]['draftId']}/discard")
 
 
 def test_parquet_yelt_reads_actual_trial_count():

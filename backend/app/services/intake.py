@@ -15,9 +15,11 @@ import imaplib
 import json
 import logging
 import os
+import quopri
 import re
 import ssl
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -85,8 +87,171 @@ def _max_base64_chars(max_bytes: int) -> int:
 
 
 def _max_imap_message_bytes() -> int:
-    """Maximum raw RFC822 message size to download via IMAP (whole-message cap across attachments + envelope)."""
-    return _max_base64_chars(MAX_EMAIL_ATTACHMENTS * MAX_UPLOAD_BYTES) + 256 * 1024
+    """Maximum raw RFC822 message size (in octets) allowed for a single BODY.PEEK[]."""
+    return MAX_UPLOAD_BYTES + 256 * 1024
+
+
+@dataclass
+class _ImapBodyPart:
+    section: str
+    media_type: str
+    encoding: str
+    size_octets: int
+    filename: str | None = None
+    disposition: str = ""
+
+
+def _tokenize_imap_sexp(text: str) -> list[str]:
+    tokens: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in " \t\r\n":
+            i += 1
+        elif ch in "()":
+            tokens.append(ch)
+            i += 1
+        elif ch == '"':
+            i += 1
+            buf: list[str] = []
+            while i < n and text[i] != '"':
+                if text[i] == "\\" and i + 1 < n:
+                    buf.append(text[i + 1])
+                    i += 2
+                else:
+                    buf.append(text[i])
+                    i += 1
+            i += 1  # skip closing quote
+            tokens.append('"' + "".join(buf) + '"')
+        else:
+            start = i
+            while i < n and text[i] not in ' \t\r\n()"':
+                i += 1
+            tokens.append(text[start:i])
+    return tokens
+
+
+def _parse_sexp_list(tokens: list[str], pos: int) -> tuple[list, int]:
+    out: list = []
+    assert tokens[pos] == "("
+    pos += 1
+    while pos < len(tokens) and tokens[pos] != ")":
+        tok = tokens[pos]
+        if tok == "(":
+            sub, pos = _parse_sexp_list(tokens, pos)
+            out.append(sub)
+        elif tok.startswith('"') and tok.endswith('"'):
+            out.append(tok[1:-1])
+            pos += 1
+        elif tok.upper() == "NIL":
+            out.append(None)
+            pos += 1
+        else:
+            out.append(tok)
+            pos += 1
+    return out, (pos + 1 if pos < len(tokens) else pos)
+
+
+def _kv_param(params: object, key: str) -> str | None:
+    if not isinstance(params, list):
+        return None
+    target = key.lower()
+    for i in range(0, len(params) - 1, 2):
+        k = params[i]
+        v = params[i + 1]
+        if isinstance(k, str) and k.lower() == target and isinstance(v, str):
+            return v
+    return None
+
+
+def _collect_bodystructure_parts(node: list, prefix: str, out: list[_ImapBodyPart]) -> None:
+    if not node:
+        return
+    # Multipart: starts with one or more nested subpart lists
+    if isinstance(node[0], list):
+        part_idx = 0
+        for item in node:
+            if isinstance(item, list):
+                part_idx += 1
+                sub_prefix = f"{prefix}.{part_idx}" if prefix else str(part_idx)
+                _collect_bodystructure_parts(item, sub_prefix, out)
+            else:
+                break
+        return
+    # Leaf part: [type, subtype, params, id, desc, encoding, size, ...]
+    if len(node) < 7 or not isinstance(node[0], str) or not isinstance(node[1], str):
+        return
+    media_type = f"{node[0].lower()}/{node[1].lower()}"
+    encoding = str(node[5] or "7bit").lower()
+    try:
+        size_octets = int(node[6]) if node[6] is not None else 0
+    except (TypeError, ValueError):
+        size_octets = 0
+    filename = _kv_param(node[2], "name") or _kv_param(node[2], "filename")
+    disposition = ""
+    # Extension data: disposition is a 2-element list [disp_type, [params...]]
+    for ext_item in node[7:]:
+        if isinstance(ext_item, list) and ext_item and isinstance(ext_item[0], str):
+            d_type = ext_item[0].lower()
+            if d_type in ("attachment", "inline"):
+                disposition = d_type
+                if len(ext_item) > 1:
+                    filename = _kv_param(ext_item[1], "filename") or _kv_param(ext_item[1], "name") or filename
+                break
+    out.append(
+        _ImapBodyPart(
+            section=prefix or "1",
+            media_type=media_type,
+            encoding=encoding,
+            size_octets=size_octets,
+            filename=filename,
+            disposition=disposition,
+        )
+    )
+
+
+def _parse_imap_bodystructure(bs_data: object) -> list[_ImapBodyPart]:
+    """Parse an IMAP FETCH BODYSTRUCTURE response into flat leaf parts with section numbers and octet sizes."""
+    if not isinstance(bs_data, list):
+        return []
+    text_parts: list[str] = []
+    for item in bs_data:
+        raw = item[0] if isinstance(item, tuple) else item
+        if isinstance(raw, (bytes, bytearray)):
+            text_parts.append(raw.decode("utf-8", errors="replace"))
+        elif isinstance(raw, str):
+            text_parts.append(raw)
+    joined = " ".join(text_parts)
+    m = re.search(r"BODYSTRUCTURE\s*\(", joined, re.I)
+    if not m:
+        return []
+    start = m.end() - 1
+    tokens = _tokenize_imap_sexp(joined[start:])
+    if not tokens or tokens[0] != "(":
+        return []
+    parsed, _ = _parse_sexp_list(tokens, 0)
+    parts: list[_ImapBodyPart] = []
+    _collect_bodystructure_parts(parsed, "", parts)
+    return parts
+
+
+def _decode_imap_part_bytes(raw_bytes: bytes, encoding: str) -> bytes:
+    enc = encoding.lower()
+    if enc == "base64":
+        return base64.b64decode(raw_bytes)
+    if enc == "quoted-printable":
+        return quopri.decodestring(raw_bytes)
+    return raw_bytes
+
+
+def _extract_fetch_payload(data: object) -> bytes | None:
+    if not isinstance(data, list):
+        return None
+    for item in data:
+        if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], (bytes, bytearray)):
+            return bytes(item[1])
+    return None
 
 
 def _escape_like(value: str) -> str:
@@ -889,29 +1054,14 @@ class SubmissionIntakeService:
             ids = (msg_nums[0].split() if msg_nums and msg_nums[0] else [])[:max_messages]
             for num in ids:
                 try:
-                    # Check RFC822.SIZE before downloading the full message body
+                    # Check RFC822.SIZE before downloading the full message body.
+                    # Messages within the single-poll cap (~33 MB) can use BODY.PEEK[].
+                    # Larger messages NEVER call BODY.PEEK[]; instead they inspect BODYSTRUCTURE
+                    # and download only individual in-limit parts via BODY.PEEK[<section>].
                     _, size_data = imap.fetch(num, "(RFC822.SIZE)")
                     msg_size = _parse_rfc822_size(size_data)
-                    max_msg_bytes = _max_imap_message_bytes()
-                    if msg_size is not None and msg_size > max_msg_bytes:
-                        logger.warning(
-                            "Skipping oversized IMAP message %s (%d bytes > %d byte cap) without downloading body",
-                            num,
-                            msg_size,
-                            max_msg_bytes,
-                        )
-                        imap.store(num, "+FLAGS", "\\Seen")
-                        skipped += 1
-                        continue
+                    max_single_fetch = _max_imap_message_bytes()
 
-                    _, data = imap.fetch(num, "(BODY.PEEK[])")
-                    if not data or not isinstance(data[0], tuple):
-                        skipped += 1
-                        continue
-                    parsed_mail = email.message_from_bytes(data[0][1])
-                    msg_id = str(parsed_mail.get("Message-ID") or num.decode("utf-8", errors="ignore"))
-                    sender = str(parsed_mail.get("From") or "unknown")
-                    subject = str(parsed_mail.get("Subject") or "(No Subject)")
                     body_parts: list[str] = []
                     raw_attachments: list[tuple[int, str, bytes]] = []
                     rejected_attachments: list[str] = []
@@ -920,61 +1070,156 @@ class SubmissionIntakeService:
                     total_bytes = 0
                     att_idx = 0
 
-                    msg_prefix = f"email:{msg_id}:"
-                    escaped_msg_prefix = f"email:{_escape_like(msg_id)}:%"
-                    with get_session() as db:
-                        already_ingested_keys = {
-                            r.external_key
-                            for r in db.query(WatchedIngestionRecord.external_key)
-                            .filter(WatchedIngestionRecord.external_key.like(escaped_msg_prefix, escape="\\"))
-                            .all()
-                            if r.external_key.startswith(msg_prefix)
-                        }
+                    # Fail-closed: if RFC822.SIZE is missing/unparsable OR exceeds the single-poll octet cap,
+                    # NEVER call BODY.PEEK[] — always use BODYSTRUCTURE + per-part BODY.PEEK[<section>].
+                    if msg_size is None or msg_size > max_single_fetch:
+                        _, hdr_data = imap.fetch(num, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM SUBJECT)])")
+                        hdr_bytes = _extract_fetch_payload(hdr_data)
+                        parsed_hdrs = email.message_from_bytes(hdr_bytes or b"")
+                        msg_id = str(parsed_hdrs.get("Message-ID") or num.decode("utf-8", errors="ignore"))
+                        sender = str(parsed_hdrs.get("From") or "unknown")
+                        subject = str(parsed_hdrs.get("Subject") or "(No Subject)")
 
-                    for part in parsed_mail.walk():
-                        disp = str(part.get("Content-Disposition") or "")
-                        fname = part.get_filename()
-                        if fname or "attachment" in disp.lower():
-                            safe_name = fname or f"attachment_{att_idx}.bin"
+                        _, bs_data = imap.fetch(num, "(BODYSTRUCTURE)")
+                        parts = _parse_imap_bodystructure(bs_data)
+                        if not parts:
+                            logger.warning(
+                                "Skipping oversized IMAP message %s (%d bytes): BODYSTRUCTURE unavailable; marking \\Seen",
+                                num,
+                                msg_size,
+                            )
+                            imap.store(num, "+FLAGS", "\\Seen")
+                            skipped += 1
+                            continue
+
+                        msg_prefix = f"email:{msg_id}:"
+                        escaped_msg_prefix = f"email:{_escape_like(msg_id)}:%"
+                        with get_session() as db:
+                            already_ingested_keys = {
+                                r.external_key
+                                for r in db.query(WatchedIngestionRecord.external_key)
+                                .filter(WatchedIngestionRecord.external_key.like(escaped_msg_prefix, escape="\\"))
+                                .all()
+                                if r.external_key.startswith(msg_prefix)
+                            }
+
+                        for bp in parts:
+                            is_att = bool(bp.filename) or bp.disposition == "attachment" or bp.media_type != "text/plain"
+                            if not is_att and bp.media_type == "text/plain":
+                                if bp.size_octets <= 256 * 1024:
+                                    _, part_data = imap.fetch(num, f"(BODY.PEEK[{bp.section}])")
+                                    raw_p = _extract_fetch_payload(part_data)
+                                    if raw_p:
+                                        decoded_p = _decode_imap_part_bytes(raw_p, bp.encoding)
+                                        body_parts.append(decoded_p.decode("utf-8", errors="replace"))
+                                continue
+
+                            safe_name = bp.filename or f"attachment_{att_idx}.bin"
                             item_key = f"email:{msg_id}:att:{att_idx}:{safe_name}"
                             if item_key in already_ingested_keys:
                                 already_stored_attachments += 1
                                 att_idx += 1
                                 continue
-                            # Check per-file encoded length before decoding to avoid allocating oversized buffers
-                            raw_encoded = part.get_payload(decode=False)
-                            if isinstance(raw_encoded, str) and len(raw_encoded) > max_b64 * 2:
-                                logger.warning("Skipping oversized attachment '%s' on IMAP message %s", safe_name, num)
-                                rejected_attachments.append(safe_name)
-                                att_idx += 1
-                                continue
-                            payload = part.get_payload(decode=True)
-                            if payload is None:
-                                att_idx += 1
-                                continue
-                            if len(payload) > MAX_UPLOAD_BYTES:
+
+                            est_decoded = (bp.size_octets * 3) // 4 if bp.encoding == "base64" else bp.size_octets
+                            if est_decoded > MAX_UPLOAD_BYTES or bp.size_octets > max_b64 * 2:
                                 logger.warning(
-                                    "Skipping oversized attachment '%s' (%d bytes) on IMAP message %s",
+                                    "Skipping oversized IMAP part '%s' (%d octets) on message %s without downloading",
                                     safe_name,
-                                    len(payload),
+                                    bp.size_octets,
                                     num,
                                 )
                                 rejected_attachments.append(safe_name)
                                 att_idx += 1
                                 continue
-                            # In-limit attachment: if this poll's batch count or byte budget is full,
-                            # defer it to the next poll and keep the message UNSEEN (never drop or mislabel it).
-                            if len(raw_attachments) >= MAX_EMAIL_ATTACHMENTS or (total_bytes + len(payload)) > MAX_UPLOAD_BYTES:
+
+                            if len(raw_attachments) >= MAX_EMAIL_ATTACHMENTS or (total_bytes + est_decoded) > MAX_UPLOAD_BYTES:
+                                has_deferred_in_limit = True
+                                att_idx += 1
+                                continue
+
+                            _, part_data = imap.fetch(num, f"(BODY.PEEK[{bp.section}])")
+                            raw_p = _extract_fetch_payload(part_data)
+                            if raw_p is None:
+                                att_idx += 1
+                                continue
+                            payload = _decode_imap_part_bytes(raw_p, bp.encoding)
+                            if len(payload) > MAX_UPLOAD_BYTES:
+                                rejected_attachments.append(safe_name)
+                                att_idx += 1
+                                continue
+                            if (total_bytes + len(payload)) > MAX_UPLOAD_BYTES:
                                 has_deferred_in_limit = True
                                 att_idx += 1
                                 continue
                             total_bytes += len(payload)
                             raw_attachments.append((att_idx, safe_name, payload))
                             att_idx += 1
-                        elif part.get_content_type() == "text/plain":
-                            payload = part.get_payload(decode=True)
-                            if payload:
-                                body_parts.append(payload.decode("utf-8", errors="replace"))
+                    else:
+                        _, data = imap.fetch(num, "(BODY.PEEK[])")
+                        if not data or not isinstance(data[0], tuple):
+                            skipped += 1
+                            continue
+                        parsed_mail = email.message_from_bytes(data[0][1])
+                        msg_id = str(parsed_mail.get("Message-ID") or num.decode("utf-8", errors="ignore"))
+                        sender = str(parsed_mail.get("From") or "unknown")
+                        subject = str(parsed_mail.get("Subject") or "(No Subject)")
+
+                        msg_prefix = f"email:{msg_id}:"
+                        escaped_msg_prefix = f"email:{_escape_like(msg_id)}:%"
+                        with get_session() as db:
+                            already_ingested_keys = {
+                                r.external_key
+                                for r in db.query(WatchedIngestionRecord.external_key)
+                                .filter(WatchedIngestionRecord.external_key.like(escaped_msg_prefix, escape="\\"))
+                                .all()
+                                if r.external_key.startswith(msg_prefix)
+                            }
+
+                        for part in parsed_mail.walk():
+                            disp = str(part.get("Content-Disposition") or "")
+                            fname = part.get_filename()
+                            if fname or "attachment" in disp.lower():
+                                safe_name = fname or f"attachment_{att_idx}.bin"
+                                item_key = f"email:{msg_id}:att:{att_idx}:{safe_name}"
+                                if item_key in already_ingested_keys:
+                                    already_stored_attachments += 1
+                                    att_idx += 1
+                                    continue
+                                # Check per-file encoded length before decoding to avoid allocating oversized buffers
+                                raw_encoded = part.get_payload(decode=False)
+                                if isinstance(raw_encoded, str) and len(raw_encoded) > max_b64 * 2:
+                                    logger.warning("Skipping oversized attachment '%s' on IMAP message %s", safe_name, num)
+                                    rejected_attachments.append(safe_name)
+                                    att_idx += 1
+                                    continue
+                                payload = part.get_payload(decode=True)
+                                if payload is None:
+                                    att_idx += 1
+                                    continue
+                                if len(payload) > MAX_UPLOAD_BYTES:
+                                    logger.warning(
+                                        "Skipping oversized attachment '%s' (%d bytes) on IMAP message %s",
+                                        safe_name,
+                                        len(payload),
+                                        num,
+                                    )
+                                    rejected_attachments.append(safe_name)
+                                    att_idx += 1
+                                    continue
+                                # In-limit attachment: if this poll's batch count or byte budget is full,
+                                # defer it to the next poll and keep the message UNSEEN (never drop or mislabel it).
+                                if len(raw_attachments) >= MAX_EMAIL_ATTACHMENTS or (total_bytes + len(payload)) > MAX_UPLOAD_BYTES:
+                                    has_deferred_in_limit = True
+                                    att_idx += 1
+                                    continue
+                                total_bytes += len(payload)
+                                raw_attachments.append((att_idx, safe_name, payload))
+                                att_idx += 1
+                            elif part.get_content_type() == "text/plain":
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    body_parts.append(payload.decode("utf-8", errors="replace"))
 
                     if not raw_attachments and already_stored_attachments > 0:
                         # All attachments on this message are already stored (or deferred); never create a body draft.
