@@ -244,6 +244,26 @@ class CdfPoint(CamelModel):
     roc_pct: float
 
 
+class PortfolioEpPoint(CamelModel):
+    return_period: float
+    probability: float
+    oep: float
+    oep_tvar: float
+    aep: float
+    aep_tvar: float
+
+
+class PortfolioEpSlice(CamelModel):
+    key: str
+    label: str
+    dimension: str  # TOTAL | REGION | PERIL | REGION_PERIL
+    aal: float
+    sd: float
+    max_occ: float
+    max_year: float
+    ep_points: list[PortfolioEpPoint]
+
+
 class GuidelineCheck(CamelModel):
     percentile: float
     label: str
@@ -283,6 +303,10 @@ class PortfolioRollupResponse(CamelModel):
     cdf_curve: list[CdfPoint]
     quantiles: dict[str, float]
     guidelines: list[GuidelineCheck]
+    ep_curve: list[PortfolioEpPoint] = []
+    ep_by_region: list[PortfolioEpSlice] = []
+    ep_by_peril: list[PortfolioEpSlice] = []
+    ep_by_region_peril: list[PortfolioEpSlice] = []
     layer_allocations: list[LayerAllocationRow]
     manifest: RunManifest
 
@@ -315,6 +339,101 @@ class PortfolioHedgeComparisonResponse(CamelModel):
     with_hedges: PortfolioRollupResponse
     without_hedges: PortfolioRollupResponse
     accretion: HedgeAccretionSummary
+    manifest: RunManifest
+
+
+class PortfolioSliceSpec(CamelModel):
+    label: str = "Portfolio"
+    view: ViewOfRisk = ViewOfRisk.ADJUSTED
+    total_capital: float = Field(default=160.0, gt=0)
+    include_hedges: bool = True
+    statuses: list[ProgrammeStatus] | None = None
+    treaty_years: list[int] | None = None
+    renewal_periods: list[str] | None = None
+    inception_from: str | None = None
+    inception_to: str | None = None
+    region_perils: list[str] | None = None
+    programme_ids: list[str] | None = None
+
+
+class PortfolioCompareRequest(CamelModel):
+    portfolio_a: PortfolioSliceSpec
+    portfolio_b: PortfolioSliceSpec
+
+
+class EpDeltaPoint(CamelModel):
+    return_period: float
+    probability: float
+    oep_a: float
+    oep_b: float
+    delta_oep: float
+    oep_tvar_a: float
+    oep_tvar_b: float
+    delta_oep_tvar: float
+    aep_a: float
+    aep_b: float
+    delta_aep: float
+    aep_tvar_a: float
+    aep_tvar_b: float
+    delta_aep_tvar: float
+
+
+class EpSplitDeltaRow(CamelModel):
+    key: str
+    label: str
+    dimension: str
+    aal_a: float
+    aal_b: float
+    delta_aal: float
+    oep_100_a: float
+    oep_100_b: float
+    delta_oep_100: float
+    oep_250_a: float
+    oep_250_b: float
+    delta_oep_250: float
+    aep_100_a: float
+    aep_100_b: float
+    delta_aep_100: float
+    aep_250_a: float
+    aep_250_b: float
+    delta_aep_250: float
+    tvar_250_a: float
+    tvar_250_b: float
+    delta_tvar_250: float
+
+
+class PortfolioDeltaSummary(CamelModel):
+    programme_count_a: int
+    programme_count_b: int
+    layer_count_a: int
+    layer_count_b: int
+    delta_net_premium_m: float
+    delta_gross_premium_m: float
+    delta_expected_loss_m: float
+    delta_expected_profit_m: float
+    delta_mean_roc_pct: float
+    delta_no_event_roc_pct: float
+    delta_break_even_prob_pct: float
+    delta_return_on_tvar_pct: float
+    delta_var_250_m: float
+    delta_tvar_250_m: float
+    delta_oep_100_m: float
+    delta_oep_250_m: float
+    delta_aep_100_m: float
+    delta_aep_250_m: float
+
+
+class PortfolioCompareResponse(CamelModel):
+    currency: str
+    portfolio_a: PortfolioRollupResponse
+    portfolio_b: PortfolioRollupResponse
+    programme_count_a: int
+    programme_count_b: int
+    delta: PortfolioDeltaSummary
+    ep_deltas: list[EpDeltaPoint]
+    region_deltas: list[EpSplitDeltaRow]
+    peril_deltas: list[EpSplitDeltaRow]
+    region_peril_deltas: list[EpSplitDeltaRow]
     manifest: RunManifest
 
 

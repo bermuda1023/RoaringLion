@@ -2134,6 +2134,8 @@ class ContractStore:
     def select_slice(self, req: SliceRollupRequest) -> list[ContractFull]:
         all_c = self.list_contracts()
         out: list[ContractFull] = []
+        inc_from = (req.inception_from or "").strip() or None
+        inc_to = (req.inception_to or "").strip() or None
         for c in all_c:
             if req.programme_ids and c.programme_id not in req.programme_ids:
                 continue
@@ -2145,8 +2147,16 @@ class ContractStore:
                 continue
             if req.offices and c.office not in req.offices:
                 continue
+            if req.treaty_years and c.treaty_year not in req.treaty_years:
+                continue
             if req.renewal_periods and c.renewal_period not in req.renewal_periods:
                 continue
+            if inc_from or inc_to:
+                eff_inc = (c.inception_date or f"{c.treaty_year}-01-01").strip()
+                if inc_from and eff_inc < inc_from:
+                    continue
+                if inc_to and eff_inc > inc_to:
+                    continue
             if req.region_perils and not any(rp in c.region_perils for rp in req.region_perils):
                 continue
             out.append(c)

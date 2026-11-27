@@ -3,6 +3,9 @@ import type {
   DeterministicLossRow,
   DeterministicRunResponse,
   GraphTemplate,
+  PortfolioCompareOptionsResponse,
+  PortfolioCompareRequest,
+  PortfolioCompareResponse,
   PortfolioHedgeComparisonResponse,
   PortfolioRollupResponse,
   PortfolioSnapshotInfo,
@@ -309,6 +312,13 @@ export const api = {
     fetchJson<PortfolioHedgeComparisonResponse>(
       `/api/portfolio/comparison?view=${view}&totalCapital=${totalCapital}`,
     ),
+  getPortfolioCompareOptions: () =>
+    fetchJson<PortfolioCompareOptionsResponse>('/api/portfolio/compare/options'),
+  comparePortfolios: (payload: PortfolioCompareRequest) =>
+    fetchJson<PortfolioCompareResponse>('/api/portfolio/compare', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   getPortfolioSnapshotInfo: (asOfDate?: string | null) =>
     fetchJson<PortfolioSnapshotInfo>(
       `/api/portfolio/snapshot-info${asOfDate ? `?asOfDate=${encodeURIComponent(asOfDate)}` : ''}`,

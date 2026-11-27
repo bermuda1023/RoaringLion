@@ -69,6 +69,9 @@ class RollupLayerEntry:
     feeder_node_id: str | None = None
     expected_rip: float = 0.0
     expected_rip_1x: float = 0.0
+    event_node_id: str | None = None
+    event_scale: float = 1.0
+    source_programme_id: str = ""
 
 
 _EMPTY_F64 = np.empty(0, dtype=np.float64)
@@ -417,6 +420,9 @@ def extract_rollup_layers(
                     feeder_node_id=feeder_id,
                     expected_rip=exp_rip_placed,
                     expected_rip_1x=exp_rip_1x,
+                    event_node_id=px.node_id,
+                    event_scale=loss_scale_placed,
+                    source_programme_id=prog.programme_id,
                 )
             )
 
@@ -476,6 +482,9 @@ def extract_rollup_layers(
                     feeder_node_id=node.node_id,
                     expected_rip=exp_rip_placed,
                     expected_rip_1x=exp_rip_1x,
+                    event_node_id=node.node_id,
+                    event_scale=1.0,
+                    source_programme_id=prog.programme_id,
                 )
             )
 

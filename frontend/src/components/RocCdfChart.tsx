@@ -19,20 +19,22 @@ export function RocCdfChart({
     if (!ref.current) return;
     const chart = echarts.init(ref.current);
     const isNarrow = ref.current.clientWidth < 520;
-    const markLines = data.guidelines.map((g) => ({
-      yAxis: g.thresholdRocPct,
-      name: `${g.label}: ${g.thresholdRocPct}%`,
-      lineStyle: {
-        color: g.passed ? '#5cad7a' : '#e0706a',
-        type: 'dashed' as const,
-        width: 1.2,
+    const markLines = [
+      {
+        yAxis: 0,
+        name: 'Break-Even (0%)',
+        lineStyle: {
+          color: '#7a9e8e',
+          type: 'dashed' as const,
+          width: 1.2,
+        },
+        label: {
+          formatter: isNarrow ? '0%' : 'Break-Even (0%)',
+          color: '#a8c4b6',
+          fontSize: isNarrow ? 9 : 10,
+        },
       },
-      label: {
-        formatter: isNarrow ? `${g.thresholdRocPct}%` : `${g.label} (${g.thresholdRocPct}%)`,
-        color: g.passed ? '#8fd4a8' : '#f0a8a4',
-        fontSize: isNarrow ? 9 : 10,
-      },
-    }));
+    ];
 
     const series: echarts.SeriesOption[] = [
       {
