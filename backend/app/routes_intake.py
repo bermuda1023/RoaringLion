@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hmac
+import os
 from typing import Callable
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadFile
 
 from app.models.intake import (
     EmailDoorStatus,
@@ -110,7 +112,21 @@ def create_intake_router(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @router.post("/email/poll", response_model=EmailPollResult)
-    def email_poll() -> EmailPollResult:
+    def email_poll(
+        x_intake_poll_secret: str | None = Header(default=None, alias="X-Intake-Poll-Secret"),
+    ) -> EmailPollResult:
+        expected = os.getenv("ROARING_LION_INTAKE_POLL_SECRET", "").strip()
+        if not expected:
+            raise HTTPException(
+                status_code=503,
+                detail="Email poll is disabled: ROARING_LION_INTAKE_POLL_SECRET is not configured on the server.",
+            )
+        provided = (x_intake_poll_secret or "").strip()
+        if not provided or not hmac.compare_digest(provided, expected):
+            raise HTTPException(
+                status_code=401,
+                detail="Unauthorized: missing or invalid X-Intake-Poll-Secret header.",
+            )
         try:
             return svc.poll_email_inbox()
         except Exception as exc:

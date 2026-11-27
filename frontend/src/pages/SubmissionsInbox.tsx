@@ -24,7 +24,7 @@ export function SubmissionsInbox({
   const [statusFilter, setStatusFilter] = useState<IntakeDraftStatus | 'ALL'>('PENDING_REVIEW');
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
-  const [busyDoor, setBusyDoor] = useState<'email' | 'folder' | null>(null);
+  const [busyFolder, setBusyFolder] = useState(false);
 
   const statusQ = useQuery({
     queryKey: ['intakeStatus'],
@@ -48,30 +48,8 @@ export function SubmissionsInbox({
     qc.invalidateQueries({ queryKey: ['health'] });
   };
 
-  const handlePollEmail = async () => {
-    setBusyDoor('email');
-    setActionMsg(null);
-    try {
-      const res = await intakeApi.pollEmail();
-      setActionMsg(
-        res.connected
-          ? `Email inbox polled: ${res.processedCount} new message(s), ${res.skippedCount} skipped.`
-          : 'Email inbox is not connected.',
-      );
-      if (res.drafts.length > 0) {
-        setStatusFilter('PENDING_REVIEW');
-        setSelectedDraftId(res.drafts[0].draftId);
-      }
-      refreshAll();
-    } catch (err) {
-      setActionMsg(err instanceof Error ? err.message : 'Email poll failed.');
-    } finally {
-      setBusyDoor(null);
-    }
-  };
-
   const handleScanFolders = async () => {
-    setBusyDoor('folder');
+    setBusyFolder(true);
     setActionMsg(null);
     try {
       const res = await intakeApi.scanFolders();
@@ -86,7 +64,7 @@ export function SubmissionsInbox({
     } catch (err) {
       setActionMsg(err instanceof Error ? err.message : 'Folder scan failed.');
     } finally {
-      setBusyDoor(null);
+      setBusyFolder(false);
     }
   };
 
@@ -138,14 +116,9 @@ export function SubmissionsInbox({
               Configured address: <code>{email.inboxAddress}</code>
             </div>
           )}
-          <button
-            type="button"
-            className="btn secondary"
-            disabled={busyDoor !== null || !email?.connected}
-            onClick={() => void handlePollEmail()}
-          >
-            {busyDoor === 'email' ? 'Polling…' : 'Poll Inbox'}
-          </button>
+          <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text-muted)' }}>
+            Inbound mail is polled server-side by an operator or scheduled job; new drafts appear in the queue below.
+          </div>
         </div>
 
         {/* Door 3: Watched Folders */}
@@ -174,10 +147,10 @@ export function SubmissionsInbox({
           <button
             type="button"
             className="btn secondary"
-            disabled={busyDoor !== null}
+            disabled={busyFolder}
             onClick={() => void handleScanFolders()}
           >
-            {busyDoor === 'folder' ? 'Scanning…' : 'Scan All Folders'}
+            {busyFolder ? 'Scanning…' : 'Scan All Folders'}
           </button>
         </div>
       </div>

@@ -188,8 +188,6 @@ export const intakeApi = {
   discardDraft: (draftId: string) =>
     postJson<SubmissionDraftOut>(`/api/intake/drafts/${draftId}/discard`, {}),
 
-  pollEmail: () => postJson<EmailPollResult>('/api/intake/email/poll', {}),
-
   setWatchedFolder: (programmeId: string, watchedFolder: string | null) =>
     putJson<ContractFull>(`/api/intake/programmes/${programmeId}/watched-folder`, { watchedFolder }),
 

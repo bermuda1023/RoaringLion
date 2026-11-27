@@ -811,20 +811,28 @@ class SubmissionIntakeService:
                     body_parts: list[str] = []
                     raw_attachments: list[tuple[int, str, bytes]] = []
                     rejected_attachments: list[str] = []
+                    has_deferred_in_limit = False
                     total_bytes = 0
                     att_idx = 0
+
+                    with get_session() as db:
+                        already_ingested_keys = {
+                            r.external_key
+                            for r in db.query(WatchedIngestionRecord.external_key)
+                            .filter(WatchedIngestionRecord.external_key.like(f"email:{msg_id}:%"))
+                            .all()
+                        }
 
                     for part in parsed_mail.walk():
                         disp = str(part.get("Content-Disposition") or "")
                         fname = part.get_filename()
                         if fname or "attachment" in disp.lower():
                             safe_name = fname or f"attachment_{att_idx}.bin"
-                            if len(raw_attachments) >= MAX_EMAIL_ATTACHMENTS:
-                                logger.warning("Skipping extra attachment '%s' on IMAP message %s (limit %d)", safe_name, num, MAX_EMAIL_ATTACHMENTS)
-                                rejected_attachments.append(safe_name)
+                            item_key = f"email:{msg_id}:att:{att_idx}:{safe_name}"
+                            if item_key in already_ingested_keys:
                                 att_idx += 1
                                 continue
-                            # Check encoded payload length before decoding to avoid allocating huge buffers
+                            # Check per-file encoded length before decoding to avoid allocating oversized buffers
                             raw_encoded = part.get_payload(decode=False)
                             if isinstance(raw_encoded, str) and len(raw_encoded) > max_b64 * 2:
                                 logger.warning("Skipping oversized attachment '%s' on IMAP message %s", safe_name, num)
@@ -835,7 +843,7 @@ class SubmissionIntakeService:
                             if payload is None:
                                 att_idx += 1
                                 continue
-                            if len(payload) > MAX_UPLOAD_BYTES or (total_bytes + len(payload)) > MAX_UPLOAD_BYTES:
+                            if len(payload) > MAX_UPLOAD_BYTES:
                                 logger.warning(
                                     "Skipping oversized attachment '%s' (%d bytes) on IMAP message %s",
                                     safe_name,
@@ -843,6 +851,12 @@ class SubmissionIntakeService:
                                     num,
                                 )
                                 rejected_attachments.append(safe_name)
+                                att_idx += 1
+                                continue
+                            # In-limit attachment: if this poll's batch count or byte budget is full,
+                            # defer it to the next poll and keep the message UNSEEN (never drop or mislabel it).
+                            if len(raw_attachments) >= MAX_EMAIL_ATTACHMENTS or (total_bytes + len(payload)) > MAX_UPLOAD_BYTES:
+                                has_deferred_in_limit = True
                                 att_idx += 1
                                 continue
                             total_bytes += len(payload)
@@ -867,8 +881,9 @@ class SubmissionIntakeService:
                     skipped += 1
                     continue
 
-                # Only mark \Seen after handling (including skipping any oversized attachments) succeeded.
-                imap.store(num, "+FLAGS", "\\Seen")
+                # Only mark \Seen when every in-limit attachment has been stored (no deferred files left).
+                if not has_deferred_in_limit:
+                    imap.store(num, "+FLAGS", "\\Seen")
                 if created:
                     processed += 1
                     drafts.extend(created)

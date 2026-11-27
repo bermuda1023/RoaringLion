@@ -185,5 +185,6 @@ describe('SubmissionsInbox', () => {
       expect(screen.getByTestId('email-door-status').textContent).toBe('Not connected');
       expect(screen.getByTestId('submission-review-card')).toBeTruthy();
     });
+    expect(screen.queryByRole('button', { name: /poll inbox/i })).toBeNull();
   });
 });

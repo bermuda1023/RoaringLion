@@ -259,13 +259,14 @@ def test_email_door_status_and_fixture_matching(monkeypatch):
     monkeypatch.delenv("ROARING_LION_EMAIL_USERNAME", raising=False)
     monkeypatch.delenv("ROARING_LION_EMAIL_PASSWORD", raising=False)
     monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "test-poll-secret")
 
     status = client.get("/api/intake/email/status").json()
     assert status["connected"] is False
     assert status["inboxAddress"] == "submissions@roaringlion.test"
     assert "not connected" in status["message"].lower()
 
-    poll = client.post("/api/intake/email/poll").json()
+    poll = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "test-poll-secret"}).json()
     assert poll["connected"] is False
     assert poll["processedCount"] == 0
 
@@ -412,6 +413,7 @@ def test_poll_email_inbox_uses_body_peek_verified_tls_and_handles_oversized_and_
     monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
     monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
     monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "ops-secret-123")
 
     # Message 1: transient ingest failure -> must remain UNSEEN
     msg_transient = EmailMessage()
@@ -495,7 +497,7 @@ def test_poll_email_inbox_uses_body_peek_verified_tls_and_handles_oversized_and_
     # Cap at 200 bytes so 400-byte huge_slip.pdf is skipped while valid_sibling.csv & msg_ok succeed
     monkeypatch.setattr(intake_mod, "MAX_UPLOAD_BYTES", 200)
 
-    res = client.post("/api/intake/email/poll")
+    res = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "ops-secret-123"})
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["connected"] is True
@@ -565,6 +567,119 @@ def test_email_ingest_caps_attachment_count_and_rejects_oversized_before_decode(
     )
     assert too_big.status_code == 413
     assert decode_called["n"] == 0
+
+
+def test_email_poll_requires_poll_secret_and_refuses_imap_without_it(monkeypatch):
+    """Security review: /api/intake/email/poll refuses without ROARING_LION_INTAKE_POLL_SECRET and never opens IMAP."""
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+
+    imap_opened = {"n": 0}
+
+    def fail_if_imap_opened(*args, **kwargs):
+        imap_opened["n"] += 1
+        raise AssertionError("IMAP4_SSL must not be opened when poll secret is missing or invalid")
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", fail_if_imap_opened)
+
+    # 1. Env var unset -> 503 and IMAP never opened
+    monkeypatch.delenv("ROARING_LION_INTAKE_POLL_SECRET", raising=False)
+    r1 = client.post("/api/intake/email/poll")
+    assert r1.status_code == 503
+    assert imap_opened["n"] == 0
+
+    # 2. Env var set, missing header -> 401 and IMAP never opened
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "top-secret-poll-key")
+    r2 = client.post("/api/intake/email/poll")
+    assert r2.status_code == 401
+    assert imap_opened["n"] == 0
+
+    # 3. Env var set, wrong header -> 401 and IMAP never opened
+    r3 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "wrong-key"})
+    assert r3.status_code == 401
+    assert imap_opened["n"] == 0
+
+
+def test_imap_poll_defers_in_limit_attachments_across_polls_without_marking_seen_or_mislabelling(monkeypatch):
+    """Bugbot #10: In-limit attachments hitting per-poll count/byte cap stay UNSEEN until all are stored."""
+    from email.message import EmailMessage
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "batch-secret")
+
+    msg = EmailMessage()
+    msg["Message-ID"] = "<imap-batch-001@test>"
+    msg["From"] = "broker@example.com"
+    msg["Subject"] = "Three valid YELT attachments"
+    msg.set_content("All three files are within the per-file size limit.")
+    for i in range(1, 4):
+        msg.add_attachment(
+            f"trial_id,event_id,loss_amount\n1,{2000 + i},{10 * i}.0\n".encode("utf-8"),
+            maintype="text",
+            subtype="csv",
+            filename=f"part_{i}.csv",
+        )
+    raw_msg = msg.as_bytes()
+    seen_flags: set[bytes] = set()
+
+    class FakeBatchIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            unseen = [b"1"] if b"1" not in seen_flags else []
+            return ("OK", [b" ".join(unseen)])
+
+        def fetch(self, num: bytes, cmd: str):
+            assert cmd == "(BODY.PEEK[])"
+            return ("OK", [(b"1 (BODY[] {100})", raw_msg)])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                seen_flags.add(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeBatchIMAP)
+    # Limit to 2 attachments per poll so part_3.csv is deferred to poll 2
+    monkeypatch.setattr(intake_mod, "MAX_EMAIL_ATTACHMENTS", 2)
+
+    # Poll 1: ingests part_1.csv and part_2.csv; leaves message UNSEEN; does NOT mislabel part_3.csv as oversized
+    p1 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "batch-secret"})
+    assert p1.status_code == 200, p1.text
+    d1 = p1.json()["drafts"]
+    assert sorted(d["sourceFilename"] for d in d1) == ["part_1.csv", "part_2.csv"]
+    assert b"1" not in seen_flags
+    for d in d1:
+        assert not any("part_3.csv" in w for w in d["extracted"]["warnings"])
+
+    # Poll 2: skips already-ingested part_1 & part_2, ingests part_3.csv, and now marks \Seen
+    p2 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "batch-secret"})
+    assert p2.status_code == 200, p2.text
+    d2 = p2.json()["drafts"]
+    assert [d["sourceFilename"] for d in d2] == ["part_3.csv"]
+    assert b"1" in seen_flags
+
+    for d in d1 + d2:
+        client.post(f"/api/intake/drafts/{d['draftId']}/discard")
 
 
 def test_parquet_yelt_reads_actual_trial_count():
