@@ -12,6 +12,7 @@ import {
   PROGRAMME_STATUSES,
   type OptimizerCandidatesPage,
   type OptimizerMode,
+  type OptimizerObjective,
   type ProgrammeStatus,
 } from '../types/contracts';
 import { fmtInt, fmtMoneyM, fmtNum, fmtPct, fmtRatioPct } from '../utils/format';
@@ -34,6 +35,19 @@ import {
   type XAxisKey,
   type YAxisKey,
 } from '../components/OptimizerCharts';
+import {
+  FRONTIER_PRESETS,
+  X_AXIS_OPTIONS,
+  Y_AXIS_OPTIONS,
+  activeRiskHorizon,
+  canShowTangent,
+  detectActivePreset,
+  findPeakReturnRiskPoint,
+  formatRatioDual,
+  formatRatioHeadline,
+  getRatioValue,
+  type FrontierPreset,
+} from '../utils/frontierMetrics';
 
 interface FrontierExplorerResponse {
   mode: string;
@@ -45,6 +59,10 @@ interface FrontierExplorerResponse {
   initialPortfolio: PortfolioMetricsSnapshot;
   initialLayers: OptimizedLayerRow[];
   recommendedIndex: number;
+  peakReturnToTvar100Index?: number;
+  peakReturnToTvar250Index?: number;
+  peakReturnToTvar1000Index?: number;
+  peakReturnToStdDevIndex?: number;
   frontier: FrontierExplorerPoint[];
 }
 
@@ -106,7 +124,7 @@ function DeltaBar({ deltaShare, maxAbsDelta }: { deltaShare: number; maxAbsDelta
 
   const isPos = pct > 0;
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 145 }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 104 }}>
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', height: 14 }}>
         <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-end', paddingRight: 2 }}>
           {!isPos && (
@@ -136,7 +154,7 @@ function DeltaBar({ deltaShare, maxAbsDelta }: { deltaShare: number; maxAbsDelta
       </div>
       <span
         style={{
-          width: 54,
+          width: 46,
           textAlign: 'right',
           fontSize: 11,
           fontWeight: 600,
@@ -157,9 +175,7 @@ export function PortfolioOptimizer() {
   // Core Optimization Config state
   const [mode, setMode] = useState<OptimizerMode>('FORWARD_PLANNING');
   const [view, setView] = useState<'ADJUSTED' | 'UNADJUSTED'>('ADJUSTED');
-  const [objective, setObjective] = useState<'MAX_EXPECTED_PROFIT' | 'MIN_TVAR_250' | 'MAX_RISK_ADJUSTED_RETURN'>(
-    'MAX_EXPECTED_PROFIT',
-  );
+  const [objective, setObjective] = useState<OptimizerObjective>('MAX_EXPECTED_PROFIT');
   const [riskLambda, setRiskLambda] = useState(0.15);
   const [totalCapital, setTotalCapital] = useState(160);
   const [maxCollateral, setMaxCollateral] = useState(160);
@@ -189,7 +205,8 @@ export function PortfolioOptimizer() {
   // Frontier Explorer interactive selection & axis selectors
   const [selectedIdx, setSelectedIdx] = useState<number>(0);
   const [xKey, setXKey] = useState<XAxisKey>('tvar250M');
-  const [yKey, setYKey] = useState<YAxisKey>('expectedProfitM');
+  const [yKey, setYKey] = useState<YAxisKey>('returnToTvar250');
+  const [showTangent, setShowTangent] = useState<boolean>(true);
   const [forkedBranchMsg, setForkedBranchMsg] = useState<string | null>(null);
 
   useEffect(() => {
@@ -292,6 +309,16 @@ export function PortfolioOptimizer() {
     onSuccess: (res) => {
       setSelectedIdx(res.recommendedIndex);
       setForkedBranchMsg(null);
+      if (objective === 'MAX_RETURN_ON_TVAR_250') {
+        setYKey('returnToTvar250');
+        setXKey('tvar250M');
+      } else if (objective === 'MAX_RETURN_ON_TVAR_100') {
+        setYKey('returnToTvar100');
+        setXKey('tvar100M');
+      } else if (objective === 'MAX_RETURN_ON_TVAR_1000') {
+        setYKey('returnToTvar1000');
+        setXKey('tvar1000M');
+      }
     },
   });
 
@@ -305,6 +332,29 @@ export function PortfolioOptimizer() {
   const data = exploreMut.data;
   const activePoint: FrontierExplorerPoint | null =
     data && data.frontier.length ? data.frontier[Math.min(selectedIdx, data.frontier.length - 1)] : null;
+
+  const horizon = useMemo(() => activeRiskHorizon(xKey, yKey), [xKey, yKey]);
+  const activePreset = useMemo(() => detectActivePreset(xKey, yKey), [xKey, yKey]);
+  const peakPoint = useMemo(
+    () => (data ? findPeakReturnRiskPoint(data.frontier, horizon.ratioKey) : null),
+    [data, horizon.ratioKey],
+  );
+  const peakByRatio = useMemo(() => {
+    if (!data) return null;
+    return {
+      returnToTvar100: findPeakReturnRiskPoint(data.frontier, 'returnToTvar100')?.pointIndex ?? -1,
+      returnToTvar250: findPeakReturnRiskPoint(data.frontier, 'returnToTvar250')?.pointIndex ?? -1,
+      returnToTvar1000: findPeakReturnRiskPoint(data.frontier, 'returnToTvar1000')?.pointIndex ?? -1,
+      returnToStdDev: findPeakReturnRiskPoint(data.frontier, 'returnToStdDev')?.pointIndex ?? -1,
+    };
+  }, [data]);
+  const isAtPeak = !!activePoint && !!peakPoint && activePoint.pointIndex === peakPoint.pointIndex;
+
+  const applyPreset = (preset: FrontierPreset) => {
+    setXKey(preset.xKey);
+    setYKey(preset.yKey);
+    setShowTangent(preset.defaultTangent);
+  };
 
   // One-click promote selected frontier point into a versioned Portfolio Branch for historical backtesting!
   const forkBranchMut = useMutation({
@@ -469,11 +519,14 @@ export function PortfolioOptimizer() {
                     Primary Objective
                     <select
                       value={objective}
-                      onChange={(e) => setObjective(e.target.value as any)}
+                      onChange={(e) => setObjective(e.target.value as OptimizerObjective)}
                       style={{ width: '100%', marginTop: 4 }}
                     >
                       <option value="MAX_EXPECTED_PROFIT">Max Expected Return</option>
-                      <option value="MAX_RISK_ADJUSTED_RETURN">Max Risk-Adjusted (E[R] − λ·TVaR)</option>
+                      <option value="MAX_RETURN_ON_TVAR_250">Peak Ret / TVaR 250</option>
+                      <option value="MAX_RETURN_ON_TVAR_100">Peak Ret / TVaR 100</option>
+                      <option value="MAX_RETURN_ON_TVAR_1000">Peak Ret / TVaR 1000</option>
+                      <option value="MAX_RISK_ADJUSTED_RETURN">Risk-Adjusted (E[R] − λ·TVaR)</option>
                       <option value="MIN_TVAR_250">Min 1-in-250 TVaR</option>
                     </select>
                   </label>
@@ -582,6 +635,12 @@ export function PortfolioOptimizer() {
                     </label>
                   )}
                 </div>
+
+                {objective.startsWith('MAX_RETURN_ON_TVAR_') && (
+                  <div className="deal-sub" style={{ marginTop: 8 }}>
+                    Targets the peak <b>Expected Return / TVaR</b> portfolio under all active constraints via fractional LP/MILP and selects it automatically on the frontier.
+                  </div>
+                )}
 
                 <div
                   style={{
@@ -896,14 +955,14 @@ export function PortfolioOptimizer() {
                   style={{
                     display: 'flex',
                     flexWrap: 'wrap',
-                    gap: 12,
+                    gap: 10,
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     background: 'var(--surface-sunken)',
                     border: '1px solid var(--border-strong)',
                     borderRadius: 6,
-                    padding: '9px 12px',
-                    marginBottom: 14,
+                    padding: '8px 12px',
+                    marginBottom: 12,
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -912,21 +971,32 @@ export function PortfolioOptimizer() {
                     </span>
                     <input
                       type="range"
+                      aria-label="Frontier point scrubber"
                       min={0}
                       max={data.frontier.length - 1}
                       value={selectedIdx}
                       onChange={(e) => setSelectedIdx(Number(e.target.value))}
-                      style={{ width: 170 }}
+                      style={{ width: 160 }}
                     />
                     <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      {activePoint.solver} · {activePoint.status} · {data.computeMs} ms total ({data.frontier.length}{' '}
-                      solves)
+                      {activePoint.solver} · {activePoint.status} · {data.computeMs} ms ({data.frontier.length} solves)
                     </span>
                   </div>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {peakPoint && (
+                      <button
+                        type="button"
+                        className={`btn btn-peak ${isAtPeak ? 'at-peak' : ''}`}
+                        onClick={() => setSelectedIdx(peakPoint.pointIndex)}
+                        title={`Jump to the constrained frontier point maximizing ${horizon.label}`}
+                      >
+                        {isAtPeak ? '★ At Peak' : '★ Jump to Peak'} {horizon.shortLabel} (#{peakPoint.pointIndex + 1} ·{' '}
+                        {formatRatioHeadline(getRatioValue(peakPoint.metrics, horizon.ratioKey), horizon.isMultiple)})
+                      </button>
+                    )}
                     <button
                       className="btn"
-                      style={{ background: 'var(--teal-strong)' }}
+                      style={{ background: 'var(--teal-strong)', height: 30, fontSize: 12 }}
                       onClick={() => forkBranchMut.mutate()}
                       disabled={forkBranchMut.isPending}
                     >
@@ -937,66 +1007,134 @@ export function PortfolioOptimizer() {
 
                 <PortfolioStatusSummary layers={activePoint.layers} stale={resultIsStale} />
 
-                {/* Top KPI Strip */}
+                {/* Top KPI Strip (compact single row on desktop) */}
                 <div className="grid-kpi">
                   <div className="kpi">
                     <div className="kpi-label">Expected Return</div>
                     <div className="kpi-val" style={{ color: 'var(--positive)' }}>
                       {fmtMoneyM(activePoint.metrics.expectedProfitM, 2)}
                     </div>
-                  </div>
-                  <div className="kpi">
-                    <div className="kpi-label">Mean ROC</div>
-                    <div className="kpi-val">{fmtPct(activePoint.metrics.meanRocPct, 2)}</div>
-                  </div>
-                  <div className="kpi">
-                    <div className="kpi-label">1-in-100 TVaR</div>
-                    <div className="kpi-val">{fmtMoneyM(activePoint.metrics.tvar100M, 1)}</div>
+                    <div className="kpi-sub">Mean ROC {fmtPct(activePoint.metrics.meanRocPct, 2)}</div>
                   </div>
                   <div className="kpi">
                     <div className="kpi-label">1-in-250 TVaR</div>
                     <div className="kpi-val" style={{ color: 'var(--accent)' }}>
                       {fmtMoneyM(activePoint.metrics.tvar250M, 1)}
                     </div>
+                    <div className="kpi-sub">
+                      100yr {fmtMoneyM(activePoint.metrics.tvar100M, 1)} · 1000yr {fmtMoneyM(activePoint.metrics.tvar1000M, 1)}
+                    </div>
                   </div>
-                  <div className="kpi">
-                    <div className="kpi-label">Risk / Reward</div>
-                    <div className="kpi-val">{fmtNum(activePoint.metrics.riskRewardRatio, 3)}</div>
+                  <div
+                    className={`kpi ${horizon.ratioKey === 'returnToTvar100' ? 'kpi-highlight' : ''}`}
+                    title={`Return / TVaR 1-in-100: ${formatRatioDual(getRatioValue(activePoint.metrics, 'returnToTvar100'))}`}
+                  >
+                    <div className="kpi-label-row">
+                      <span className="kpi-label">Ret / TVaR 100</span>
+                      {peakByRatio?.returnToTvar100 === activePoint.pointIndex && <span className="kpi-peak-tag">Peak</span>}
+                    </div>
+                    <div className="kpi-val">
+                      {formatRatioHeadline(getRatioValue(activePoint.metrics, 'returnToTvar100'))}
+                    </div>
+                    <div className="kpi-sub">{fmtNum(getRatioValue(activePoint.metrics, 'returnToTvar100'), 3)}×</div>
                   </div>
-                  <div className="kpi">
-                    <div className="kpi-label">EL / Capital</div>
-                    <div className="kpi-val">{fmtRatioPct(activePoint.metrics.elCapitalRatio, 1)}</div>
+                  <div
+                    className={`kpi ${horizon.ratioKey === 'returnToTvar250' ? 'kpi-highlight' : ''}`}
+                    title={`Return / TVaR 1-in-250: ${formatRatioDual(getRatioValue(activePoint.metrics, 'returnToTvar250'))}`}
+                  >
+                    <div className="kpi-label-row">
+                      <span className="kpi-label">Ret / TVaR 250</span>
+                      {peakByRatio?.returnToTvar250 === activePoint.pointIndex && <span className="kpi-peak-tag">Peak</span>}
+                    </div>
+                    <div className="kpi-val" style={{ color: 'var(--positive)' }}>
+                      {formatRatioHeadline(getRatioValue(activePoint.metrics, 'returnToTvar250'))}
+                    </div>
+                    <div className="kpi-sub">{fmtNum(getRatioValue(activePoint.metrics, 'returnToTvar250'), 3)}×</div>
+                  </div>
+                  <div
+                    className={`kpi ${horizon.ratioKey === 'returnToTvar1000' ? 'kpi-highlight' : ''}`}
+                    title={`Return / TVaR 1-in-1000: ${formatRatioDual(getRatioValue(activePoint.metrics, 'returnToTvar1000'))}`}
+                  >
+                    <div className="kpi-label-row">
+                      <span className="kpi-label">Ret / TVaR 1000</span>
+                      {peakByRatio?.returnToTvar1000 === activePoint.pointIndex && <span className="kpi-peak-tag">Peak</span>}
+                    </div>
+                    <div className="kpi-val">
+                      {formatRatioHeadline(getRatioValue(activePoint.metrics, 'returnToTvar1000'))}
+                    </div>
+                    <div className="kpi-sub">{fmtNum(getRatioValue(activePoint.metrics, 'returnToTvar1000'), 3)}×</div>
+                  </div>
+                  <div
+                    className={`kpi ${horizon.ratioKey === 'returnToStdDev' ? 'kpi-highlight' : ''}`}
+                    title={`Return / Loss Std Dev · EL / Capital ${fmtRatioPct(activePoint.metrics.elCapitalRatio, 1)}`}
+                  >
+                    <div className="kpi-label-row">
+                      <span className="kpi-label">Ret / Std Dev</span>
+                      {peakByRatio?.returnToStdDev === activePoint.pointIndex && <span className="kpi-peak-tag">Peak</span>}
+                    </div>
+                    <div className="kpi-val">
+                      {formatRatioHeadline(getRatioValue(activePoint.metrics, 'returnToStdDev'), true)}
+                    </div>
+                    <div className="kpi-sub">EL / Cap {fmtRatioPct(activePoint.metrics.elCapitalRatio, 1)}</div>
                   </div>
                 </div>
 
                 {/* Row 1: Pareto Frontier + Diverging Share Summary */}
                 <div className="grid-2" style={{ marginBottom: 14 }}>
                   <div className="panel">
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        flexWrap: 'wrap',
-                        gap: 8,
-                        marginBottom: 8,
-                      }}
-                    >
-                      <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
-                        Pareto Frontier (Click any dot to inspect)
-                      </span>
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                        <select value={yKey} onChange={(e) => setYKey(e.target.value as YAxisKey)}>
-                          <option value="expectedProfitM">Y: Expected Return ($M)</option>
-                          <option value="meanRocPct">Y: Mean ROC (%)</option>
-                          <option value="riskRewardRatio">Y: Risk / Reward</option>
+                    <div className="frontier-toolbar">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
+                          Pareto Frontier
+                        </span>
+                        <div className="seg" role="group" aria-label="Pareto chart view presets">
+                          {FRONTIER_PRESETS.map((preset) => (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              className={activePreset === preset.id ? 'active' : ''}
+                              onClick={() => applyPreset(preset)}
+                            >
+                              {preset.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <select
+                          aria-label="Y-axis metric"
+                          className="frontier-select"
+                          value={yKey}
+                          onChange={(e) => setYKey(e.target.value as YAxisKey)}
+                        >
+                          {Y_AXIS_OPTIONS.map((opt) => (
+                            <option key={opt.key} value={opt.key}>
+                              Y: {opt.shortLabel}
+                            </option>
+                          ))}
                         </select>
-                        <select value={xKey} onChange={(e) => setXKey(e.target.value as XAxisKey)}>
-                          <option value="tvar250M">X: TVaR 1-in-250</option>
-                          <option value="tvar100M">X: TVaR 1-in-100</option>
-                          <option value="tvar500M">X: TVaR 1-in-500</option>
-                          <option value="deployedCollateralM">X: Deployed Collateral</option>
+                        <select
+                          aria-label="X-axis metric"
+                          className="frontier-select"
+                          value={xKey}
+                          onChange={(e) => setXKey(e.target.value as XAxisKey)}
+                        >
+                          {X_AXIS_OPTIONS.map((opt) => (
+                            <option key={opt.key} value={opt.key}>
+                              X: {opt.shortLabel}
+                            </option>
+                          ))}
                         </select>
+                        {canShowTangent(xKey, yKey) && (
+                          <label className="frontier-tangent-toggle" title="Show origin iso-ratio tangent line through the peak Return/Risk point">
+                            <input
+                              type="checkbox"
+                              checked={showTangent}
+                              onChange={(e) => setShowTangent(e.target.checked)}
+                            />
+                            Tangent
+                          </label>
+                        )}
                       </div>
                     </div>
                     <ParetoFrontierChart
@@ -1005,6 +1143,7 @@ export function PortfolioOptimizer() {
                       selectedIndex={activePoint.pointIndex}
                       xKey={xKey}
                       yKey={yKey}
+                      showTangent={showTangent}
                       onSelectPoint={setSelectedIdx}
                     />
                   </div>
@@ -1014,18 +1153,18 @@ export function PortfolioOptimizer() {
                     <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 8 }}>
                       Share Summary — Proposed vs Initial (Δ)
                     </div>
-                    <div className="table-wrap"><table>
+                    <div className="table-wrap"><table className="compact-table">
                       <thead>
                         <tr>
                           <th>Layer</th>
                           <th className="num">Share</th>
-                          <th>Share Change (Δ)</th>
+                          <th>Δ Share</th>
                         </tr>
                       </thead>
                       <tbody>
                         {sortedShareRows.map((r) => (
                           <tr key={r.layerKey} className={isOffRiskStatus(r.status) ? 'row-off-risk' : undefined}>
-                            <td>
+                            <td style={{ whiteSpace: 'normal', minWidth: 125 }}>
                               <div className="deal-name">
                                 {r.cedentName}
                                 <LayerStatusBadge status={r.status} direction={r.direction} />
@@ -1051,7 +1190,7 @@ export function PortfolioOptimizer() {
                     <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 8 }}>
                       Portfolio Summary — Initial vs Proposed
                     </div>
-                    <div className="table-wrap"><table>
+                    <div className="table-wrap"><table className="compact-table">
                       <thead>
                         <tr>
                           <th>Metric</th>
@@ -1063,28 +1202,68 @@ export function PortfolioOptimizer() {
                       </thead>
                       <tbody>
                         {[
-                          { label: 'Expected Return ($M)', a: data.initialPortfolio.expectedProfitM, b: activePoint.metrics.expectedProfitM, goodUp: true },
-                          { label: 'Mean ROC (%)', a: data.initialPortfolio.meanRocPct, b: activePoint.metrics.meanRocPct, goodUp: true },
-                          { label: 'TVaR 1-in-100 ($M)', a: data.initialPortfolio.tvar100M, b: activePoint.metrics.tvar100M, goodUp: false },
-                          { label: 'TVaR 1-in-250 ($M)', a: data.initialPortfolio.tvar250M, b: activePoint.metrics.tvar250M, goodUp: false },
-                          { label: 'TVaR 1-in-500 ($M)', a: data.initialPortfolio.tvar500M, b: activePoint.metrics.tvar500M, goodUp: false },
-                          { label: 'TVaR 1-in-1000 ($M)', a: data.initialPortfolio.tvar1000M, b: activePoint.metrics.tvar1000M, goodUp: false },
-                          { label: 'Deployed Collateral ($M)', a: data.initialPortfolio.deployedCollateralM, b: activePoint.metrics.deployedCollateralM, goodUp: false },
-                          { label: 'Risk / Reward Ratio', a: data.initialPortfolio.riskRewardRatio, b: activePoint.metrics.riskRewardRatio, goodUp: true },
+                          { label: 'Expected Return ($M)', a: data.initialPortfolio.expectedProfitM, b: activePoint.metrics.expectedProfitM, goodUp: true, fmt: 'money' as const },
+                          { label: 'Mean ROC (%)', a: data.initialPortfolio.meanRocPct, b: activePoint.metrics.meanRocPct, goodUp: true, fmt: 'pct' as const },
+                          {
+                            label: 'Return / TVaR 1-in-100',
+                            a: getRatioValue(data.initialPortfolio, 'returnToTvar100'),
+                            b: getRatioValue(activePoint.metrics, 'returnToTvar100'),
+                            goodUp: true,
+                            fmt: 'ratio' as const,
+                          },
+                          {
+                            label: 'Return / TVaR 1-in-250',
+                            a: getRatioValue(data.initialPortfolio, 'returnToTvar250'),
+                            b: getRatioValue(activePoint.metrics, 'returnToTvar250'),
+                            goodUp: true,
+                            fmt: 'ratio' as const,
+                          },
+                          {
+                            label: 'Return / TVaR 1-in-1000',
+                            a: getRatioValue(data.initialPortfolio, 'returnToTvar1000'),
+                            b: getRatioValue(activePoint.metrics, 'returnToTvar1000'),
+                            goodUp: true,
+                            fmt: 'ratio' as const,
+                          },
+                          {
+                            label: 'Return / Std Dev',
+                            a: getRatioValue(data.initialPortfolio, 'returnToStdDev'),
+                            b: getRatioValue(activePoint.metrics, 'returnToStdDev'),
+                            goodUp: true,
+                            fmt: 'mult' as const,
+                          },
+                          { label: 'TVaR 1-in-100 ($M)', a: data.initialPortfolio.tvar100M, b: activePoint.metrics.tvar100M, goodUp: false, fmt: 'money' as const },
+                          { label: 'TVaR 1-in-250 ($M)', a: data.initialPortfolio.tvar250M, b: activePoint.metrics.tvar250M, goodUp: false, fmt: 'money' as const },
+                          { label: 'TVaR 1-in-500 ($M)', a: data.initialPortfolio.tvar500M, b: activePoint.metrics.tvar500M, goodUp: false, fmt: 'money' as const },
+                          { label: 'TVaR 1-in-1000 ($M)', a: data.initialPortfolio.tvar1000M, b: activePoint.metrics.tvar1000M, goodUp: false, fmt: 'money' as const },
+                          { label: 'Loss Std Dev ($M)', a: data.initialPortfolio.stdDevM ?? 0, b: activePoint.metrics.stdDevM ?? 0, goodUp: false, fmt: 'money' as const },
+                          { label: 'Deployed Collateral ($M)', a: data.initialPortfolio.deployedCollateralM, b: activePoint.metrics.deployedCollateralM, goodUp: false, fmt: 'money' as const },
                         ].map((row) => {
                           const diff = row.b - row.a;
                           const pct = Math.abs(row.a) > 1e-6 ? (diff / Math.abs(row.a)) * 100 : 0;
                           const improved = row.goodUp ? diff >= -1e-4 : diff <= 1e-4;
+                          const fmtVal = (v: number) => {
+                            if (row.fmt === 'ratio') return formatRatioDual(v);
+                            if (row.fmt === 'mult') return `${fmtNum(v, 2)}×`;
+                            if (row.fmt === 'pct') return fmtPct(v, 2);
+                            return fmtMoneyM(v, 2);
+                          };
+                          const fmtDiff = (d: number) => {
+                            const sign = d >= 0 ? '+' : '';
+                            if (row.fmt === 'ratio') return `${sign}${(d * 100).toFixed(1)} pts`;
+                            if (row.fmt === 'mult') return `${sign}${d.toFixed(2)}×`;
+                            if (row.fmt === 'pct') return `${sign}${d.toFixed(2)} pts`;
+                            return `${sign}${d.toFixed(2)}`;
+                          };
                           return (
                             <tr key={row.label}>
                               <td>{row.label}</td>
-                              <td className="num">{row.a.toFixed(2)}</td>
+                              <td className="num">{fmtVal(row.a)}</td>
                               <td className="num" style={{ fontWeight: 700 }}>
-                                {row.b.toFixed(2)}
+                                {fmtVal(row.b)}
                               </td>
                               <td className="num" style={{ color: improved ? 'var(--positive)' : 'var(--warning)' }}>
-                                {diff >= 0 ? '+' : ''}
-                                {diff.toFixed(2)}
+                                {fmtDiff(diff)}
                               </td>
                               <td className="num" style={{ color: improved ? 'var(--positive)' : 'var(--warning)' }}>
                                 {pct >= 0 ? '+' : ''}
@@ -1149,7 +1328,8 @@ export function PortfolioOptimizer() {
             <div className="panel" style={{ marginBottom: 14 }}>
               <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 8 }}>
                 Layer Summary — Frontier Point #{activePoint.pointIndex + 1} (TVaR 250: $
-                {activePoint.metrics.tvar250M.toFixed(1)}m · Exp Return: ${activePoint.metrics.expectedProfitM.toFixed(2)}m)
+                {activePoint.metrics.tvar250M.toFixed(1)}m · Exp Return: ${activePoint.metrics.expectedProfitM.toFixed(2)}m · Ret/TVaR 250:{' '}
+                {formatRatioDual(getRatioValue(activePoint.metrics, 'returnToTvar250'))})
               </div>
               <div className="table-wrap"><table className="dense-table">
                 <thead>

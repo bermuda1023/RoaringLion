@@ -408,6 +408,13 @@ export const PROGRAMME_STATUSES = [
 export type ProgrammeStatus = (typeof PROGRAMME_STATUSES)[number];
 
 export type OptimizerMode = 'CURRENT' | 'FORWARD_PLANNING';
+export type OptimizerObjective =
+  | 'MAX_EXPECTED_PROFIT'
+  | 'MAX_RETURN_ON_TVAR_250'
+  | 'MAX_RETURN_ON_TVAR_100'
+  | 'MAX_RETURN_ON_TVAR_1000'
+  | 'MIN_TVAR_250'
+  | 'MAX_RISK_ADJUSTED_RETURN';
 
 /** One layer-level decision variable of the optimizer, at 100% share. `status` is the deal's status. */
 export interface OptimizerLayerCatalogItem {

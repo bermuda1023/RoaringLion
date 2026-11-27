@@ -78,6 +78,11 @@ The Portfolio Optimizer chooses its deals by status:
   - `universeProgrammes` (programmes in the selected statuses) and `matchedProgrammes` (those also matching `search`);
   - `programmeIds` for the page and `layers[]`, the layers those programmes' graphs roll up, each with its deal `status`. A layer that another programme's graph prices is listed with that programme;
   - `retroCandidate`, the candidate retro ILW hedge, separate from the deals.
+- Portfolio Optimizer objectives (`OptimizerObjective` on `POST /api/optimizer/solve`, `/frontier`, `/explore`): `MAX_EXPECTED_PROFIT`, `MAX_RETURN_ON_TVAR_250`, `MAX_RETURN_ON_TVAR_100`, `MAX_RETURN_ON_TVAR_1000`, `MAX_RISK_ADJUSTED_RETURN`, `MIN_TVAR_250`. The `MAX_RETURN_ON_TVAR_*` objectives solve the fractional LP/MILP via Dinkelbach's method with a max-return knee polish subject to all active constraints (including `maxTvar100M` and `maxTvar250M`).
+- Optimizer Return / Risk metrics:
+  - `PortfolioMetricsSnapshot` (on `/explore`) exposes `stdDevM`, `returnToTvar100`, `returnToTvar250` (matching `riskRewardRatio`), `returnToTvar500`, `returnToTvar1000`, and `returnToStdDev`.
+  - `FrontierExplorerResponse` exposes `peakReturnToTvar100Index`, `peakReturnToTvar250Index`, `peakReturnToTvar1000Index`, and `peakReturnToStdDevIndex`. When `objective` is `MAX_RETURN_ON_TVAR_*`, `/explore` inserts the exact constrained fractional LP/MILP solution onto the frontier and sets `recommendedIndex` to it.
+  - `OptimizerResponse` (on `/solve`) echoes `objective` alongside `before/afterTvar100M`, `before/afterTvar1000M`, and `before/afterReturnToTvar100/250/1000`; `FrontierPoint` (on `/frontier`) exposes `returnToTvar250`.
 
 ## 6. Deterministic Loss Source Types (`LossSourceType`)
 

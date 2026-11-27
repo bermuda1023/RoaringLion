@@ -36,6 +36,20 @@ TERM_NODE_TYPES = (
 STACK_RETURN_PERIODS = [2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0]
 
 OptimizerMode = Literal["CURRENT", "FORWARD_PLANNING"]
+OptimizerObjective = Literal[
+    "MAX_EXPECTED_PROFIT",
+    "MAX_RETURN_ON_TVAR_250",
+    "MAX_RETURN_ON_TVAR_100",
+    "MAX_RETURN_ON_TVAR_1000",
+    "MIN_TVAR_250",
+    "MAX_RISK_ADJUSTED_RETURN",
+]
+
+RATIO_OBJECTIVE_RP: dict[str, float] = {
+    "MAX_RETURN_ON_TVAR_100": 100.0,
+    "MAX_RETURN_ON_TVAR_250": 250.0,
+    "MAX_RETURN_ON_TVAR_1000": 1000.0,
+}
 
 # Deal statuses each horizon mode builds its portfolio from when the request names none.
 CURRENT_MODE_STATUSES = frozenset({ProgrammeStatus.QUOTED, ProgrammeStatus.FIRM_ORDER, ProgrammeStatus.BOUND})
@@ -103,7 +117,7 @@ class OptimizerRequest(CamelModel):
     # Deal statuses to build the portfolio from. None keeps the mode's defaults; any status may be listed.
     included_statuses: list[ProgrammeStatus] | None = None
     granularity: Literal["DEAL", "LAYER"] = "DEAL"
-    objective: Literal["MAX_EXPECTED_PROFIT", "MIN_TVAR_250", "MAX_RISK_ADJUSTED_RETURN"] = "MAX_EXPECTED_PROFIT"
+    objective: OptimizerObjective = "MAX_EXPECTED_PROFIT"
     risk_aversion_lambda: float = Field(default=0.15, ge=0, le=2, allow_inf_nan=False)
     view: ViewOfRisk = ViewOfRisk.ADJUSTED
     total_capital: float = Field(default=160.0, gt=0, le=1_000_000, allow_inf_nan=False)
@@ -212,14 +226,25 @@ class ConstraintDiagnostic(CamelModel):
 
 class OptimizerResponse(CamelModel):
     mode: str
+    objective: str = "MAX_EXPECTED_PROFIT"
     solver: str
     status: str
     compute_ms: float
     before_expected_profit_m: float
     after_expected_profit_m: float
     delta_expected_profit_m: float
+    before_tvar_100_m: float = 0.0
+    after_tvar_100_m: float = 0.0
     before_tvar_250_m: float
     after_tvar_250_m: float
+    before_tvar_1000_m: float = 0.0
+    after_tvar_1000_m: float = 0.0
+    before_return_to_tvar_100: float = 0.0
+    after_return_to_tvar_100: float = 0.0
+    before_return_to_tvar_250: float = 0.0
+    after_return_to_tvar_250: float = 0.0
+    before_return_to_tvar_1000: float = 0.0
+    after_return_to_tvar_1000: float = 0.0
     before_mean_roc_pct: float
     after_mean_roc_pct: float
     included_statuses: list[ProgrammeStatus] = []
@@ -235,6 +260,7 @@ class FrontierPoint(CamelModel):
     mean_roc_pct: float
     actual_tvar_250_m: float
     deployed_collateral_m: float
+    return_to_tvar_250: float = 0.0
 
 
 class PortfolioMetricsSnapshot(CamelModel):
@@ -245,6 +271,12 @@ class PortfolioMetricsSnapshot(CamelModel):
     expected_loss_m: float
     el_capital_ratio: float
     risk_reward_ratio: float
+    std_dev_m: float = 0.0
+    return_to_tvar_100: float = 0.0
+    return_to_tvar_250: float = 0.0
+    return_to_tvar_500: float = 0.0
+    return_to_tvar_1000: float = 0.0
+    return_to_std_dev: float = 0.0
     tvar_50_m: float
     tvar_100_m: float
     tvar_250_m: float
@@ -304,6 +336,10 @@ class FrontierExplorerResponse(CamelModel):
     initial_portfolio: PortfolioMetricsSnapshot
     initial_layers: list[OptimizedLayerRow]
     recommended_index: int
+    peak_return_to_tvar_100_index: int = 0
+    peak_return_to_tvar_250_index: int = 0
+    peak_return_to_tvar_1000_index: int = 0
+    peak_return_to_std_dev_index: int = 0
     frontier: list[FrontierExplorerPoint]
     manifest: RunManifest
 
@@ -738,6 +774,14 @@ def _gross_positive_sum(mat: np.ndarray) -> np.ndarray:
     return total
 
 
+def _weighted_mat(mat: np.ndarray, weights: np.ndarray, w_mat_buf: np.ndarray | None) -> np.ndarray:
+    """Compute `mat * weights[:, None]` in float64, reusing `w_mat_buf` when supplied."""
+    if w_mat_buf is not None and w_mat_buf.shape == mat.shape:
+        np.multiply(mat, weights[:, None], out=w_mat_buf, casting="unsafe")
+        return w_mat_buf
+    return np.ascontiguousarray(mat * weights[:, None], dtype=np.float64)
+
+
 def _compute_portfolio_snapshot(
     items: list[dict[str, Any]],
     mat: np.ndarray,
@@ -748,11 +792,7 @@ def _compute_portfolio_snapshot(
 ) -> tuple[PortfolioMetricsSnapshot, list[OptimizedLayerRow], list[ReturnPeriodStackRow]]:
     """Compute exact full-100k metrics, layer Euler Co-TVaR / Co-VaR, and stacked RP attribution via Rust."""
     m, n_trials = mat.shape
-    if w_mat_buf is not None and w_mat_buf.shape == mat.shape:
-        np.multiply(mat, weights[:, None], out=w_mat_buf)
-        w_mat = w_mat_buf
-    else:
-        w_mat = np.ascontiguousarray(mat * weights[:, None], dtype=np.float64)
+    w_mat = _weighted_mat(mat, weights, w_mat_buf)
     port_loss = w_mat.sum(axis=0)
 
     # Compute every required return period in a single Rust parallel sort.
@@ -789,8 +829,13 @@ def _compute_portfolio_snapshot(
     deployed = float(sum(weights[i] * items[i]["limit_1x"] for i in range(m) if not is_hedge_direction(items[i]["direction"])))
     gross_prem = float(sum(weights[i] * items[i]["prem_1x"] for i in range(m) if not is_hedge_direction(items[i]["direction"])))
     exp_loss = float(np.mean(port_loss))
+    std_dev = float(np.std(port_loss)) if n_trials > 0 else 0.0
     el_cap_ratio = max(0.0, exp_loss) / total_capital
-    risk_reward = (profit_m / float(tvar_250)) if float(tvar_250) > 1e-6 else 0.0
+    ret_tvar_100 = (profit_m / float(tvar_100)) if float(tvar_100) > 1e-6 else 0.0
+    ret_tvar_250 = (profit_m / float(tvar_250)) if float(tvar_250) > 1e-6 else 0.0
+    ret_tvar_500 = (profit_m / float(tvar_500)) if float(tvar_500) > 1e-6 else 0.0
+    ret_tvar_1000 = (profit_m / float(tvar_1000)) if float(tvar_1000) > 1e-6 else 0.0
+    ret_std_dev = (profit_m / std_dev) if std_dev > 1e-6 else 0.0
 
     snap = PortfolioMetricsSnapshot(
         expected_profit_m=round(profit_m, 4),
@@ -799,7 +844,13 @@ def _compute_portfolio_snapshot(
         gross_premium_m=round(gross_prem, 4),
         expected_loss_m=round(exp_loss, 4),
         el_capital_ratio=round(el_cap_ratio, 4),
-        risk_reward_ratio=round(risk_reward, 4),
+        risk_reward_ratio=round(ret_tvar_250, 4),
+        std_dev_m=round(std_dev, 4),
+        return_to_tvar_100=round(ret_tvar_100, 4),
+        return_to_tvar_250=round(ret_tvar_250, 4),
+        return_to_tvar_500=round(ret_tvar_500, 4),
+        return_to_tvar_1000=round(ret_tvar_1000, 4),
+        return_to_std_dev=round(ret_std_dev, 4),
         tvar_50_m=round(float(tvar_50), 4),
         tvar_100_m=round(float(tvar_100), 4),
         tvar_250_m=round(float(tvar_250), 4),
@@ -867,16 +918,118 @@ def _compute_portfolio_snapshot(
     return snap, layer_rows, rp_stack
 
 
+def _select_tail_scenarios(mat: np.ndarray, max_scenarios: int = 3600) -> np.ndarray:
+    """Select tail trials covering both aggregate extremes and each individual layer's tail.
+
+    Operates row-by-row over `mat` (avoiding any full `(M, N)` temporary allocation so large books
+    stay within tight RAM budgets). Selecting only top trials of equal-weighted gross_sum drops
+    standalone tail trials of smaller-limit or lower-frequency perils, causing the LP to
+    underestimate their CVaR and producing non-monotonic frontier dips.
+    """
+    m, n_trials = mat.shape
+    if n_trials == 0 or m == 0:
+        return np.arange(0, dtype=np.int64)
+    if n_trials <= max_scenarios:
+        return np.arange(n_trials, dtype=np.int64)
+
+    row_maxes = [float(mat[i].max()) for i in range(m)]
+    nz_rows = [i for i, rmax in enumerate(row_maxes) if rmax > 1e-12]
+    if not nz_rows:
+        return np.arange(min(max_scenarios, n_trials), dtype=np.int64)
+
+    gross_sum = np.zeros(n_trials, dtype=np.float64)
+    norm_max = np.zeros(n_trials, dtype=np.float32)
+    per_layer_k = max(60, min(500, 2200 // max(1, len(nz_rows))))
+    parts: list[np.ndarray] = []
+
+    for r_idx in nz_rows:
+        rmax = row_maxes[r_idx]
+        pos = np.maximum(mat[r_idx], 0.0)
+        gross_sum += pos
+        np.maximum(norm_max, pos * np.float32(1.0 / rmax), out=norm_max)
+        nz_count = int(np.count_nonzero(pos > 1e-12))
+        k = min(per_layer_k, nz_count)
+        if k > 0:
+            parts.append(np.argpartition(pos, -k)[-k:])
+
+    k_gross = min(1400, n_trials)
+    k_norm = min(1400, n_trials)
+    parts.append(np.argpartition(gross_sum, -k_gross)[-k_gross:])
+    parts.append(np.argpartition(norm_max, -k_norm)[-k_norm:])
+
+    selected = np.unique(np.concatenate(parts))
+    if len(selected) > max_scenarios:
+        g_max = float(np.max(gross_sum[selected])) or 1.0
+        score = (gross_sum[selected] / g_max) + norm_max[selected].astype(np.float64)
+        keep = np.argpartition(score, -max_scenarios)[-max_scenarios:]
+        selected = np.sort(selected[keep])
+    return selected
+
+
+def _missing_tail_trials(
+    mat: np.ndarray,
+    tail_idx: np.ndarray,
+    opt_w: np.ndarray,
+    *,
+    top_k: int = 1200,
+) -> np.ndarray:
+    """Return positive-loss trial indices in the true top-`top_k` portfolio losses absent from `tail_idx`."""
+    m, n_trials = mat.shape
+    if n_trials == 0 or len(tail_idx) >= n_trials:
+        return np.arange(0, dtype=np.int64)
+    # Accumulate row-by-row in float64 without upcasting the full float32 `mat` to float64
+    port_loss = np.zeros(n_trials, dtype=np.float64)
+    for i in range(m):
+        w_i = float(opt_w[i])
+        if abs(w_i) > 1e-12:
+            port_loss += w_i * mat[i]
+    k = min(top_k, n_trials)
+    top_idx = np.argpartition(port_loss, -k)[-k:]
+    top_idx = top_idx[port_loss[top_idx] > 1e-12]
+    if len(top_idx) == 0:
+        return np.arange(0, dtype=np.int64)
+    return np.setdiff1d(top_idx, tail_idx, assume_unique=False)
+
+
+def _pick_peak_index(
+    points: list[FrontierExplorerPoint],
+    ratio_attr: str,
+    tie_tol: float = 1e-3,
+) -> int:
+    """Return the feasible frontier point index with peak Return/Risk ratio.
+
+    When multiple portfolios lie on the same initial linear ray (effectively tied within `tie_tol`),
+    prefer the larger-return knee rather than an arbitrarily scaled-down portfolio.
+    """
+    feasible = [p for p in points if p.status in ("Optimal", "Feasible")]
+    if not feasible:
+        return 0
+    best_ratio = max(float(getattr(p.metrics, ratio_attr, 0.0)) for p in feasible)
+    near_peak = [p for p in feasible if float(getattr(p.metrics, ratio_attr, 0.0)) >= best_ratio - tie_tol]
+    return max(near_peak, key=lambda p: (p.metrics.expected_profit_m, getattr(p.metrics, ratio_attr, 0.0))).point_index
+
+
 @dataclass
 class _HighsModelHandle:
     highs: highspy.Highs
     m: int
     use_milp: bool
     cur_w: np.ndarray
+    profit_1x: np.ndarray
     total_capital: float
     named_rows: list[tuple[str, int, float, str | None]]
     tvar_100_row: int
     tvar_250_row: int
+    s_count: int
+    alpha100_idx: int
+    z100_start: int
+    inv_100: float
+    alpha250_idx: int
+    z250_start: int
+    inv_250: float
+    alpha1000_idx: int | None = None
+    z1000_start: int | None = None
+    inv_1000: float | None = None
 
 
 def _build_highs_model(
@@ -885,11 +1038,13 @@ def _build_highs_model(
     items: list[dict[str, Any]],
     mat: np.ndarray,
     tail_mat: np.ndarray,
+    include_tvar_1000: bool = False,
 ) -> _HighsModelHandle:
     """Build the HiGHS LP/MILP model once so frontier sweeps can update TVaR bounds and warm-start."""
     m, n_trials = mat.shape
     s_count = tail_mat.shape[1]
     cur_w = np.array([it["current_share"] for it in items], dtype=np.float64)
+    profit_1x = np.array([float(it["profit_1x"]) for it in items], dtype=np.float64)
 
     bounds_by_key = {b.layer_key: b for b in req.layer_bounds}
 
@@ -933,7 +1088,7 @@ def _build_highs_model(
             h.addVar(0.0, 1.0)
             h.changeColIntegrality(y_start + i, highspy.HighsVarType.kInteger)
 
-    # CVaR variables for 1-in-100 and 1-in-250
+    # CVaR variables for 1-in-100 and 1-in-250 (and 1-in-1000 when optimizing Return / TVaR 1000)
     alpha100_idx = m + (m if use_milp else 0)
     z100_start = alpha100_idx + 1
     alpha250_idx = z100_start + s_count
@@ -948,6 +1103,19 @@ def _build_highs_model(
 
     inv_100 = 1.0 / (0.01 * n_trials)
     inv_250 = 1.0 / (0.004 * n_trials)
+    next_var = z250_start + s_count
+
+    alpha1000_idx: int | None = None
+    z1000_start: int | None = None
+    inv_1000: float | None = None
+    if include_tvar_1000 or req.objective == "MAX_RETURN_ON_TVAR_1000":
+        alpha1000_idx = next_var
+        z1000_start = alpha1000_idx + 1
+        h.addVar(0.0, highspy.kHighsInf)
+        for _ in range(s_count):
+            h.addVar(0.0, highspy.kHighsInf)
+        inv_1000 = 1.0 / (0.001 * n_trials)
+        next_var = z1000_start + s_count
 
     if req.objective == "MIN_TVAR_250":
         h.changeColCost(alpha250_idx, 1.0)
@@ -960,7 +1128,6 @@ def _build_highs_model(
             h.changeColCost(z250_start + s, lam * inv_250)
 
     # Extra dynamic TVaR constraints (arbitrary return periods, optional region-peril filter)
-    next_var = z250_start + s_count
     extra_tvar_specs: list[tuple[TvarCapConstraint, int, int, list[int], float]] = []
     for tc in req.tvar_caps:
         if tc.region_peril_key:
@@ -1086,7 +1253,7 @@ def _build_highs_model(
             [1.0] + [inv_rp] * s_count,
         )
 
-    # Scenario epigraph rows for 100yr, 250yr, and extra TVaR constraints
+    # Scenario epigraph rows for 100yr, 250yr, optional 1000yr, and extra TVaR constraints
     for s in range(s_count):
         col = tail_mat[:, s]
         nz = np.nonzero(np.abs(col) > 1e-12)[0]
@@ -1095,6 +1262,8 @@ def _build_highs_model(
             vals_list = col[nz].tolist()
             h.addRow(-highspy.kHighsInf, 0.0, len(nz_list) + 2, nz_list + [alpha100_idx, z100_start + s], vals_list + [-1.0, -1.0])
             h.addRow(-highspy.kHighsInf, 0.0, len(nz_list) + 2, nz_list + [alpha250_idx, z250_start + s], vals_list + [-1.0, -1.0])
+            if alpha1000_idx is not None and z1000_start is not None:
+                h.addRow(-highspy.kHighsInf, 0.0, len(nz_list) + 2, nz_list + [alpha1000_idx, z1000_start + s], vals_list + [-1.0, -1.0])
         for _, a_idx, z_start, sub_idxs, _ in extra_tvar_specs:
             sub_nz = [i for i in sub_idxs if abs(col[i]) > 1e-12]
             if sub_nz:
@@ -1111,11 +1280,72 @@ def _build_highs_model(
         m=m,
         use_milp=use_milp,
         cur_w=cur_w,
+        profit_1x=profit_1x,
         total_capital=req.total_capital,
         named_rows=named_rows,
         tvar_100_row=tvar_100_row,
         tvar_250_row=tvar_250_row,
+        s_count=s_count,
+        alpha100_idx=alpha100_idx,
+        z100_start=z100_start,
+        inv_100=inv_100,
+        alpha250_idx=alpha250_idx,
+        z250_start=z250_start,
+        inv_250=inv_250,
+        alpha1000_idx=alpha1000_idx,
+        z1000_start=z1000_start,
+        inv_1000=inv_1000,
     )
+
+
+def _extract_diagnostics(
+    handle: _HighsModelHandle,
+    *,
+    mat: np.ndarray,
+    opt_w: np.ndarray,
+    sol: Any,
+    ub_overrides: dict[int, float] | None = None,
+    w_mat_buf: np.ndarray | None = None,
+) -> list[ConstraintDiagnostic]:
+    ub_map = ub_overrides or {}
+    row_duals = sol.row_dual if (not handle.use_milp and sol is not None) else []
+    row_values = sol.row_value if sol is not None else []
+
+    opt_mat = _weighted_mat(mat, opt_w, w_mat_buf)
+    multi = rle.euler_cotvar_multi(opt_mat, [100.0, 250.0])
+    opt_tvar_100 = float(multi[0][1])
+    opt_tvar_250 = float(multi[1][1])
+
+    diags: list[ConstraintDiagnostic] = []
+    for label, r_idx, orig_ub, tag in handle.named_rows:
+        ub = ub_map.get(r_idx, orig_ub)
+        raw_act = float(row_values[r_idx]) if r_idx < len(row_values) else 0.0
+        act = raw_act if math.isfinite(raw_act) else 0.0
+        limit_disp = ub
+        if tag == "tvar_100":
+            act = opt_tvar_100
+        elif tag == "tvar_250":
+            act = opt_tvar_250
+        elif tag == "el_cap":
+            act = act / handle.total_capital
+            limit_disp = ub / handle.total_capital
+        slack = limit_disp - act
+        shadow: float | None = None
+        if r_idx < len(row_duals) and not handle.use_milp:
+            raw_dual = abs(float(row_duals[r_idx]))
+            if math.isfinite(raw_dual):
+                shadow = round(raw_dual, 5)
+        diags.append(
+            ConstraintDiagnostic(
+                name=label,
+                limit_value=round(limit_disp, 4),
+                actual_value=round(act, 4),
+                slack=round(slack, 4),
+                binding=abs(slack) < (0.01 if tag == "el_cap" else 0.5),
+                shadow_price=shadow,
+            )
+        )
+    return diags
 
 
 def _solve_handle(
@@ -1145,49 +1375,227 @@ def _solve_handle(
         opt_w = candidate_w if np.all(np.isfinite(candidate_w)) else handle.cur_w
     else:
         opt_w = handle.cur_w
-    row_duals = sol.row_dual if not handle.use_milp else []
 
-    if w_mat_buf is not None and w_mat_buf.shape == mat.shape:
-        np.multiply(mat, opt_w[:, None], out=w_mat_buf)
-        opt_mat = w_mat_buf
-    else:
-        opt_mat = np.ascontiguousarray(mat * opt_w[:, None], dtype=np.float64)
-    multi = rle.euler_cotvar_multi(opt_mat, [100.0, 250.0])
-    opt_tvar_100 = float(multi[0][1])
-    opt_tvar_250 = float(multi[1][1])
-
-    diags: list[ConstraintDiagnostic] = []
-    for label, r_idx, orig_ub, tag in handle.named_rows:
-        ub = ub_overrides.get(r_idx, orig_ub)
-        raw_act = float(sol.row_value[r_idx]) if r_idx < len(sol.row_value) else 0.0
-        act = raw_act if math.isfinite(raw_act) else 0.0
-        limit_disp = ub
-        if tag == "tvar_100":
-            act = opt_tvar_100
-        elif tag == "tvar_250":
-            act = opt_tvar_250
-        elif tag == "el_cap":
-            act = act / handle.total_capital
-            limit_disp = ub / handle.total_capital
-        slack = limit_disp - act
-        shadow: float | None = None
-        if r_idx < len(row_duals) and not handle.use_milp:
-            raw_dual = abs(float(row_duals[r_idx]))
-            if math.isfinite(raw_dual):
-                shadow = round(raw_dual, 5)
-        diags.append(
-            ConstraintDiagnostic(
-                name=label,
-                limit_value=round(limit_disp, 4),
-                actual_value=round(act, 4),
-                slack=round(slack, 4),
-                binding=abs(slack) < (0.01 if tag == "el_cap" else 0.5),
-                shadow_price=shadow,
-            )
-        )
-
+    diags = _extract_diagnostics(
+        handle, mat=mat, opt_w=opt_w, sol=sol, ub_overrides=ub_overrides, w_mat_buf=w_mat_buf
+    )
     solver_name = "HiGHS MILP" if handle.use_milp else "HiGHS LP"
     return solver_name, status_str, opt_w, diags
+
+
+def _solve_max_return_on_tvar(
+    *,
+    req: OptimizerRequest,
+    items: list[dict[str, Any]],
+    mat: np.ndarray,
+    tail_mat: np.ndarray,
+    horizon_rp: float = 250.0,
+    w_mat_buf: np.ndarray | None = None,
+) -> tuple[str, str, np.ndarray, list[ConstraintDiagnostic], np.ndarray | None]:
+    """Maximize Expected Return / TVaR(horizon_rp) subject to all LP/MILP constraints via Dinkelbach's method.
+
+    Solves the fractional program max (c^T w) / TVaR_rp(w) by iteratively solving the linear
+    subproblem max (c^T w - lambda_k * TVaR_rp(w)), then polishes to the maximum-return knee
+    achieving the optimal ratio so scale-invariant cones don't collapse to a tiny portfolio.
+    Returns a 5th element `probe_w` if an iterate's LP CVaR materially underestimated true 100k TVaR,
+    so the caller can enrich the scenario subset with its missing tail trials and re-solve.
+    """
+    base_req = req.model_copy(update={"objective": "MAX_EXPECTED_PROFIT"})
+    handle = _build_highs_model(
+        req=base_req,
+        items=items,
+        mat=mat,
+        tail_mat=tail_mat,
+        include_tvar_1000=(horizon_rp >= 999.0),
+    )
+    h = handle.highs
+    m = handle.m
+    s_count = handle.s_count
+    solver_name = "HiGHS MILP (Fractional)" if handle.use_milp else "HiGHS LP (Fractional)"
+
+    if horizon_rp <= 101.0:
+        a_idx, z_start, inv_rp = handle.alpha100_idx, handle.z100_start, handle.inv_100
+    elif horizon_rp >= 999.0 and handle.alpha1000_idx is not None and handle.z1000_start is not None and handle.inv_1000 is not None:
+        a_idx, z_start, inv_rp = handle.alpha1000_idx, handle.z1000_start, handle.inv_1000
+    else:
+        a_idx, z_start, inv_rp = handle.alpha250_idx, handle.z250_start, handle.inv_250
+
+    def _eval_lp_tvar(sol_cols: list[float]) -> float:
+        alpha_v = float(sol_cols[a_idx])
+        z_sum = float(np.sum(sol_cols[z_start : z_start + s_count]))
+        return alpha_v + inv_rp * z_sum
+
+    def _eval_true_tvar(w_vec: np.ndarray) -> float:
+        w_mat = _weighted_mat(mat, w_vec, w_mat_buf)
+        _, tv, _ = rle.euler_cotvar(w_mat, horizon_rp)
+        return float(tv)
+
+    # Iteration 0: max expected profit to obtain a valid non-zero starting portfolio & ratio
+    h.run()
+    status_str = h.modelStatusToString(h.getModelStatus())
+    sol = h.getSolution()
+    if status_str not in ("Optimal", "Feasible") or len(sol.col_value) < m:
+        diags = _extract_diagnostics(handle, mat=mat, opt_w=handle.cur_w, sol=sol, w_mat_buf=w_mat_buf)
+        return solver_name, status_str, handle.cur_w, diags, None
+
+    w0 = np.array(sol.col_value[:m], dtype=np.float64)
+    if not np.all(np.isfinite(w0)):
+        diags = _extract_diagnostics(handle, mat=mat, opt_w=handle.cur_w, sol=sol, w_mat_buf=w_mat_buf)
+        return solver_name, status_str, handle.cur_w, diags, None
+
+    best_w = w0.copy()
+    best_sol = sol
+    best_status = status_str
+    profit0 = float(np.dot(best_w, handle.profit_1x))
+    true_tvar0 = _eval_true_tvar(best_w)
+    if profit0 <= 1e-6 or true_tvar0 <= 1e-6:
+        diags = _extract_diagnostics(handle, mat=mat, opt_w=best_w, sol=best_sol, w_mat_buf=w_mat_buf)
+        return solver_name, best_status, best_w, diags, None
+
+    lam = profit0 / true_tvar0
+    best_true_ratio = lam
+    best_profit = profit0
+    underestimated_w: np.ndarray | None = None
+
+    # Dinkelbach iterations (converges superlinearly, typically 3-5 warm-started solves)
+    for _ in range(8):
+        h.changeColCost(a_idx, lam)
+        for s in range(s_count):
+            h.changeColCost(z_start + s, lam * inv_rp)
+        h.run()
+        st = h.modelStatusToString(h.getModelStatus())
+        if st not in ("Optimal", "Feasible"):
+            break
+        cur_sol = h.getSolution()
+        if len(cur_sol.col_value) < m:
+            break
+        w_k = np.array(cur_sol.col_value[:m], dtype=np.float64)
+        if not np.all(np.isfinite(w_k)):
+            break
+        prof_k = float(np.dot(w_k, handle.profit_1x))
+        lp_tvar_k = _eval_lp_tvar(cur_sol.col_value)
+        if prof_k <= 1e-6:
+            break
+        if lp_tvar_k <= 1e-6:
+            # Heavily hedged solution with zero LP tail loss on the reduced scenario set: check full 100k TVaR.
+            true_tv_k = _eval_true_tvar(w_k)
+            if true_tv_k > 1e-6:
+                true_ratio_k = prof_k / true_tv_k
+                if true_ratio_k > best_true_ratio + 1e-6 or (
+                    abs(true_ratio_k - best_true_ratio) <= 1e-6 and prof_k > best_profit
+                ):
+                    best_w = w_k.copy()
+                    best_sol = cur_sol
+                    best_status = st
+                    best_true_ratio = true_ratio_k
+                    best_profit = prof_k
+                underestimated_w = w_k.copy()
+            break
+        val_k = prof_k - lam * lp_tvar_k
+        if val_k > 1e-5:
+            next_lam = prof_k / lp_tvar_k
+            true_tv_k = _eval_true_tvar(w_k)
+            true_ratio_k = (prof_k / true_tv_k) if true_tv_k > 1e-6 else 0.0
+            improved_true = true_ratio_k > best_true_ratio + 1e-6 or (
+                abs(true_ratio_k - best_true_ratio) <= 1e-6 and prof_k > best_profit
+            )
+            if improved_true:
+                best_w = w_k.copy()
+                best_sol = cur_sol
+                best_status = st
+                best_true_ratio = true_ratio_k
+                best_profit = prof_k
+            # If the scenario subset materially underestimated CVaR on w_k, signal enrichment on w_k
+            if true_tv_k > lp_tvar_k * 1.015 + 0.15:
+                underestimated_w = w_k.copy()
+            if true_ratio_k < lam - 1e-3:
+                underestimated_w = w_k.copy()
+                break
+            if next_lam <= lam + 1e-6:
+                break
+            lam = next_lam
+        else:
+            break
+
+    # Polish step: maximize expected return while keeping LP Return/TVaR >= ratio_lb
+    # so scale-invariant regions land on the largest-return knee rather than a shrunken portfolio.
+    h.changeColCost(a_idx, 0.0)
+    for s in range(s_count):
+        h.changeColCost(z_start + s, 0.0)
+    ratio_lb = max(0.0, min(lam, best_true_ratio) - 1e-4)
+    idxs = list(range(m)) + [a_idx] + list(range(z_start, z_start + s_count))
+    vals = [float(handle.profit_1x[i]) for i in range(m)] + [-ratio_lb] + [-ratio_lb * inv_rp] * s_count
+    h.addRow(0.0, highspy.kHighsInf, len(idxs), idxs, vals)
+    h.run()
+    pol_status = h.modelStatusToString(h.getModelStatus())
+    if pol_status in ("Optimal", "Feasible"):
+        pol_sol = h.getSolution()
+        if len(pol_sol.col_value) >= m:
+            w_pol = np.array(pol_sol.col_value[:m], dtype=np.float64)
+            if np.all(np.isfinite(w_pol)):
+                pol_prof = float(np.dot(w_pol, handle.profit_1x))
+                pol_tv = _eval_true_tvar(w_pol)
+                pol_ratio = (pol_prof / pol_tv) if pol_tv > 1e-6 else 0.0
+                if pol_prof > 1e-6 and pol_ratio >= best_true_ratio - 5e-4 and pol_prof >= best_profit - 1e-4:
+                    best_w = w_pol
+                    best_sol = pol_sol
+                    best_status = pol_status
+
+    diags = _extract_diagnostics(handle, mat=mat, opt_w=best_w, sol=best_sol, w_mat_buf=w_mat_buf)
+    del handle, h
+    return solver_name, best_status, best_w, diags, underestimated_w
+
+
+def _solve_max_return_on_tvar_enriched(
+    *,
+    req: OptimizerRequest,
+    items: list[dict[str, Any]],
+    mat: np.ndarray,
+    tail_idx: np.ndarray,
+    horizon_rp: float = 250.0,
+    max_rounds: int = 2,
+    w_mat_buf: np.ndarray | None = None,
+) -> tuple[str, str, np.ndarray, list[ConstraintDiagnostic], np.ndarray]:
+    """Run fractional Return/TVaR solve with cutting-plane tail enrichment so true 100k TVaR caps hold."""
+    cur_idx = tail_idx
+    solver_name, status_str, opt_w, diags, probe_w = _solve_max_return_on_tvar(
+        req=req, items=items, mat=mat, tail_mat=mat[:, cur_idx], horizon_rp=horizon_rp, w_mat_buf=w_mat_buf
+    )
+    for _ in range(max_rounds):
+        if status_str not in ("Optimal", "Feasible"):
+            break
+        w_mat = _weighted_mat(mat, opt_w, w_mat_buf)
+        multi = rle.euler_cotvar_multi(w_mat, [100.0, 250.0])
+        act_100 = float(multi[0][1])
+        act_250 = float(multi[1][1])
+        violated = (
+            act_100 > req.max_tvar_100_m * 1.015 + 0.25
+            or act_250 > req.max_tvar_250_m * 1.015 + 0.25
+        )
+        missing_parts: list[np.ndarray] = []
+        if probe_w is not None:
+            m_probe = _missing_tail_trials(mat, cur_idx, probe_w, top_k=1200)
+            if len(m_probe) > 0:
+                missing_parts.append(m_probe)
+        if violated:
+            m_opt = _missing_tail_trials(mat, cur_idx, opt_w, top_k=1200)
+            if len(m_opt) > 0:
+                missing_parts.append(m_opt)
+        else:
+            horizon_k = max(250, int(round(mat.shape[1] / horizon_rp)))
+            horizon_missing = _missing_tail_trials(mat, cur_idx, opt_w, top_k=horizon_k)
+            if len(horizon_missing) > max(10, int(0.03 * horizon_k)):
+                missing_parts.append(_missing_tail_trials(mat, cur_idx, opt_w, top_k=1200))
+        if not missing_parts:
+            break
+        extra = np.unique(np.concatenate(missing_parts))
+        if len(extra) == 0:
+            break
+        cur_idx = np.unique(np.concatenate([cur_idx, extra]))
+        solver_name, status_str, opt_w, diags, probe_w = _solve_max_return_on_tvar(
+            req=req, items=items, mat=mat, tail_mat=mat[:, cur_idx], horizon_rp=horizon_rp, w_mat_buf=w_mat_buf
+        )
+    return solver_name, status_str, opt_w, diags, cur_idx
 
 
 def _solve_core(
@@ -1196,10 +1604,43 @@ def _solve_core(
     items: list[dict[str, Any]],
     mat: np.ndarray,
     tail_mat: np.ndarray,
+    tail_idx: np.ndarray | None = None,
+    w_mat_buf: np.ndarray | None = None,
 ) -> tuple[str, str, np.ndarray, list[ConstraintDiagnostic]]:
     """Run one HiGHS LP/MILP solve over pre-built vectors and return (solver, status, opt_w, diagnostics)."""
+    if req.objective in RATIO_OBJECTIVE_RP:
+        rp = RATIO_OBJECTIVE_RP[req.objective]
+        if tail_idx is not None:
+            solver_name, status_str, opt_w, diags, _ = _solve_max_return_on_tvar_enriched(
+                req=req, items=items, mat=mat, tail_idx=tail_idx, horizon_rp=rp, w_mat_buf=w_mat_buf
+            )
+            return solver_name, status_str, opt_w, diags
+        solver_name, status_str, opt_w, diags, _ = _solve_max_return_on_tvar(
+            req=req, items=items, mat=mat, tail_mat=tail_mat, horizon_rp=rp, w_mat_buf=w_mat_buf
+        )
+        return solver_name, status_str, opt_w, diags
+
+    cur_idx = tail_idx
     handle = _build_highs_model(req=req, items=items, mat=mat, tail_mat=tail_mat)
-    return _solve_handle(handle, mat=mat)
+    solver_name, status_str, opt_w, diags = _solve_handle(handle, mat=mat, w_mat_buf=w_mat_buf)
+    if cur_idx is not None and status_str in ("Optimal", "Feasible"):
+        for _ in range(2):
+            w_mat = _weighted_mat(mat, opt_w, w_mat_buf)
+            multi = rle.euler_cotvar_multi(w_mat, [100.0, 250.0])
+            if (
+                float(multi[0][1]) <= req.max_tvar_100_m * 1.015 + 0.25
+                and float(multi[1][1]) <= req.max_tvar_250_m * 1.015 + 0.25
+            ):
+                break
+            missing = _missing_tail_trials(mat, cur_idx, opt_w, top_k=1200)
+            if len(missing) == 0:
+                break
+            cur_idx = np.unique(np.concatenate([cur_idx, missing]))
+            del handle
+            handle = _build_highs_model(req=req, items=items, mat=mat, tail_mat=mat[:, cur_idx])
+            solver_name, status_str, opt_w, diags = _solve_handle(handle, mat=mat, w_mat_buf=w_mat_buf)
+    del handle
+    return solver_name, status_str, opt_w, diags
 
 
 def solve_portfolio_optimization(
@@ -1224,32 +1665,38 @@ def solve_portfolio_optimization(
         portfolio_unl_resolver=portfolio_unl_resolver,
         snapshot_hashes_out=snapshot_hashes,
     )
-    m, n_trials = mat.shape
+    m, _ = mat.shape
     if not any(not is_hedge_direction(it["direction"]) for it in items):
         raise ValueError(NO_DEALS_MESSAGE)
 
     cur_w = np.array([it["current_share"] for it in items], dtype=np.float64)
     w_mat_buf = np.empty(mat.shape, dtype=np.float64)
-    np.multiply(mat, cur_w[:, None], out=w_mat_buf, casting="unsafe")
-    _, base_tvar_250, _ = rle.euler_cotvar(w_mat_buf, 250.0)
+    base_multi = rle.euler_cotvar_multi(_weighted_mat(mat, cur_w, w_mat_buf), [100.0, 250.0, 1000.0])
+    base_tvar_100 = float(base_multi[0][1])
+    base_tvar_250 = float(base_multi[1][1])
+    base_tvar_1000 = float(base_multi[2][1])
     base_profit = float(sum(cur_w[i] * items[i]["profit_1x"] for i in range(m)))
     yield_m = req.total_capital * 0.03
     base_roc = ((base_profit + yield_m) / req.total_capital) * 100.0
 
-    gross_sum = _gross_positive_sum(mat)
-    s_count = min(2500, n_trials)
-    tail_idx = np.argpartition(gross_sum, -s_count)[-s_count:]
+    tail_idx = _select_tail_scenarios(mat)
     tail_mat = mat[:, tail_idx]
 
-    handle = _build_highs_model(req=req, items=items, mat=mat, tail_mat=tail_mat)
-    solver_name, status_str, opt_w, diags = _solve_handle(handle, mat=mat, w_mat_buf=w_mat_buf)
+    solver_name, status_str, opt_w, diags = _solve_core(
+        req=req, items=items, mat=mat, tail_mat=tail_mat, tail_idx=tail_idx, w_mat_buf=w_mat_buf
+    )
 
-    np.multiply(mat, opt_w[:, None], out=w_mat_buf)
-    _, opt_tvar_250, _ = rle.euler_cotvar(w_mat_buf, 250.0)
-    del w_mat_buf, mat, tail_mat, handle
+    opt_multi = rle.euler_cotvar_multi(_weighted_mat(mat, opt_w, w_mat_buf), [100.0, 250.0, 1000.0])
+    opt_tvar_100 = float(opt_multi[0][1])
+    opt_tvar_250 = float(opt_multi[1][1])
+    opt_tvar_1000 = float(opt_multi[2][1])
+    del w_mat_buf, mat, tail_mat
     _trim_memory()
     opt_profit = float(sum(opt_w[i] * items[i]["profit_1x"] for i in range(m)))
     opt_roc = ((opt_profit + yield_m) / req.total_capital) * 100.0
+
+    def _safe_ratio(p: float, tv: float) -> float:
+        return round(p / tv, 4) if tv > 1e-6 else 0.0
 
     deal_rows: list[OptimizedDealRow] = []
     for i, it in enumerate(items):
@@ -1294,20 +1741,37 @@ def solve_portfolio_optimization(
         # `included_statuses` is what was asked for (None = the mode's defaults); `effective_statuses` is
         # what that meant at run time, so the record stays readable if the defaults ever change.
         parameters={**req.model_dump(), "effective_statuses": [s.value for s in included_statuses]},
-        output_payload={"status": status_str, "after_expected_profit_m": round(opt_profit, 4), "after_tvar_250_m": round(float(opt_tvar_250), 4)},
+        output_payload={
+            "status": status_str,
+            "objective": req.objective,
+            "after_expected_profit_m": round(opt_profit, 4),
+            "after_tvar_250_m": round(opt_tvar_250, 4),
+            "after_return_to_tvar_250": _safe_ratio(opt_profit, opt_tvar_250),
+        },
         breadcrumb=solve_breadcrumb,
     )
 
     return OptimizerResponse(
         mode=req.mode,
+        objective=req.objective,
         solver=solver_name,
         status=status_str,
         compute_ms=compute_ms,
         before_expected_profit_m=round(base_profit, 4),
         after_expected_profit_m=round(opt_profit, 4),
         delta_expected_profit_m=round(opt_profit - base_profit, 4),
-        before_tvar_250_m=round(float(base_tvar_250), 4),
-        after_tvar_250_m=round(float(opt_tvar_250), 4),
+        before_tvar_100_m=round(base_tvar_100, 4),
+        after_tvar_100_m=round(opt_tvar_100, 4),
+        before_tvar_250_m=round(base_tvar_250, 4),
+        after_tvar_250_m=round(opt_tvar_250, 4),
+        before_tvar_1000_m=round(base_tvar_1000, 4),
+        after_tvar_1000_m=round(opt_tvar_1000, 4),
+        before_return_to_tvar_100=_safe_ratio(base_profit, base_tvar_100),
+        after_return_to_tvar_100=_safe_ratio(opt_profit, opt_tvar_100),
+        before_return_to_tvar_250=_safe_ratio(base_profit, base_tvar_250),
+        after_return_to_tvar_250=_safe_ratio(opt_profit, opt_tvar_250),
+        before_return_to_tvar_1000=_safe_ratio(base_profit, base_tvar_1000),
+        after_return_to_tvar_1000=_safe_ratio(opt_profit, opt_tvar_1000),
         before_mean_roc_pct=round(base_roc, 2),
         after_mean_roc_pct=round(opt_roc, 2),
         included_statuses=included_statuses,
@@ -1332,15 +1796,14 @@ def compute_efficient_frontier(
     items, mat = _build_vectors(
         programmes, yelt, ind_yelt, req, all_programmes, portfolio_unl_resolver=portfolio_unl_resolver
     )
-    m, n_trials = mat.shape
+    m, _ = mat.shape
     if not any(not is_hedge_direction(it["direction"]) for it in items):
         raise ValueError(NO_DEALS_MESSAGE)
 
-    gross_sum = _gross_positive_sum(mat)
-    s_count = min(2500, n_trials)
-    tail_idx = np.argpartition(gross_sum, -s_count)[-s_count:]
+    tail_idx = _select_tail_scenarios(mat)
     tail_mat = mat[:, tail_idx]
-    handle = _build_highs_model(req=req, items=items, mat=mat, tail_mat=tail_mat)
+    sweep_req = req.model_copy(update={"objective": "MAX_EXPECTED_PROFIT"})
+    handle = _build_highs_model(req=sweep_req, items=items, mat=mat, tail_mat=tail_mat)
     w_mat_buf = np.empty(mat.shape, dtype=np.float64)
     yield_m = req.total_capital * 0.03
 
@@ -1348,13 +1811,13 @@ def compute_efficient_frontier(
     points: list[FrontierPoint] = []
     for cap in tvar_grid:
         _, status_str, opt_w, _ = _solve_handle(
-            handle, mat=mat, max_tvar_100_m=float(cap * 0.85), max_tvar_250_m=float(cap), w_mat_buf=w_mat_buf
+            handle, mat=mat, max_tvar_100_m=float(cap), max_tvar_250_m=float(cap), w_mat_buf=w_mat_buf
         )
-        np.multiply(mat, opt_w[:, None], out=w_mat_buf, casting="unsafe")
-        _, opt_tvar_250, _ = rle.euler_cotvar(w_mat_buf, 250.0)
+        _, opt_tvar_250, _ = rle.euler_cotvar(_weighted_mat(mat, opt_w, w_mat_buf), 250.0)
         opt_profit = float(sum(opt_w[i] * items[i]["profit_1x"] for i in range(m)))
         opt_roc = ((opt_profit + yield_m) / req.total_capital) * 100.0
         dep = float(sum(opt_w[i] * items[i]["limit_1x"] for i in range(m) if not is_hedge_direction(items[i]["direction"])))
+        ret_tv250 = (opt_profit / float(opt_tvar_250)) if float(opt_tvar_250) > 1e-6 else 0.0
         points.append(
             FrontierPoint(
                 max_tvar_250_m=round(float(cap), 2),
@@ -1363,6 +1826,7 @@ def compute_efficient_frontier(
                 mean_roc_pct=round(opt_roc, 2),
                 actual_tvar_250_m=round(float(opt_tvar_250), 4),
                 deployed_collateral_m=round(dep, 2),
+                return_to_tvar_250=round(ret_tv250, 4),
             )
         )
     del w_mat_buf, mat, tail_mat, handle
@@ -1394,7 +1858,6 @@ def explore_efficient_frontier(
         portfolio_unl_resolver=portfolio_unl_resolver,
         snapshot_hashes_out=snapshot_hashes,
     )
-    m, n_trials = mat.shape
     if not any(not is_hedge_direction(it["direction"]) for it in items):
         raise ValueError(NO_DEALS_MESSAGE)
     included_statuses = resolve_optimizer_statuses(req.mode, req.included_statuses)
@@ -1403,30 +1866,116 @@ def explore_efficient_frontier(
     w_mat_buf = np.empty(mat.shape, dtype=np.float64)
     init_snap, init_layers, _ = _compute_portfolio_snapshot(items, mat, cur_w, req.total_capital, w_mat_buf=w_mat_buf)
 
-    gross_sum = _gross_positive_sum(mat)
-    s_count = min(2500, n_trials)
-    tail_idx = np.argpartition(gross_sum, -s_count)[-s_count:]
+    tail_idx = _select_tail_scenarios(mat)
     tail_mat = mat[:, tail_idx]
 
-    # Sweep TVaR-250 budgets cleanly across a wide range anchored around the user's cap and initial TVaR
-    lo_cap = max(25.0, min(req.max_tvar_250_m, init_snap.tvar_250_m) * 0.40)
-    hi_cap = max(req.max_tvar_250_m * 1.35, init_snap.tvar_250_m * 1.45)
-    tvar_grid = np.linspace(lo_cap, hi_cap, num_points)
-    # Ensure the user's exact configured max_tvar_250_m is represented on the frontier
-    nearest = int(np.argmin(np.abs(tvar_grid - req.max_tvar_250_m)))
-    tvar_grid[nearest] = req.max_tvar_250_m
+    # Always trace the Pareto frontier with MAX_EXPECTED_PROFIT at each TVaR budget so every point
+    # is genuinely Pareto-efficient, regardless of which primary objective selects the recommended point.
+    sweep_req = layer_req.model_copy(update={"objective": "MAX_EXPECTED_PROFIT"})
+    handle = _build_highs_model(req=sweep_req, items=items, mat=mat, tail_mat=tail_mat)
 
-    # Build HiGHS LP/MILP once and sweep only the TVaR upper bounds so HiGHS warm-starts each point.
-    handle = _build_highs_model(req=layer_req, items=items, mat=mat, tail_mat=tail_mat)
+    # Probe the maximum achievable TVaR-250 under all non-TVaR constraints (collateral, RP caps, layer bounds)
+    # so the grid spans the active frontier cleanly instead of piling duplicate points on a flat plateau.
+    hi_cap = max(req.max_tvar_250_m * 1.35, init_snap.tvar_250_m * 1.45)
+    _, probe_status, probe_w, _ = _solve_handle(
+        handle, mat=mat, max_tvar_100_m=hi_cap, max_tvar_250_m=hi_cap, w_mat_buf=w_mat_buf
+    )
+    probe_tvar_250 = 0.0
+    if probe_status in ("Optimal", "Feasible"):
+        _, probe_tvar_250, _ = rle.euler_cotvar(_weighted_mat(mat, probe_w, w_mat_buf), 250.0)
+        probe_tvar_250 = float(probe_tvar_250)
+
+    eff_hi = min(hi_cap, probe_tvar_250) if probe_tvar_250 > 5.0 else hi_cap
+    lo_cap = max(15.0, min(req.max_tvar_250_m, init_snap.tvar_250_m, eff_hi) * 0.35)
+    if eff_hi <= lo_cap + 1.0:
+        lo_cap = max(5.0, eff_hi * 0.35)
+        eff_hi = max(lo_cap + 5.0, eff_hi)
+
+    tvar_grid = np.linspace(lo_cap, eff_hi, num_points)
+    # Anchor the user's configured budget cap on the frontier (or at the top point when slack)
+    if req.max_tvar_250_m <= eff_hi:
+        budget_idx = int(np.argmin(np.abs(tvar_grid - req.max_tvar_250_m)))
+        tvar_grid[budget_idx] = req.max_tvar_250_m
+    else:
+        budget_idx = num_points - 1
+        tvar_grid[budget_idx] = req.max_tvar_250_m
+
+    # Solve exact peak Return/TVaR portfolio:
+    # - For a MAX_RETURN_ON_TVAR_* objective, enforce ALL configured constraints (including max_tvar_100_m
+    #   and max_tvar_250_m) and include that exact fractional LP/MILP portfolio directly on the frontier.
+    # - Otherwise, probe the sweep's TVaR-250 knee so the peak Return/TVaR-250 point is represented on the curve.
+    is_ratio_obj = req.objective in RATIO_OBJECTIVE_RP
+    peak_rp = RATIO_OBJECTIVE_RP.get(req.objective, 250.0)
+    if is_ratio_obj:
+        peak_req = layer_req
+    else:
+        peak_req = layer_req.model_copy(
+            update={
+                "objective": "MAX_RETURN_ON_TVAR_250",
+                "max_tvar_100_m": max(hi_cap, req.max_tvar_100_m),
+                "max_tvar_250_m": max(hi_cap, req.max_tvar_250_m),
+            }
+        )
+    # Release the sweep handle before building the fractional HiGHS model so only one model sits in RAM at once
+    del handle
+    pk_solver, pk_status, pk_w, pk_diags, tail_idx = _solve_max_return_on_tvar_enriched(
+        req=peak_req,
+        items=items,
+        mat=mat,
+        tail_idx=tail_idx,
+        horizon_rp=peak_rp,
+        w_mat_buf=w_mat_buf,
+    )
+    if len(tail_idx) != tail_mat.shape[1]:
+        tail_mat = mat[:, tail_idx]
+    handle = _build_highs_model(req=sweep_req, items=items, mat=mat, tail_mat=tail_mat)
+    exact_ratio_point: FrontierExplorerPoint | None = None
+    exact_ratio_slot: int | None = None
+    if pk_status in ("Optimal", "Feasible") and num_points >= 4:
+        pk_snap, pk_layers, pk_rp_stack = _compute_portfolio_snapshot(
+            items, mat, pk_w, req.total_capital, w_mat_buf=w_mat_buf
+        )
+        pk_tvar_250 = float(pk_snap.tvar_250_m)
+        if pk_tvar_250 > 1e-3:
+            dists = np.abs(tvar_grid - pk_tvar_250)
+            dists[budget_idx] = float("inf")
+            pk_slot = int(np.argmin(dists))
+            if is_ratio_obj:
+                # Preserve the exact fractional LP/MILP portfolio (critical for TVaR-100 / TVaR-1000
+                # and tight TVaR caps where the optimal portfolio may differ from a TVaR-250-only sweep).
+                exact_ratio_slot = pk_slot
+                exact_ratio_point = FrontierExplorerPoint(
+                    point_index=pk_slot,
+                    target_tvar_250_m=round(min(req.max_tvar_250_m, pk_tvar_250), 2),
+                    status=pk_status,
+                    solver=pk_solver,
+                    metrics=pk_snap,
+                    layers=pk_layers,
+                    constraints=pk_diags,
+                    return_period_contributions=pk_rp_stack,
+                )
+            elif pk_tvar_250 <= eff_hi:
+                tvar_grid[pk_slot] = pk_tvar_250
+                order = np.argsort(tvar_grid)
+                budget_idx = int(np.where(order == budget_idx)[0][0])
+                tvar_grid = tvar_grid[order]
 
     frontier_pts: list[FrontierExplorerPoint] = []
+    violated_slots: list[tuple[int, float, np.ndarray]] = []
     for idx, cap in enumerate(tvar_grid):
+        if exact_ratio_point is not None and idx == exact_ratio_slot:
+            frontier_pts.append(exact_ratio_point)
+            continue
         # Let the 1-in-250 sweep trace a strictly monotonic Pareto frontier without
         # an artificial 1-in-100 kink; explicit user tvar_caps still apply verbatim.
         solver_name, status_str, opt_w, diags = _solve_handle(
             handle, mat=mat, max_tvar_100_m=float(cap), max_tvar_250_m=float(cap), w_mat_buf=w_mat_buf
         )
-        snap, layer_rows, rp_stack = _compute_portfolio_snapshot(items, mat, opt_w, req.total_capital, w_mat_buf=w_mat_buf)
+        snap, layer_rows, rp_stack = _compute_portfolio_snapshot(
+            items, mat, opt_w, req.total_capital, w_mat_buf=w_mat_buf
+        )
+        if status_str in ("Optimal", "Feasible") and snap.tvar_250_m > float(cap) * 1.02 + 0.35:
+            violated_slots.append((idx, float(cap), opt_w))
         frontier_pts.append(
             FrontierExplorerPoint(
                 point_index=idx,
@@ -1439,15 +1988,83 @@ def explore_efficient_frontier(
                 return_period_contributions=rp_stack,
             )
         )
+
+    # Batch-enrich tail scenarios once if any swept point materially exceeded its TVaR-250 target
+    if violated_slots:
+        missing_batches = [_missing_tail_trials(mat, tail_idx, w, top_k=600) for _, _, w in violated_slots]
+        extra = np.unique(np.concatenate(missing_batches)) if missing_batches else np.arange(0, dtype=np.int64)
+        if len(extra) > 0:
+            tail_idx = np.unique(np.concatenate([tail_idx, extra]))
+            tail_mat = mat[:, tail_idx]
+            del handle
+            handle = _build_highs_model(req=sweep_req, items=items, mat=mat, tail_mat=tail_mat)
+            for idx, cap, _ in violated_slots:
+                solver_name, status_str, opt_w, diags = _solve_handle(
+                    handle, mat=mat, max_tvar_100_m=cap, max_tvar_250_m=cap, w_mat_buf=w_mat_buf
+                )
+                snap, layer_rows, rp_stack = _compute_portfolio_snapshot(
+                    items, mat, opt_w, req.total_capital, w_mat_buf=w_mat_buf
+                )
+                frontier_pts[idx] = FrontierExplorerPoint(
+                    point_index=idx,
+                    target_tvar_250_m=round(cap, 2),
+                    status=status_str,
+                    solver=solver_name,
+                    metrics=snap,
+                    layers=layer_rows,
+                    constraints=diags,
+                    return_period_contributions=rp_stack,
+                )
+
     del w_mat_buf, mat, tail_mat, handle
     _trim_memory()
 
-    # Pick the user's configured budget point if optimal; else best risk/reward feasible point
+    # Keep frontier points ordered by actual TVaR-250 ascending when an exact ratio point was inserted
+    if exact_ratio_point is not None:
+        tagged = [(p, idx == exact_ratio_slot, idx == budget_idx) for idx, p in enumerate(frontier_pts)]
+        tagged.sort(key=lambda t: (t[0].metrics.tvar_250_m, t[0].metrics.expected_profit_m))
+        frontier_pts = []
+        exact_ratio_final_idx: int | None = None
+        for new_idx, (pt, is_exact, is_budget) in enumerate(tagged):
+            frontier_pts.append(pt.model_copy(update={"point_index": new_idx}))
+            if is_exact:
+                exact_ratio_final_idx = new_idx
+            if is_budget:
+                budget_idx = new_idx
+    else:
+        exact_ratio_final_idx = None
+
+    peak_100_idx = _pick_peak_index(frontier_pts, "return_to_tvar_100")
+    peak_250_idx = _pick_peak_index(frontier_pts, "return_to_tvar_250")
+    peak_1000_idx = _pick_peak_index(frontier_pts, "return_to_tvar_1000")
+    peak_sd_idx = _pick_peak_index(frontier_pts, "return_to_std_dev")
+
     feasible = [p for p in frontier_pts if p.status in ("Optimal", "Feasible")]
-    if frontier_pts[nearest].status in ("Optimal", "Feasible"):
-        rec_idx = nearest
-    elif feasible:
-        rec_idx = max(feasible, key=lambda p: p.metrics.risk_reward_ratio).point_index
+    within_caps = [
+        p
+        for p in feasible
+        if p.metrics.tvar_250_m <= req.max_tvar_250_m * 1.02 + 0.5
+        and p.metrics.tvar_100_m <= req.max_tvar_100_m * 1.02 + 0.5
+    ]
+    rec_pool = within_caps if within_caps else feasible
+
+    if req.objective == "MAX_RETURN_ON_TVAR_250":
+        rec_idx = _pick_peak_index(rec_pool, "return_to_tvar_250") if rec_pool else (exact_ratio_final_idx or peak_250_idx)
+    elif req.objective == "MAX_RETURN_ON_TVAR_100":
+        rec_idx = _pick_peak_index(rec_pool, "return_to_tvar_100") if rec_pool else (exact_ratio_final_idx or peak_100_idx)
+    elif req.objective == "MAX_RETURN_ON_TVAR_1000":
+        rec_idx = _pick_peak_index(rec_pool, "return_to_tvar_1000") if rec_pool else (exact_ratio_final_idx or peak_1000_idx)
+    elif req.objective == "MIN_TVAR_250" and rec_pool:
+        rec_idx = min(rec_pool, key=lambda p: p.metrics.tvar_250_m).point_index
+    elif req.objective == "MAX_RISK_ADJUSTED_RETURN" and rec_pool:
+        rec_idx = max(
+            rec_pool,
+            key=lambda p: p.metrics.expected_profit_m - req.risk_aversion_lambda * p.metrics.tvar_250_m,
+        ).point_index
+    elif frontier_pts[budget_idx].status in ("Optimal", "Feasible"):
+        rec_idx = budget_idx
+    elif rec_pool:
+        rec_idx = _pick_peak_index(rec_pool, "return_to_tvar_250")
     else:
         rec_idx = 0
 
@@ -1472,6 +2089,7 @@ def explore_efficient_frontier(
             "num_points": num_points,
             "granularity": req.granularity,
             "mode": req.mode,
+            "objective": req.objective,
             "view": req.view.value,
             "included_statuses": None if req.included_statuses is None else [s.value for s in req.included_statuses],
             "effective_statuses": [s.value for s in included_statuses],
@@ -1479,8 +2097,10 @@ def explore_efficient_frontier(
         output_payload={
             "points": len(frontier_pts),
             "recommended_index": rec_idx,
+            "peak_return_to_tvar_250_index": peak_250_idx,
             "recommended_profit_m": frontier_pts[rec_idx].metrics.expected_profit_m,
             "recommended_tvar_250_m": frontier_pts[rec_idx].metrics.tvar_250_m,
+            "recommended_return_to_tvar_250": frontier_pts[rec_idx].metrics.return_to_tvar_250,
         },
         breadcrumb=explore_breadcrumb,
     )
@@ -1494,6 +2114,10 @@ def explore_efficient_frontier(
         initial_portfolio=init_snap,
         initial_layers=init_layers,
         recommended_index=rec_idx,
+        peak_return_to_tvar_100_index=peak_100_idx,
+        peak_return_to_tvar_250_index=peak_250_idx,
+        peak_return_to_tvar_1000_index=peak_1000_idx,
+        peak_return_to_std_dev_index=peak_sd_idx,
         frontier=frontier_pts,
         manifest=manifest,
     )
