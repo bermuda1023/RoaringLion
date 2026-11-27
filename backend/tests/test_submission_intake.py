@@ -999,6 +999,68 @@ def test_yelt_trial_id_above_1m_is_rejected_without_storing_sim_set():
     assert after_sims == before_sims
 
 
+def test_email_ingest_string_too_long_maps_to_413():
+    """Bugbot: Pydantic string_too_long on body_text / filename must map to HTTP 413 (not 422)."""
+    res = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "str-too-long-001",
+            "sender": "broker@example.com",
+            "subject": "Oversized body_text",
+            "bodyText": "x" * 260_000,
+            "attachments": [],
+        },
+    )
+    assert res.status_code == 413
+
+
+def test_message_id_with_sql_wildcard_does_not_retarget_unrelated_pending_draft():
+    """Bugbot: '%' in messageId must be escaped in LIKE queries so unrelated pending slips are never rewritten."""
+    pdf_b64 = base64.b64encode(
+        _make_minimal_pdf([
+            "Cedent: Innocent Unrelated Mutual",
+            "Programme: Innocent Cat XL 2027",
+            "Inception: 2027-01-01",
+            "Region: US-FL-WS",
+            "Layer 1: $10M xs $20M | Premium $2.0M",
+        ])
+    ).decode("ascii")
+    r1 = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "innocent-email-001@test",
+            "sender": "broker@example.com",
+            "subject": "Innocent slip",
+            "attachments": [{"filename": "innocent.pdf", "contentBase64": pdf_b64}],
+        },
+    )
+    assert r1.status_code == 200
+    innocent_draft = r1.json()[0]
+    orig_sim_set_id = innocent_draft["simSetId"]
+
+    # Now ingest a YELT whose messageId contains SQL wildcard '%'
+    yelt_b64 = base64.b64encode(_make_yelt_csv()).decode("ascii")
+    r2 = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "%",
+            "sender": "attacker@example.com",
+            "subject": "Wildcard YELT",
+            "attachments": [{"filename": "wild_yelt.csv", "contentBase64": yelt_b64}],
+        },
+    )
+    assert r2.status_code == 200
+    wild_draft = r2.json()[0]
+    assert wild_draft["simSetId"] != orig_sim_set_id
+
+    # Innocent pending draft must NOT have been rewritten to wild_draft's simSetId
+    refreshed = client.get(f"/api/intake/drafts/{innocent_draft['draftId']}").json()
+    assert refreshed["simSetId"] == orig_sim_set_id
+
+    client.post(f"/api/intake/drafts/{innocent_draft['draftId']}/discard")
+    client.post(f"/api/intake/drafts/{wild_draft['draftId']}/discard")
+
+
 def test_parquet_yelt_reads_actual_trial_count():
     """Bugbot #2: Parquet YELT detection must read actual trial count instead of hardcoding 10,000."""
     import pyarrow as pa

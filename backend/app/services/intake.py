@@ -85,8 +85,12 @@ def _max_base64_chars(max_bytes: int) -> int:
 
 
 def _max_imap_message_bytes() -> int:
-    """Maximum raw RFC822 message size to download via IMAP (base64 overhead + MIME headers)."""
-    return _max_base64_chars(MAX_UPLOAD_BYTES) + 256 * 1024
+    """Maximum raw RFC822 message size to download via IMAP (whole-message cap across attachments + envelope)."""
+    return _max_base64_chars(MAX_EMAIL_ATTACHMENTS * MAX_UPLOAD_BYTES) + 256 * 1024
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _parse_rfc822_size(size_data: object) -> int | None:
@@ -651,13 +655,15 @@ class SubmissionIntakeService:
     def _existing_email_attachment_drafts(self, message_id: str | None) -> list[SubmissionDraftRecord]:
         if not message_id:
             return []
+        prefix = f"email:{message_id}:att:"
+        escaped_prefix = f"email:{_escape_like(message_id)}:att:%"
         with get_session() as db:
             watch_rows = (
                 db.query(WatchedIngestionRecord)
-                .filter(WatchedIngestionRecord.external_key.like(f"email:{message_id}:att:%"))
+                .filter(WatchedIngestionRecord.external_key.like(escaped_prefix, escape="\\"))
                 .all()
             )
-            draft_ids = [w.draft_id for w in watch_rows]
+            draft_ids = [w.draft_id for w in watch_rows if w.external_key.startswith(prefix)]
             if not draft_ids:
                 return []
             return (
@@ -722,28 +728,30 @@ class SubmissionIntakeService:
 
             # Reverse cross-poll link: if a slip landed on an earlier poll and its YELT/ELT arrived now,
             # attach the new sim_set_id and re-sketch the earlier pending slip draft's graph.
+            # Re-check rec.status inside the DB transaction so a concurrently confirmed/discarded draft is never overwritten.
             if attached_sim_id and existing_siblings:
                 _, loss_files = self._sim_set_metadata(attached_sim_id)
                 with get_session() as db:
                     for sib in existing_siblings:
+                        if sib.source_file_type in (IntakeFileKind.YELT.value, IntakeFileKind.ELT.value):
+                            continue
+                        rec = db.get(SubmissionDraftRecord, sib.draft_id)
                         if (
-                            sib.status == IntakeDraftStatus.PENDING_REVIEW.value
-                            and sib.source_file_type not in (IntakeFileKind.YELT.value, IntakeFileKind.ELT.value)
-                            and sib.sim_set_id != attached_sim_id
+                            rec is not None
+                            and rec.status == IntakeDraftStatus.PENDING_REVIEW.value
+                            and rec.sim_set_id != attached_sim_id
                         ):
-                            rec = db.get(SubmissionDraftRecord, sib.draft_id)
-                            if rec is not None:
-                                ext_data = IntakeExtractedData(**json.loads(rec.extracted_json or "{}"))
-                                rec.sim_set_id = attached_sim_id
-                                graph = self.sketch_draft_graph(
-                                    draft_id=rec.draft_id,
-                                    extracted=ext_data,
-                                    sim_set_id=attached_sim_id,
-                                    loss_files=loss_files,
-                                    target_programme_id=rec.target_programme_id,
-                                )
-                                rec.graph_json = graph.model_dump_json()
-                                rec.updated_at = _utcnow()
+                            ext_data = IntakeExtractedData(**json.loads(rec.extracted_json or "{}"))
+                            rec.sim_set_id = attached_sim_id
+                            graph = self.sketch_draft_graph(
+                                draft_id=rec.draft_id,
+                                extracted=ext_data,
+                                sim_set_id=attached_sim_id,
+                                loss_files=loss_files,
+                                target_programme_id=rec.target_programme_id,
+                            )
+                            rec.graph_json = graph.model_dump_json()
+                            rec.updated_at = _utcnow()
                     db.commit()
 
             for idx, fname, raw in doc_items:
@@ -912,12 +920,15 @@ class SubmissionIntakeService:
                     total_bytes = 0
                     att_idx = 0
 
+                    msg_prefix = f"email:{msg_id}:"
+                    escaped_msg_prefix = f"email:{_escape_like(msg_id)}:%"
                     with get_session() as db:
                         already_ingested_keys = {
                             r.external_key
                             for r in db.query(WatchedIngestionRecord.external_key)
-                            .filter(WatchedIngestionRecord.external_key.like(f"email:{msg_id}:%"))
+                            .filter(WatchedIngestionRecord.external_key.like(escaped_msg_prefix, escape="\\"))
                             .all()
+                            if r.external_key.startswith(msg_prefix)
                         }
 
                     for part in parsed_mail.walk():

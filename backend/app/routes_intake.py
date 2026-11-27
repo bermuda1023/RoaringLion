@@ -143,7 +143,7 @@ def create_intake_router(
         try:
             msg = EmailMessageInput.model_validate_json(raw_body)
         except ValidationError as exc:
-            if any(err.get("type") == "too_long" for err in exc.errors()):
+            if any(err.get("type") in ("too_long", "string_too_long") for err in exc.errors()):
                 raise HTTPException(status_code=413, detail=str(exc)) from exc
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
         try:
