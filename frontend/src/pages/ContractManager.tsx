@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, apiUrl, fetchJson, postJson, type ContractFull, type ProgrammeProfile } from '../api/client';
 import { ContractLayersEditor } from '../components/ContractLayersEditor';
 import { fmtInt, fmtMoneyB, fmtMoneyM, fmtPct, fmtPts, fmtRatioPct } from '../utils/format';
@@ -147,7 +147,13 @@ interface ContractDossier {
   }[];
 }
 
-export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id: string) => void }) {
+export function ContractManager({
+  onSelectProgramme,
+  expectedCount,
+}: {
+  onSelectProgramme: (id: string) => void;
+  expectedCount?: number;
+}) {
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
   const [colFilters, setColFilters] = useState<Record<string, string>>({});
@@ -183,7 +189,38 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   const contractsQ = useQuery({
     queryKey: ['contracts'],
     queryFn: () => api.listContracts(),
+    refetchOnMount: 'always',
   });
+
+  // If the header's programme count updated (e.g. after a backend redeploy or restart),
+  // reconcile the contracts ledger immediately so counts never stay stuck on stale cached rows.
+  const lastSyncAttemptRef = useRef<string>('');
+  useEffect(() => {
+    if (
+      typeof expectedCount === 'number' &&
+      contractsQ.data &&
+      contractsQ.data.length !== expectedCount &&
+      !contractsQ.isFetching
+    ) {
+      const key = `${contractsQ.data.length}->${expectedCount}`;
+      if (lastSyncAttemptRef.current !== key) {
+        lastSyncAttemptRef.current = key;
+        contractsQ.refetch();
+      }
+    }
+  }, [expectedCount, contractsQ.data, contractsQ.isFetching, contractsQ.refetch]);
+
+  useEffect(() => {
+    const rows = contractsQ.data;
+    if (!rows || rows.length === 0) return;
+    if (!rows.some((c) => c.programmeId === activeId)) {
+      setActiveId(rows[0].programmeId);
+    }
+    const cachedProgs = qc.getQueryData<unknown[]>(['programmes']);
+    if (Array.isArray(cachedProgs) && cachedProgs.length !== rows.length) {
+      qc.invalidateQueries({ queryKey: ['programmes'] });
+    }
+  }, [contractsQ.data, activeId, qc]);
 
   const selectOptionsByCol: Record<string, string[]> = {
     status: Array.from(new Set((contractsQ.data ?? []).map((c) => String(c.status)))).sort(),
@@ -458,6 +495,18 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
             </button>
           </div>
         </div>
+
+        {contractsQ.isError && (
+          <div className="error-banner" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <span>
+              Could not load contracts ledger: {String((contractsQ.error as Error)?.message ?? 'Network error')}
+              {contractsQ.data?.length ? ` (showing ${contractsQ.data.length} cached)` : ''}
+            </span>
+            <button className="btn btn-ghost" onClick={() => contractsQ.refetch()}>
+              Retry
+            </button>
+          </div>
+        )}
 
         {(createMut.error || saveProfileMut.error || addNoteMut.error || linkPriorMut.error || renewMut.error) && (
           <div className="error-banner">

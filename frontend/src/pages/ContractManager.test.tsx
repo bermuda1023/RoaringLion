@@ -280,4 +280,64 @@ describe('ContractManager ILW, Retro Hedge, and Long direction support', () => {
       instrument: 'INDUSTRY_INDEX',
     });
   });
+
+  it('re-fetches contracts when expectedCount disagrees with stale cached rows and surfaces refresh errors', async () => {
+    const makeBatch = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        ...contractFixture,
+        programmeId: i === 0 ? 'prog-farmers-us-27' : `prog-syn-${String(i).padStart(3, '0')}`,
+        cedentName: `Cedent ${i + 1}`,
+        programmeName: `Programme ${i + 1}`,
+        profile: { ...contractFixture.profile, uniqueCode: `RL-2027-${String(i + 1).padStart(3, '0')}` },
+      }));
+
+    let fetchCount = 0;
+    let shouldFail = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/contracts')) {
+          fetchCount += 1;
+          if (shouldFail) {
+            return new Response('Bad Gateway', { status: 502 });
+          }
+          return new Response(JSON.stringify(fetchCount === 1 ? makeBatch(6) : makeBatch(48)), { status: 200 });
+        }
+        if (url.includes('/dossier')) {
+          return new Response(JSON.stringify(dossierFixture), { status: 200 });
+        }
+        return new Response(JSON.stringify([]), { status: 200 });
+      }),
+    );
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { rerender } = render(
+      <QueryClientProvider client={qc}>
+        <ContractManager onSelectProgramme={() => {}} expectedCount={6} />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText('6 of 6')).toBeTruthy();
+
+    // Header pill updates to 48 (e.g. after backend redeploy): ledger must re-fetch and match 48 of 48
+    rerender(
+      <QueryClientProvider client={qc}>
+        <ContractManager onSelectProgramme={() => {}} expectedCount={48} />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText('48 of 48')).toBeTruthy();
+    expect(fetchCount).toBe(2);
+
+    // If a subsequent refresh fails with 502, an explicit error banner + Retry button appear
+    shouldFail = true;
+    rerender(
+      <QueryClientProvider client={qc}>
+        <ContractManager onSelectProgramme={() => {}} expectedCount={49} />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(/Could not load contracts ledger/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+  });
 });

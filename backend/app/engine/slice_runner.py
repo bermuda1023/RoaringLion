@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 import roaring_lion_engine as rle
 
-from app.engine.pricing_link import PricingLink, compute_pricing_economics, extract_rollup_layers
+from app.engine.pricing_link import LAYER_NODE_TYPES, PricingLink, compute_pricing_economics, extract_rollup_layers
 from app.engine.sim_generator import RP_TO_ID, YeltTable
 from app.models.domain import (
     BreadcrumbStep,
@@ -48,6 +48,7 @@ from app.models.domain import (
 from app.models.enums import NodeType, ViewOfRisk, is_hedge_direction
 from app.services.lineage import LineageRegistry, canonical_hash
 from app.services.portfolio_snapshot import compute_unl_portfolio_events, is_ilw_programme
+from app.services.sim_sets import _trim_memory
 
 DEFAULT_RETURN_PERIODS = [10.0, 20.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0]
 
@@ -55,7 +56,7 @@ DEFAULT_RETURN_PERIODS = [10.0, 20.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0]
 # key -> (ev_out, ann, mx, rip, ep_dict)
 _NODE_CACHE: OrderedDict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]] = OrderedDict()
 _NODE_CACHE_LOCK = threading.Lock()
-_MAX_CACHE_ENTRIES = 48
+_MAX_CACHE_ENTRIES = 16
 
 
 def clear_dag_cache() -> None:
@@ -761,6 +762,15 @@ def evaluate_programme_dag(
 
         views_output[view_key] = node_metrics
         event_vectors[view_key] = node_event_streams
+        if not compute_metrics and not need_events:
+            keep_ids = {
+                n.node_id
+                for n in programme.graph.nodes
+                if n.node_type in LAYER_NODE_TYPES
+                or n.node_type in (NodeType.PRICING_OUTPUT, NodeType.YELT_OUTPUT, NodeType.EP_OUTPUT)
+            }
+            node_ann = {k: v for k, v in node_ann.items() if k in keep_ids}
+            node_rip = {k: v for k, v in node_rip.items() if k in keep_ids}
         annual_vectors[view_key] = node_ann
         rip_vectors[view_key] = node_rip
 
@@ -887,6 +897,45 @@ def evaluate_portfolio_rollup(
     rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
     internal_lineage = LineageRegistry(persist=False)
 
+    # Identify cross-linked programmes so self-linked programmes can be streamed one-by-one without
+    # retaining every programme's full annual+RIP dicts simultaneously in RAM.
+    cross_ids: set[str] = set()
+    for p in active_progs:
+        for n in p.graph.nodes:
+            if n.node_type == NodeType.PRICING_OUTPUT:
+                cid = str(n.params.get("contractId") or "").strip()
+                if cid and cid != p.programme_id:
+                    cross_ids.add(p.programme_id)
+                    cross_ids.add(cid)
+
+    streamed_entries: list[Any] = []
+    deferred_progs: list[ProgrammeDeal] = []
+    port_rip = np.zeros(yelt.num_trials, dtype=np.float64)
+    _empty_f64 = np.empty(0, dtype=np.float64)
+
+    def _collect_prog(prog: ProgrammeDeal, ann_map: dict[str, np.ndarray], rip_map: dict[str, np.ndarray]) -> None:
+        if prog.programme_id in cross_ids:
+            deferred_progs.append(prog)
+            ann_by_prog[prog.programme_id] = ann_map
+            rip_by_prog[prog.programme_id] = rip_map
+        else:
+            local = extract_rollup_layers(
+                [prog],
+                {prog.programme_id: ann_map},
+                {prog.programme_id: rip_map},
+                all_programmes=all_programmes,
+                include_1x=False,
+                consume_maps=True,
+            )
+            for e in local:
+                if len(e.rip_vec):
+                    if e.is_hedge:
+                        np.subtract(port_rip, e.rip_vec, out=port_rip)
+                    else:
+                        np.add(port_rip, e.rip_vec, out=port_rip)
+                    e.rip_vec = _empty_f64
+            streamed_entries.extend(local)
+
     # Evaluate long programmes first so any UNL retro hedge can snapshot our own UNL book
     for prog in long_progs:
         _, vecs = evaluate_programme_dag(
@@ -898,8 +947,8 @@ def evaluate_portfolio_rollup(
             compute_metrics=False,
             need_events=False,
         )
-        ann_by_prog[prog.programme_id] = vecs["annual"][view.value]
-        rip_by_prog[prog.programme_id] = vecs["rip"][view.value]
+        _collect_prog(prog, vecs["annual"][view.value], vecs["rip"][view.value])
+        del vecs
         breadcrumbs.append(
             BreadcrumbStep(
                 entity_type="PROGRAMME",
@@ -939,8 +988,8 @@ def evaluate_portfolio_rollup(
             compute_metrics=False,
             need_events=False,
         )
-        ann_by_prog[prog.programme_id] = vecs["annual"][view.value]
-        rip_by_prog[prog.programme_id] = vecs["rip"][view.value]
+        _collect_prog(prog, vecs["annual"][view.value], vecs["rip"][view.value])
+        del vecs
         for k, h in dag_resp.manifest.input_hashes.items():
             if k.startswith("portfolio_snapshot:"):
                 input_hashes[k] = h
@@ -955,10 +1004,40 @@ def evaluate_portfolio_rollup(
         )
         input_hashes[prog.programme_id] = prog.graph.content_hash
 
-    for entry in extract_rollup_layers(active_progs, ann_by_prog, rip_by_prog, all_programmes=all_programmes):
+    entries = streamed_entries
+    if deferred_progs:
+        entries.extend(
+            extract_rollup_layers(
+                deferred_progs,
+                ann_by_prog,
+                rip_by_prog,
+                all_programmes=all_programmes,
+                include_1x=False,
+                consume_maps=True,
+            )
+        )
+    ann_by_prog.clear()
+    rip_by_prog.clear()
+
+    m_layers = len(entries)
+    layer_matrix = np.empty((m_layers, yelt.num_trials), dtype=np.float64)
+    expected_hedge_recovery = 0.0
+
+    for idx in range(m_layers):
+        entry = entries[idx]
+        entries[idx] = None  # type: ignore[call-overload]
         sign = -1.0 if entry.is_hedge else 1.0
-        layer_ann_list.append(sign * entry.loss_vec)
-        layer_rip_list.append(sign * entry.rip_vec)
+        if entry.is_hedge:
+            np.negative(entry.loss_vec, out=layer_matrix[idx])
+            if len(entry.rip_vec):
+                port_rip -= entry.rip_vec
+            expected_hedge_recovery += float(np.mean(entry.loss_vec))
+        else:
+            layer_matrix[idx] = entry.loss_vec
+            if len(entry.rip_vec):
+                port_rip += entry.rip_vec
+        ep_l = _ep_stats_from_vector(entry.loss_vec)
+        sa_tvar_250_pos = next(p["tvar"] for p in ep_l["ep_points"] if abs(p["return_period"] - 250.0) < 1e-6)
         layer_rows_meta.append({
             "programme_id": entry.programme_id,
             "layer_id": entry.layer_id,
@@ -970,20 +1049,19 @@ def evaluate_portfolio_rollup(
             "premium": entry.premium,
             "signed_premium": sign * entry.premium,
             "signed_line": entry.signed_line,
-            "raw_loss_vec": entry.loss_vec,
+            "raw_el": ep_l["el"],
+            "sa_tvar_250_pos": sa_tvar_250_pos,
+            "signed_exp_rip": sign * entry.expected_rip,
         })
-
-    layer_matrix = np.vstack(layer_ann_list) if layer_ann_list else np.zeros((0, yelt.num_trials))
-    rip_matrix = np.vstack(layer_rip_list) if layer_rip_list else np.zeros((0, yelt.num_trials))
+        del entry
+    entries.clear()
 
     port_loss = layer_matrix.sum(axis=0)
-    port_rip = rip_matrix.sum(axis=0)
     gross_premium = sum(r["premium"] for r in layer_rows_meta if not r["is_hedge"])
     hedge_premium = sum(r["premium"] for r in layer_rows_meta if r["is_hedge"])
     net_premium = gross_premium - hedge_premium
     deployed_collateral = sum(r["limit"] for r in layer_rows_meta if not r["is_hedge"])
     hedge_count = sum(1 for r in layer_rows_meta if r["is_hedge"])
-    expected_hedge_recovery = sum(float(np.mean(r["raw_loss_vec"])) for r in layer_rows_meta if r["is_hedge"])
 
     net_yield_on_capital = total_capital * 0.03
     trial_profit = net_premium + port_rip + net_yield_on_capital - port_loss
@@ -992,21 +1070,22 @@ def evaluate_portfolio_rollup(
     port_var_250, port_tvar_250, co_tvars = rle.euler_cotvar(
         np.ascontiguousarray(layer_matrix, dtype=np.float64), 250.0
     )
+    del layer_matrix
+    _trim_memory()
     cotvar_sum_diff = abs(float(np.sum(co_tvars)) - float(port_tvar_250))
 
     alloc_rows: list[LayerAllocationRow] = []
     for idx, meta in enumerate(layer_rows_meta):
         is_hedge = meta["is_hedge"]
-        ep_l = _ep_stats_from_vector(meta["raw_loss_vec"])
-        sa_tvar_250_pos = next(p["tvar"] for p in ep_l["ep_points"] if abs(p["return_period"] - 250.0) < 1e-6)
+        sa_tvar_250_pos = meta["sa_tvar_250_pos"]
         co_tvar = float(co_tvars[idx])
-        el_signed = -ep_l["el"] if is_hedge else ep_l["el"]
+        el_signed = -meta["raw_el"] if is_hedge else meta["raw_el"]
         sa_tvar_signed = -sa_tvar_250_pos if is_hedge else sa_tvar_250_pos
         if is_hedge:
             div_credit = (1.0 - abs(co_tvar) / sa_tvar_250_pos) * 100.0 if sa_tvar_250_pos > 0 else 0.0
         else:
             div_credit = (1.0 - co_tvar / sa_tvar_250_pos) * 100.0 if sa_tvar_250_pos > 0 else 0.0
-        exp_rip_l = float(np.mean(rip_matrix[idx]))
+        exp_rip_l = meta["signed_exp_rip"]
         exp_profit_l = meta["signed_premium"] + exp_rip_l - el_signed
         if is_hedge:
             # Cost per dollar of tail TVaR saved (positive = cost % of capital released)

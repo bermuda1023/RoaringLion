@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import ctypes
+import gc
 import io
 import json
 import uuid
 from pathlib import Path
 
 import numpy as np
-import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -29,6 +30,19 @@ def _sim_dir() -> Path:
     return d
 
 
+def _trim_memory() -> None:
+    """Release unused PyArrow/Python/glibc heap pages back to the OS (important on 512MB containers)."""
+    try:
+        pa.default_memory_pool().release_unused()
+    except Exception:
+        pass
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 def write_yelt_parquet(table: YeltTable, path: Path) -> None:
     pa_table = pa.table({
         "trial_id": pa.array(table.trial_ids, type=pa.uint32()),
@@ -38,11 +52,13 @@ def write_yelt_parquet(table: YeltTable, path: Path) -> None:
         "loss_amount": pa.array(table.losses, type=pa.float64()),
     })
     pq.write_table(pa_table, path, compression="zstd")
+    del pa_table
+    pa.default_memory_pool().release_unused()
 
 
 def read_yelt_parquet(rec: SimSetRecord) -> YeltTable:
     pa_table = pq.read_table(rec.parquet_path)
-    return YeltTable(
+    out = YeltTable(
         sim_set_id=rec.sim_set_id,
         name=rec.name,
         event_catalog_id=rec.event_catalog_id,
@@ -55,6 +71,9 @@ def read_yelt_parquet(rec: SimSetRecord) -> YeltTable:
         losses=np.ascontiguousarray(pa_table["loss_amount"].to_numpy(), dtype=np.float64),
         content_hash=rec.content_hash,
     )
+    del pa_table
+    pa.default_memory_pool().release_unused()
+    return out
 
 
 def build_aligned_industry_catalog(base_yelt: YeltTable, seed: int = 20269999) -> YeltTable:
@@ -138,6 +157,7 @@ class SimSetStore:
                 self._persist(db, ind_yelt, SimSetFormat.SYNTHETIC, is_industry=True)
 
             db.commit()
+            _trim_memory()
             return base_yelt, ind_yelt
 
     def _persist(
@@ -240,6 +260,8 @@ class SimSetStore:
         peril: str | None = None,
         vendor: str | None = None,
     ) -> SimSetDetail:
+        import polars as pl
+
         if filename.lower().endswith(".parquet"):
             df = pl.read_parquet(io.BytesIO(raw_bytes))
         else:

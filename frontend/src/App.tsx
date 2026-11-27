@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { API_BASE, api, fetchJson } from './api/client';
 import { BreadcrumbBar } from './components/BreadcrumbBar';
@@ -110,13 +110,36 @@ export function App() {
   const [detView, setDetView] = useState<ViewOfRisk>('UNADJUSTED');
   const [losses, setLosses] = useState<DeterministicLossRow[]>(DEFAULT_LOSSES);
 
+  const qc = useQueryClient();
   const programmesQ = useQuery({ queryKey: ['programmes'], queryFn: api.listProgrammes });
   const healthQ = useQuery({
     queryKey: ['health'],
-    queryFn: () => fetchJson<{ status: string }>('/api/health'),
+    queryFn: () => fetchJson<{ status: string; programmesLoaded?: number }>('/api/health'),
     refetchInterval: 30_000,
     retry: 1,
   });
+
+  // Keep header Programmes pill and CMS Contracts ledger in sync across backend deploys/restarts.
+  useEffect(() => {
+    const serverCount = healthQ.data?.programmesLoaded;
+    if (typeof serverCount !== 'number') return;
+    if (programmesQ.data && programmesQ.data.length !== serverCount && !programmesQ.isFetching) {
+      qc.invalidateQueries({ queryKey: ['programmes'] });
+    }
+    const cachedContracts = qc.getQueryData<unknown[]>(['contracts']);
+    if (Array.isArray(cachedContracts) && cachedContracts.length !== serverCount) {
+      qc.invalidateQueries({ queryKey: ['contracts'] });
+    }
+  }, [healthQ.data?.programmesLoaded, programmesQ.data?.length, programmesQ.isFetching, qc]);
+
+  useEffect(() => {
+    const progCount = programmesQ.data?.length;
+    if (typeof progCount !== 'number') return;
+    const cachedContracts = qc.getQueryData<unknown[]>(['contracts']);
+    if (Array.isArray(cachedContracts) && cachedContracts.length !== progCount) {
+      qc.invalidateQueries({ queryKey: ['contracts'] });
+    }
+  }, [programmesQ.data?.length, qc]);
   const selectedProg = programmesQ.data?.find((p) => p.programmeId === selectedProgId) ?? programmesQ.data?.[0];
 
   const detMut = useMutation({
@@ -216,6 +239,7 @@ export function App() {
         )}
         {tab === 'cms' && (
           <ContractManager
+            expectedCount={programmesQ.data?.length}
             onSelectProgramme={(id) => {
               setSelectedProgId(id);
               setTab('dag');
