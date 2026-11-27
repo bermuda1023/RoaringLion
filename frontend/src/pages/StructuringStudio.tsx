@@ -21,6 +21,7 @@ import { nodeAccent } from '../utils/nodeAccent';
 import { connectNodes, removeEdge } from '../utils/pricingBind';
 import { filterChoices } from '../utils/filterOptions';
 import { fmtMoneyB, fmtMoneyM, fmtNum, fmtPct, fmtRatioPct, NODE_PARAM_META } from '../utils/format';
+import { cleanGraphForSave } from '../utils/graphSerialize';
 import { CMS_LAYER_PRICE_KEYS, layerPremiumViaPricing } from '../utils/pricingFacts';
 import {
   isAutoLabel,
@@ -138,25 +139,7 @@ export function StructuringStudio({
   });
 
   const saveGraphMut = useMutation({
-    mutationFn: () => {
-      // Params edited through the inspector may hold numeric strings; restore numbers and turn blank optional caps into null.
-      const optionalKeys = new Set(['perEventCap', 'eventCap', 'aggCap', 'maxOrder', 'maxLoss']);
-      const clean: GraphSpec = {
-        ...draftGraph,
-        nodes: draftGraph.nodes.map((n) => ({
-          ...n,
-          params: Object.fromEntries(
-            Object.entries(n.params).map(([k, v]) => {
-              if (LABEL_META_KEYS.includes(k) || LAYER_META_KEYS.includes(k) || OUTPUT_LINK_KEYS.includes(k)) return [k, v];
-              if (typeof v === 'string' && v.trim() === '' && optionalKeys.has(k)) return [k, null];
-              if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return [k, Number(v)];
-              return [k, v];
-            }),
-          ),
-        })),
-      };
-      return api.updateGraph(selectedProg.programmeId, clean);
-    },
+    mutationFn: () => api.updateGraph(selectedProg.programmeId, cleanGraphForSave(draftGraph)),
     onSuccess: () => {
       setDirty(false);
       qc.invalidateQueries({ queryKey: ['programmes'] });
@@ -1138,7 +1121,8 @@ export function StructuringStudio({
           </thead>
           <tbody>
             {unadjNodes.map((u, idx) => {
-              const a = adjNodes[idx];
+              const a = adjById[u.nodeId] ?? adjNodes[idx];
+              if (!a) return null;
               const deltaPct = u.el > 0 ? ((a.el - u.el) / u.el) * 100 : 0;
               const tvar250 = a.epPoints.find((p) => Math.abs(p.returnPeriod - 250) < 0.1)?.tvar ?? 0;
               const graphNode = draftGraph.nodes.find((n) => n.nodeId === u.nodeId);

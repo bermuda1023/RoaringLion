@@ -82,6 +82,10 @@ def select_unl_snapshot_contracts(
             c
             for c in candidates
             if c.status in active_statuses
+            and (
+                c.status != ProgrammeStatus.EXPIRED
+                or bool(getattr(c, "inception_date", None) or getattr(c, "expiry_date", None))
+            )
             and _in_force_on(getattr(c, "inception_date", None), getattr(c, "expiry_date", None), clean_date)
         ]
 

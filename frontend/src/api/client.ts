@@ -190,11 +190,54 @@ export function readableError(status: number, text: string): string {
   return `HTTP ${status}: ${text.slice(0, 300)}`;
 }
 
+function isRetryableNetworkRequest(url: string, init?: RequestInit): boolean {
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD') return true;
+  if (method === 'POST') {
+    return (
+      url.startsWith('/api/optimizer/') ||
+      url.startsWith('/api/portfolio/') ||
+      url.startsWith('/api/deterministic/')
+    );
+  }
+  return false;
+}
+
 export async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(apiUrl(url), {
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
-  });
+  const headers = new Headers(init?.headers);
+  if (init?.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const reqInit: RequestInit = { ...init, headers };
+  const target = apiUrl(url);
+  const maxAttempts = isRetryableNetworkRequest(url, init) ? 2 : 1;
+
+  let res: Response | null = null;
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      res = await fetch(target, reqInit);
+      lastErr = null;
+      break;
+    } catch (err) {
+      if (reqInit.signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+        throw err;
+      }
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      }
+    }
+  }
+  if (!res) {
+    const detail =
+      lastErr instanceof TypeError
+        ? `Could not reach backend API (${API_BASE || 'same-origin'} ${url}). The server may be restarting or unreachable.`
+        : lastErr instanceof Error
+          ? lastErr.message
+          : String(lastErr ?? 'Network error');
+    throw new Error(detail);
+  }
   if (!res.ok) {
     throw new Error(readableError(res.status, await res.text()));
   }

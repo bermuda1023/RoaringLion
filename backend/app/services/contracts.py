@@ -570,6 +570,8 @@ def contract_to_programme_deal(c: ContractFull) -> ProgrammeDeal:
         is_hedge=is_hedge_direction(c.direction),
         structure=c.structure,
         instrument=c.instrument,
+        inception_date=c.inception_date,
+        expiry_date=c.expiry_date,
         portfolio_snapshot_date=c.portfolio_snapshot_date,
         currency=c.currency,
         sim_set_id=c.sim_set_id,
@@ -599,7 +601,9 @@ _LAYER_TYPES = {
 
 
 def _opt_float(v) -> float | None:
-    return None if v is None else float(v)
+    if v is None or (isinstance(v, str) and v.strip() == ""):
+        return None
+    return float(v)
 
 
 def compute_weighted_rarc(layers: list[ContractLayer]) -> float | None:
@@ -731,27 +735,31 @@ def graph_layers(
         editable = ["layerCode", "label", "depositPremium", "writtenLine", "signedLine", "brokeragePct", "rarcPct"]
         if node.node_type == NodeType.CASCADING_TOWER:
             subs = p.get("layers", []) or []
-            limit = sum(float(l.get("occLimit", 0) or 0) for l in subs) or None
-            attachment = min((float(l.get("occAttachment", 0) or 0) for l in subs), default=None)
-            premium = sum(float(l.get("depositPremium", 0) or 0) for l in subs)
-            signed = float(subs[0].get("placedShare", default_signed)) if subs else default_signed
+            limit = sum(_opt_float(l.get("occLimit")) or 0.0 for l in subs) or None
+            att_vals = [_opt_float(l.get("occAttachment")) for l in subs]
+            attachment = min((a for a in att_vals if a is not None), default=None)
+            premium = sum(_opt_float(l.get("depositPremium")) or 0.0 for l in subs)
+            sub_signed = _opt_float(subs[0].get("placedShare")) if subs else None
+            signed = default_signed if sub_signed is None else sub_signed
             editable = [f for f in editable if f != "depositPremium"]
         else:
             limit = _opt_float(p.get(limit_key)) if limit_key else None
             attachment = _opt_float(p.get(attach_key)) if attach_key else None
-            premium = float(p.get("depositPremium", 0.0) or 0.0)
-            signed = float(p.get("placedShare", default_signed))
+            premium = _opt_float(p.get("depositPremium")) or 0.0
+            signed_val = _opt_float(p.get("placedShare"))
+            signed = default_signed if signed_val is None else signed_val
             if limit_key:
                 editable += ["limit", "rol"]
             if attach_key:
                 editable.append("attachment")
             if node.node_type == NodeType.OCC_XL:
                 editable += ["reinstatements", "ripRate"]
-        raw_written = p.get("writtenLine")
+        raw_written = _opt_float(p.get("writtenLine"))
         if raw_written is None:
-            raw_written = p.get("authorizedLine")
-        written = float(raw_written) if raw_written is not None else max(default_written, signed)
-        brokerage = float(p.get("brokeragePct", default_brokerage))
+            raw_written = _opt_float(p.get("authorizedLine"))
+        written = raw_written if raw_written is not None else max(default_written, signed)
+        brokerage_val = _opt_float(p.get("brokeragePct"))
+        brokerage = default_brokerage if brokerage_val is None else brokerage_val
         rarc_pct = _opt_float(p.get("rarcPct"))
         rol = premium / limit if limit else None
         our_premium = premium * signed

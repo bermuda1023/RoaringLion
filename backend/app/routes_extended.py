@@ -183,6 +183,45 @@ def create_extended_router(
             lookup.update({c.programme_id: contract_to_programme_deal(c) for c in targets})
         return deals, lookup, total
 
+    def _make_optimizer_unl_resolver():
+        """SQL-scoped UNL snapshot resolver for optimizer routes (never calls `list_contracts()`)."""
+        cache: dict[tuple[str, str], tuple] = {}
+
+        def _resolve(as_of_date: str | None, view: ViewOfRisk):
+            clean_date = (as_of_date or "").strip()
+            key = (clean_date, view.value)
+            if key not in cache:
+                statuses = (
+                    [ProgrammeStatus.BOUND, ProgrammeStatus.BOUND_FOR_OPS, ProgrammeStatus.EXPIRED]
+                    if clean_date
+                    else [ProgrammeStatus.BOUND, ProgrammeStatus.BOUND_FOR_OPS]
+                )
+                candidates, _ = contract_store.query_contracts(
+                    statuses=statuses,
+                    exclude_structures=[StructureType.ILW],
+                )
+                snap_contracts = select_unl_snapshot_contracts(candidates, as_of_date=clean_date or None)
+                all_d = {c.programme_id: contract_to_programme_deal(c) for c in candidates}
+                linked_ids = {
+                    str(n.params.get("contractId") or "").strip()
+                    for c in snap_contracts
+                    for n in c.graph.nodes
+                    if n.node_type == NodeType.PRICING_OUTPUT
+                } - set(all_d) - {""}
+                if linked_ids:
+                    targets, _ = contract_store.query_contracts(programme_ids=linked_ids)
+                    all_d.update({c.programme_id: contract_to_programme_deal(c) for c in targets})
+                cache[key] = compute_unl_portfolio_events(
+                    [all_d[c.programme_id] for c in snap_contracts],
+                    sim_store.get_yelt(base_sim_id),
+                    view,
+                    all_deals=all_d,
+                    as_of_date=clean_date or None,
+                )
+            return cache[key]
+
+        return _resolve
+
     def _run_optimizer(fn, req: OptimizerRequest, **kwargs):
         deals, lookup, _ = _optimizer_universe(req.mode, req.included_statuses)
         try:
@@ -193,6 +232,7 @@ def create_extended_router(
                 ind_yelt=sim_store.get_yelt(ind_sim_id),
                 lineage=lineage,
                 all_programmes=lookup,
+                portfolio_unl_resolver=_make_optimizer_unl_resolver(),
                 **kwargs,
             )
         except ValueError as exc:
@@ -331,15 +371,19 @@ def create_extended_router(
         """Every layer of every deal in the selected statuses, unpaged. Prefer `/api/optimizer/candidates`."""
         safe_mode: OptimizerMode = "CURRENT" if mode == "CURRENT" else "FORWARD_PLANNING"
         deals, lookup, _ = _optimizer_universe(safe_mode, included_statuses or None)
-        return list_optimizable_layers(
-            programmes=deals,
-            yelt=sim_store.get_yelt(base_sim_id),
-            ind_yelt=sim_store.get_yelt(ind_sim_id),
-            view=view,
-            mode=safe_mode,
-            included_statuses=included_statuses or None,
-            all_programmes=lookup,
-        )
+        try:
+            return list_optimizable_layers(
+                programmes=deals,
+                yelt=sim_store.get_yelt(base_sim_id),
+                ind_yelt=sim_store.get_yelt(ind_sim_id),
+                view=view,
+                mode=safe_mode,
+                included_statuses=included_statuses or None,
+                all_programmes=lookup,
+                portfolio_unl_resolver=_make_optimizer_unl_resolver(),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @router.get("/api/optimizer/candidates", response_model=OptimizerCandidatesPage)
     def get_optimizer_candidates(
@@ -361,15 +405,19 @@ def create_extended_router(
         defaults = default_optimizer_statuses(mode)
         counts = contract_store.count_by_status(exclude_structures=[StructureType.ILW])
         deals, lookup, matched = _optimizer_universe(mode, chosen, search=search, limit=limit, offset=offset)
-        layers = list_optimizable_layers(
-            programmes=deals,
-            yelt=sim_store.get_yelt(base_sim_id),
-            ind_yelt=sim_store.get_yelt(ind_sim_id),
-            view=view,
-            mode=mode,
-            included_statuses=chosen,
-            all_programmes=lookup,
-        )
+        try:
+            layers = list_optimizable_layers(
+                programmes=deals,
+                yelt=sim_store.get_yelt(base_sim_id),
+                ind_yelt=sim_store.get_yelt(ind_sim_id),
+                view=view,
+                mode=mode,
+                included_statuses=chosen,
+                all_programmes=lookup,
+                portfolio_unl_resolver=_make_optimizer_unl_resolver(),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return OptimizerCandidatesPage(
             mode=mode,
             view=view.value,

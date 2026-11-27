@@ -385,4 +385,14 @@ describe('PortfolioOptimizer deal status selection', () => {
     expect(within(row).getByText('DECLINED')).toBeTruthy();
     expect(screen.queryByText('Backend unreachable')).toBeNull();
   });
+
+  it('offers a retry when a frontier solve fails and succeeds on retry', async () => {
+    await screen.findAllByText('Farmers Group');
+    postMock.mockRejectedValueOnce(new Error('Could not reach backend API'));
+    fireEvent.click(screen.getByRole('button', { name: 'Run Frontier Explorer' }));
+    expect(await screen.findByText('Could not reach backend API')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText('Could not reach backend API')).toBeNull());
+    expect(await screen.findByText(/Point #1/)).toBeTruthy();
+  });
 });

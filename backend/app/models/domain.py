@@ -129,6 +129,8 @@ class ProgrammeDeal(CamelModel):
     is_hedge: bool = False
     structure: StructureType = StructureType.OCC_XL
     instrument: InstrumentType = InstrumentType.UNL
+    inception_date: str | None = None
+    expiry_date: str | None = None
     portfolio_snapshot_date: str | None = None
     currency: str = "USD"
     sim_set_id: str

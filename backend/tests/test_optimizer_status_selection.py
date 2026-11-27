@@ -123,15 +123,20 @@ def test_default_selection_gives_what_the_previous_rule_gave(deals):
     """Before statuses were selectable the routes loaded every contract, dropped ILWs and declined, NTU
     and expired deals, and the engine narrowed CURRENT mode. Scoping in SQL must give the same layers."""
     off_risk = {S.DECLINED, S.NTU, S.EXPIRED}
+    all_deals = {c.programme_id: contract_to_programme_deal(c) for c in CONTRACT_STORE.list_contracts()}
     previous_universe = [
-        contract_to_programme_deal(c)
-        for c in CONTRACT_STORE.list_contracts()
-        if c.structure != StructureType.ILW and c.status not in off_risk
+        d for d in all_deals.values()
+        if d.structure != StructureType.ILW and d.status not in off_risk
     ]
     yelt, ind_yelt = _yelts()
     for mode in ("CURRENT", "FORWARD_PLANNING"):
         expected = list_optimizable_layers(
-            programmes=previous_universe, yelt=yelt, ind_yelt=ind_yelt, view=ViewOfRisk.ADJUSTED, mode=mode
+            programmes=previous_universe,
+            yelt=yelt,
+            ind_yelt=ind_yelt,
+            view=ViewOfRisk.ADJUSTED,
+            mode=mode,
+            all_programmes=all_deals,
         )
         got = client.get(f"/api/optimizer/layers?view=ADJUSTED&mode={mode}").json()
         assert {l["layerKey"]: l for l in got} == {l.layer_key: l.model_dump(by_alias=True, mode="json") for l in expected}

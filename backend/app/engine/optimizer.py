@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
+import math
 import time
 from typing import Any, Literal
 
@@ -16,9 +19,10 @@ from app.engine.sim_generator import YeltTable
 from app.engine.slice_runner import evaluate_programme_dag, validate_dag_acyclic
 from app.models.common import CamelModel
 from app.models.domain import BreadcrumbStep, GraphNodeSpec, ProgrammeDeal, RunManifest
-from app.models.enums import ContractDirection, IlwTriggerType, NodeType, ProgrammeStatus, ViewOfRisk
+from app.models.enums import ContractDirection, IlwTriggerType, NodeType, ProgrammeStatus, ViewOfRisk, is_hedge_direction
 from app.models.phase1 import IlwPriceRequest
 from app.services.lineage import LineageRegistry, canonical_hash
+from app.services.portfolio_snapshot import compute_unl_portfolio_events, select_unl_snapshot_contracts
 
 TERM_NODE_TYPES = (
     NodeType.OCC_XL,
@@ -335,6 +339,8 @@ def _evaluate_for_rollup(
     view: ViewOfRisk,
     *,
     industry_yelt: YeltTable | None = None,
+    portfolio_unl_resolver: Callable[[str | None, ViewOfRisk], tuple[np.ndarray, str]] | None = None,
+    snapshot_hashes_out: dict[str, str] | None = None,
 ) -> tuple[ProgrammeDeal, dict[str, np.ndarray], dict[str, np.ndarray], set[str]]:
     """Evaluate a programme's graph and make its unplaced layers scalable.
 
@@ -348,9 +354,18 @@ def _evaluate_for_rollup(
     Returns the programme with its unplaced layers at 100%, the annual and RIP vectors by node, and
     the ids of the unplaced layers, whose current share stays 0.
     """
-    _, out = evaluate_programme_dag(
-        programme, yelt, LineageRegistry(persist=False), views=[view], industry_yelt=industry_yelt
+    dag_resp, out = evaluate_programme_dag(
+        programme,
+        yelt,
+        LineageRegistry(persist=False),
+        views=[view],
+        industry_yelt=industry_yelt,
+        portfolio_unl_resolver=portfolio_unl_resolver,
     )
+    if snapshot_hashes_out is not None:
+        for k, h in dag_resp.manifest.input_hashes.items():
+            if k.startswith("portfolio_snapshot:"):
+                snapshot_hashes_out[k] = h
     ann, rip = out["annual"][view.value], out["rip"][view.value]
     unplaced = {n.node_id for n in programme.graph.nodes if _is_unplaced(n, programme.signed_line)}
     if not unplaced:
@@ -382,7 +397,12 @@ def _evaluate_for_rollup(
         at_full = reached_by[node_id].union(*(above[z] for z in reached_by[node_id]))
         if at_full not in runs:
             _, runs[at_full] = evaluate_programme_dag(
-                _with_full_share(programme, at_full), yelt, LineageRegistry(persist=False), views=[view]
+                _with_full_share(programme, at_full),
+                yelt,
+                LineageRegistry(persist=False),
+                views=[view],
+                industry_yelt=industry_yelt,
+                portfolio_unl_resolver=portfolio_unl_resolver,
             )
         ann[node_id] = runs[at_full]["annual"][view.value][node_id]
         rip[node_id] = runs[at_full]["rip"][view.value][node_id]
@@ -395,6 +415,8 @@ def _build_vectors(
     ind_yelt: YeltTable,
     req: OptimizerRequest,
     all_programmes: dict[str, ProgrammeDeal] | None = None,
+    portfolio_unl_resolver: Callable[[str | None, ViewOfRisk], tuple[np.ndarray, str]] | None = None,
+    snapshot_hashes_out: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], np.ndarray]:
     """Build 100%-share annual loss vectors (M x N) at either DEAL or LAYER granularity + optional retro ILW.
 
@@ -410,12 +432,38 @@ def _build_vectors(
     link_allowed = optimizer_link_target_statuses(req.included_statuses)
     link_source = all_programmes if all_programmes is not None else {p.programme_id: p for p in programmes}
     link_targets = {pid: p for pid, p in link_source.items() if p.status in link_allowed}
+
+    fallback_unl_cache: dict[tuple[str, str], tuple[np.ndarray, str]] = {}
+
+    def _effective_unl_resolver(as_of: str | None, v: ViewOfRisk) -> tuple[np.ndarray, str]:
+        if portfolio_unl_resolver is not None:
+            return portfolio_unl_resolver(as_of, v)
+        key = ((as_of or "").strip(), v.value)
+        if key not in fallback_unl_cache:
+            unl_deals = select_unl_snapshot_contracts(list(link_source.values()), as_of_date=as_of)
+            fallback_unl_cache[key] = compute_unl_portfolio_events(
+                unl_deals,
+                yelt,
+                v,
+                all_deals=link_source,
+                as_of_date=as_of,
+            )
+        return fallback_unl_cache[key]
+
     ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
     rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
     rollup_progs: list[ProgrammeDeal] = []
     unplaced_layers: set[tuple[str, str]] = set()
     for p in active_progs:
-        restated, ann, rip, unplaced = _evaluate_for_rollup(p, yelt, req.view, industry_yelt=ind_yelt)
+        needs_unl = any(n.node_type == NodeType.PORTFOLIO_ROLLUP for n in p.graph.nodes)
+        restated, ann, rip, unplaced = _evaluate_for_rollup(
+            p,
+            yelt,
+            req.view,
+            industry_yelt=ind_yelt,
+            portfolio_unl_resolver=_effective_unl_resolver if needs_unl else None,
+            snapshot_hashes_out=snapshot_hashes_out,
+        )
         rollup_progs.append(restated)
         ann_by_prog[p.programme_id] = ann
         rip_by_prog[p.programme_id] = rip
@@ -558,6 +606,7 @@ def list_optimizable_layers(
     mode: OptimizerMode = "FORWARD_PLANNING",
     included_statuses: list[ProgrammeStatus] | None = None,
     all_programmes: dict[str, ProgrammeDeal] | None = None,
+    portfolio_unl_resolver: Callable[[str | None, ViewOfRisk], tuple[np.ndarray, str]] | None = None,
 ) -> list[OptimizerLayerCatalogItem]:
     """Return every layer-level decision variable with 1x economics and default participation bounds."""
     req = OptimizerRequest(
@@ -567,7 +616,7 @@ def list_optimizable_layers(
         include_retro_ilw_candidate=True,
         included_statuses=included_statuses,
     )
-    items, _ = _build_vectors(programmes, yelt, ind_yelt, req, all_programmes)
+    items, _ = _build_vectors(programmes, yelt, ind_yelt, req, all_programmes, portfolio_unl_resolver=portfolio_unl_resolver)
     out: list[OptimizerLayerCatalogItem] = []
     for it in items:
         rol_pct = (it["prem_1x"] / it["limit_1x"]) * 100.0 if it["limit_1x"] > 0 else (req.retro_ilw_rol * 100.0)
@@ -589,7 +638,7 @@ def list_optimizable_layers(
                 expected_profit_1x_m=round(it["profit_1x"], 4),
                 rol_pct=round(rol_pct, 2),
                 default_min_share=0.0,
-                default_max_share=2.0 if it["direction"] == "EXTERNAL_RETRO" else 1.5,
+                default_max_share=2.0 if is_hedge_direction(it["direction"]) else 1.5,
             )
         )
     return out
@@ -606,19 +655,28 @@ def _compute_portfolio_snapshot(
     w_mat = np.ascontiguousarray(mat * weights[:, None], dtype=np.float64)
     port_loss = w_mat.sum(axis=0)
 
-    var_50, tvar_50, _ = rle.euler_cotvar(w_mat, 50.0)
-    var_100, tvar_100, co_tvar_100 = rle.euler_cotvar(w_mat, 100.0)
-    var_250, tvar_250, co_tvar_250 = rle.euler_cotvar(w_mat, 250.0)
-    _, tvar_500, _ = rle.euler_cotvar(w_mat, 500.0)
-    _, tvar_1000, _ = rle.euler_cotvar(w_mat, 1000.0)
+    # Compute every required return period in a single Rust parallel sort.
+    multi = rle.euler_cotvar_multi(w_mat, STACK_RETURN_PERIODS)
+    by_rp = {rp: res for rp, res in zip(STACK_RETURN_PERIODS, multi)}
+    var_50, tvar_50, _ = by_rp[50.0]
+    var_100, tvar_100, co_tvar_100 = by_rp[100.0]
+    var_250, tvar_250, co_tvar_250 = by_rp[250.0]
+    _, tvar_500, _ = by_rp[500.0]
+    _, tvar_1000, _ = by_rp[1000.0]
 
     # Monte Carlo Co-VaR estimator around 1-in-250 VaR (band of 200 trials centered on the VaR rank)
-    order_desc = np.argsort(port_loss)[::-1]
     k_var = max(0, min(n_trials - 1, int(round(0.004 * n_trials)) - 1))
     band_lo = max(0, k_var - 100)
     band_hi = min(n_trials, k_var + 100)
-    band_idx = order_desc[band_lo:band_hi]
-    raw_co_var = w_mat[:, band_idx].mean(axis=1) if len(band_idx) else np.zeros(m)
+    if band_hi > band_lo and n_trials > 0:
+        # Partial partition around the top `band_hi` trials avoids a full O(N log N) Python sort.
+        top_k = min(n_trials, band_hi)
+        top_idx = np.argpartition(port_loss, n_trials - top_k)[n_trials - top_k :]
+        top_sorted = top_idx[np.argsort(port_loss[top_idx])[::-1]]
+        band_idx = top_sorted[band_lo:band_hi]
+        raw_co_var = w_mat[:, band_idx].mean(axis=1)
+    else:
+        raw_co_var = np.zeros(m)
     raw_co_var_sum = float(raw_co_var.sum())
     if abs(raw_co_var_sum) > 1e-9 and var_250 > 0:
         co_var_250 = raw_co_var * (float(var_250) / raw_co_var_sum)
@@ -628,8 +686,8 @@ def _compute_portfolio_snapshot(
     profit_m = float(sum(weights[i] * items[i]["profit_1x"] for i in range(m)))
     yield_m = total_capital * 0.03
     mean_roc = ((profit_m + yield_m) / total_capital) * 100.0
-    deployed = float(sum(weights[i] * items[i]["limit_1x"] for i in range(m) if items[i]["direction"] == "ASSUMED"))
-    gross_prem = float(sum(weights[i] * items[i]["prem_1x"] for i in range(m) if items[i]["direction"] == "ASSUMED"))
+    deployed = float(sum(weights[i] * items[i]["limit_1x"] for i in range(m) if not is_hedge_direction(items[i]["direction"])))
+    gross_prem = float(sum(weights[i] * items[i]["prem_1x"] for i in range(m) if not is_hedge_direction(items[i]["direction"])))
     exp_loss = float(np.mean(port_loss))
     el_cap_ratio = max(0.0, exp_loss) / total_capital
     risk_reward = (profit_m / float(tvar_250)) if float(tvar_250) > 1e-6 else 0.0
@@ -684,7 +742,7 @@ def _compute_portfolio_snapshot(
 
     rp_stack: list[ReturnPeriodStackRow] = []
     for rp in STACK_RETURN_PERIODS:
-        _, rp_tvar, rp_co = rle.euler_cotvar(w_mat, rp)
+        _, rp_tvar, rp_co = by_rp[rp]
         rp_stack.append(
             ReturnPeriodStackRow(
                 return_period=rp,
@@ -696,14 +754,26 @@ def _compute_portfolio_snapshot(
     return snap, layer_rows, rp_stack
 
 
-def _solve_core(
+@dataclass
+class _HighsModelHandle:
+    highs: highspy.Highs
+    m: int
+    use_milp: bool
+    cur_w: np.ndarray
+    total_capital: float
+    named_rows: list[tuple[str, int, float, str | None]]
+    tvar_100_row: int
+    tvar_250_row: int
+
+
+def _build_highs_model(
     *,
     req: OptimizerRequest,
     items: list[dict[str, Any]],
     mat: np.ndarray,
     tail_mat: np.ndarray,
-) -> tuple[str, str, np.ndarray, list[ConstraintDiagnostic]]:
-    """Run one HiGHS LP/MILP solve over pre-built vectors and return (solver, status, opt_w, diagnostics)."""
+) -> _HighsModelHandle:
+    """Build the HiGHS LP/MILP model once so frontier sweeps can update TVaR bounds and warm-start."""
     m, n_trials = mat.shape
     s_count = tail_mat.shape[1]
     cur_w = np.array([it["current_share"] for it in items], dtype=np.float64)
@@ -730,7 +800,7 @@ def _solve_core(
         elif req.lock_bound_deals and it["status"] == "BOUND":
             lb = ub = float(it["current_share"])
             locked = True
-        elif it["direction"] == "EXTERNAL_RETRO":
+        elif is_hedge_direction(it["direction"]):
             lb, ub = 0.0, 2.0
             locked = False
         else:
@@ -798,30 +868,32 @@ def _solve_core(
     named_rows: list[tuple[str, int, float, str | None]] = []
     row_cursor = 0
 
-    def add_named_row(label: str, lb: float, ub: float, idxs: list[int], vals: list[float], tag: str | None = None) -> None:
+    def add_named_row(label: str, lb: float, ub: float, idxs: list[int], vals: list[float], tag: str | None = None) -> int:
         nonlocal row_cursor
+        idx = row_cursor
         h.addRow(lb, ub, len(idxs), idxs, vals)
-        named_rows.append((label, row_cursor, ub, tag))
+        named_rows.append((label, idx, ub, tag))
         row_cursor += 1
+        return idx
 
     # Semi-continuous linking rows
     if use_milp:
         for i, it in enumerate(items):
             lb_i, ub_i, locked_i = var_bounds[i]
-            if it["direction"] == "ASSUMED" and not locked_i and lb_i == 0.0 and ub_i >= req.min_line_size_share:
+            if not is_hedge_direction(it["direction"]) and not locked_i and lb_i == 0.0 and ub_i >= req.min_line_size_share:
                 h.addRow(-highspy.kHighsInf, 0.0, 2, [i, y_start + i], [1.0, -float(ub_i)])
                 row_cursor += 1
                 h.addRow(-highspy.kHighsInf, 0.0, 2, [i, y_start + i], [-1.0, float(req.min_line_size_share)])
                 row_cursor += 1
 
     # 1. Total Deployed Collateral constraint
-    assumed_idxs = [i for i, it in enumerate(items) if it["direction"] == "ASSUMED"]
+    assumed_idxs = [i for i, it in enumerate(items) if not is_hedge_direction(it["direction"])]
     assumed_lims = [float(items[i]["limit_1x"]) for i in assumed_idxs]
     if assumed_idxs:
         add_named_row("Max Deployed Collateral ($M)", float(req.min_deployed_collateral), float(req.max_deployed_collateral), assumed_idxs, assumed_lims)
 
     # 2. 1-in-100 TVaR (Rockafellar-Uryasev)
-    add_named_row(
+    tvar_100_row = add_named_row(
         "Max 1-in-100 AEP TVaR ($M)",
         -highspy.kHighsInf,
         float(req.max_tvar_100_m),
@@ -831,7 +903,7 @@ def _solve_core(
     )
 
     # 3. 1-in-250 TVaR (Rockafellar-Uryasev)
-    add_named_row(
+    tvar_250_row = add_named_row(
         "Max 1-in-250 AEP TVaR ($M)",
         -highspy.kHighsInf,
         float(req.max_tvar_250_m),
@@ -843,7 +915,7 @@ def _solve_core(
     # 4. EL / Capital Ratio Cap
     if req.max_el_capital_ratio is not None:
         el_coeffs = [
-            float(items[i]["el_1x"]) if items[i]["direction"] == "ASSUMED" else -float(items[i]["el_1x"])
+            -float(items[i]["el_1x"]) if is_hedge_direction(items[i]["direction"]) else float(items[i]["el_1x"])
             for i in range(m)
         ]
         add_named_row(
@@ -882,7 +954,7 @@ def _solve_core(
             )
 
     # 7. Max Retro Spend (% of Gross Premium)
-    retro_idxs = [i for i, it in enumerate(items) if it["direction"] == "EXTERNAL_RETRO"]
+    retro_idxs = [i for i, it in enumerate(items) if is_hedge_direction(it["direction"])]
     if retro_idxs and assumed_idxs:
         r_idx = retro_idxs + assumed_idxs
         r_val = [float(items[i]["prem_1x"]) for i in retro_idxs] + [
@@ -921,29 +993,70 @@ def _solve_core(
                     [float(col[i]) for i in sub_nz] + [-1.0, -1.0],
                 )
 
+    return _HighsModelHandle(
+        highs=h,
+        m=m,
+        use_milp=use_milp,
+        cur_w=cur_w,
+        total_capital=req.total_capital,
+        named_rows=named_rows,
+        tvar_100_row=tvar_100_row,
+        tvar_250_row=tvar_250_row,
+    )
+
+
+def _solve_handle(
+    handle: _HighsModelHandle,
+    *,
+    mat: np.ndarray,
+    max_tvar_100_m: float | None = None,
+    max_tvar_250_m: float | None = None,
+) -> tuple[str, str, np.ndarray, list[ConstraintDiagnostic]]:
+    """Run HiGHS on an existing model handle (optionally updating TVaR upper bounds)."""
+    h = handle.highs
+    m = handle.m
+    ub_overrides: dict[int, float] = {}
+    if max_tvar_100_m is not None:
+        h.changeRowBounds(handle.tvar_100_row, -highspy.kHighsInf, float(max_tvar_100_m))
+        ub_overrides[handle.tvar_100_row] = float(max_tvar_100_m)
+    if max_tvar_250_m is not None:
+        h.changeRowBounds(handle.tvar_250_row, -highspy.kHighsInf, float(max_tvar_250_m))
+        ub_overrides[handle.tvar_250_row] = float(max_tvar_250_m)
+
     h.run()
     status_str = h.modelStatusToString(h.getModelStatus())
     sol = h.getSolution()
-    opt_w = np.array(sol.col_value[:m], dtype=np.float64) if len(sol.col_value) >= m else cur_w
-    row_duals = sol.row_dual if not use_milp else []
+    if len(sol.col_value) >= m:
+        candidate_w = np.array(sol.col_value[:m], dtype=np.float64)
+        opt_w = candidate_w if np.all(np.isfinite(candidate_w)) else handle.cur_w
+    else:
+        opt_w = handle.cur_w
+    row_duals = sol.row_dual if not handle.use_milp else []
 
     opt_mat = np.ascontiguousarray(mat * opt_w[:, None], dtype=np.float64)
-    _, opt_tvar_250, _ = rle.euler_cotvar(opt_mat, 250.0)
-    _, opt_tvar_100, _ = rle.euler_cotvar(opt_mat, 100.0)
+    multi = rle.euler_cotvar_multi(opt_mat, [100.0, 250.0])
+    opt_tvar_100 = float(multi[0][1])
+    opt_tvar_250 = float(multi[1][1])
 
     diags: list[ConstraintDiagnostic] = []
-    for label, r_idx, ub, tag in named_rows:
-        act = float(sol.row_value[r_idx]) if r_idx < len(sol.row_value) else 0.0
+    for label, r_idx, orig_ub, tag in handle.named_rows:
+        ub = ub_overrides.get(r_idx, orig_ub)
+        raw_act = float(sol.row_value[r_idx]) if r_idx < len(sol.row_value) else 0.0
+        act = raw_act if math.isfinite(raw_act) else 0.0
         limit_disp = ub
         if tag == "tvar_100":
-            act = float(opt_tvar_100)
+            act = opt_tvar_100
         elif tag == "tvar_250":
-            act = float(opt_tvar_250)
+            act = opt_tvar_250
         elif tag == "el_cap":
-            act = act / req.total_capital
-            limit_disp = ub / req.total_capital
+            act = act / handle.total_capital
+            limit_disp = ub / handle.total_capital
         slack = limit_disp - act
-        shadow = abs(float(row_duals[r_idx])) if (r_idx < len(row_duals) and not use_milp) else None
+        shadow: float | None = None
+        if r_idx < len(row_duals) and not handle.use_milp:
+            raw_dual = abs(float(row_duals[r_idx]))
+            if math.isfinite(raw_dual):
+                shadow = round(raw_dual, 5)
         diags.append(
             ConstraintDiagnostic(
                 name=label,
@@ -951,12 +1064,24 @@ def _solve_core(
                 actual_value=round(act, 4),
                 slack=round(slack, 4),
                 binding=abs(slack) < (0.01 if tag == "el_cap" else 0.5),
-                shadow_price=round(shadow, 5) if shadow is not None else None,
+                shadow_price=shadow,
             )
         )
 
-    solver_name = "HiGHS MILP" if use_milp else "HiGHS LP"
+    solver_name = "HiGHS MILP" if handle.use_milp else "HiGHS LP"
     return solver_name, status_str, opt_w, diags
+
+
+def _solve_core(
+    *,
+    req: OptimizerRequest,
+    items: list[dict[str, Any]],
+    mat: np.ndarray,
+    tail_mat: np.ndarray,
+) -> tuple[str, str, np.ndarray, list[ConstraintDiagnostic]]:
+    """Run one HiGHS LP/MILP solve over pre-built vectors and return (solver, status, opt_w, diagnostics)."""
+    handle = _build_highs_model(req=req, items=items, mat=mat, tail_mat=tail_mat)
+    return _solve_handle(handle, mat=mat)
 
 
 def solve_portfolio_optimization(
@@ -967,12 +1092,22 @@ def solve_portfolio_optimization(
     ind_yelt: YeltTable,
     lineage: LineageRegistry,
     all_programmes: dict[str, ProgrammeDeal] | None = None,
+    portfolio_unl_resolver: Callable[[str | None, ViewOfRisk], tuple[np.ndarray, str]] | None = None,
 ) -> OptimizerResponse:
     """Solve constrained portfolio optimization via HiGHS LP/MILP with tail-scenario reduction & shadow prices."""
     t0 = time.perf_counter()
-    items, mat = _build_vectors(programmes, yelt, ind_yelt, req, all_programmes)
+    snapshot_hashes: dict[str, str] = {}
+    items, mat = _build_vectors(
+        programmes,
+        yelt,
+        ind_yelt,
+        req,
+        all_programmes,
+        portfolio_unl_resolver=portfolio_unl_resolver,
+        snapshot_hashes_out=snapshot_hashes,
+    )
     m, n_trials = mat.shape
-    if not any(it["direction"] == "ASSUMED" for it in items):
+    if not any(not is_hedge_direction(it["direction"]) for it in items):
         raise ValueError(NO_DEALS_MESSAGE)
 
     cur_w = np.array([it["current_share"] for it in items], dtype=np.float64)
@@ -1017,14 +1152,27 @@ def solve_portfolio_optimization(
 
     compute_ms = round((time.perf_counter() - t0) * 1000.0, 2)
     included_statuses = resolve_optimizer_statuses(req.mode, req.included_statuses)
+    solve_input_hashes = {"sim_set": yelt.content_hash, "req": canonical_hash(req.model_dump()), **snapshot_hashes}
+    solve_breadcrumb = [
+        BreadcrumbStep(entity_type="SIM_SET", entity_id=yelt.sim_set_id, label=yelt.name, content_hash=yelt.content_hash),
+        *[
+            BreadcrumbStep(
+                entity_type="PORTFOLIO_SNAPSHOT",
+                entity_id=f"unl-snapshot-{k.split(':', 1)[1]}",
+                label=f"UNL Portfolio Snapshot ({k.split(':', 1)[1]})",
+                content_hash=h,
+            )
+            for k, h in sorted(snapshot_hashes.items())
+        ],
+    ]
     manifest = lineage.record_manifest(
         run_type="PORTFOLIO_OPTIMIZER",
-        input_hashes={"sim_set": yelt.content_hash, "req": canonical_hash(req.model_dump())},
+        input_hashes=solve_input_hashes,
         # `included_statuses` is what was asked for (None = the mode's defaults); `effective_statuses` is
         # what that meant at run time, so the record stays readable if the defaults ever change.
         parameters={**req.model_dump(), "effective_statuses": [s.value for s in included_statuses]},
         output_payload={"status": status_str, "after_expected_profit_m": round(opt_profit, 4), "after_tvar_250_m": round(float(opt_tvar_250), 4)},
-        breadcrumb=[BreadcrumbStep(entity_type="SIM_SET", entity_id=yelt.sim_set_id, label=yelt.name, content_hash=yelt.content_hash)],
+        breadcrumb=solve_breadcrumb,
     )
 
     return OptimizerResponse(
@@ -1055,28 +1203,41 @@ def compute_efficient_frontier(
     lineage: LineageRegistry,
     num_points: int = 6,
     all_programmes: dict[str, ProgrammeDeal] | None = None,
+    portfolio_unl_resolver: Callable[[str | None, ViewOfRisk], tuple[np.ndarray, str]] | None = None,
 ) -> list[FrontierPoint]:
     """Sweep 1-in-250 TVaR budgets to generate the Pareto Efficient Frontier."""
+    items, mat = _build_vectors(
+        programmes, yelt, ind_yelt, req, all_programmes, portfolio_unl_resolver=portfolio_unl_resolver
+    )
+    m, n_trials = mat.shape
+    if not any(not is_hedge_direction(it["direction"]) for it in items):
+        raise ValueError(NO_DEALS_MESSAGE)
+
+    gross_sum = np.sum(np.maximum(mat, 0.0), axis=0)
+    s_count = min(2500, n_trials)
+    tail_idx = np.argpartition(gross_sum, -s_count)[-s_count:]
+    tail_mat = mat[:, tail_idx]
+    handle = _build_highs_model(req=req, items=items, mat=mat, tail_mat=tail_mat)
+    yield_m = req.total_capital * 0.03
+
     tvar_grid = np.linspace(max(40.0, req.max_tvar_250_m * 0.45), req.max_tvar_250_m * 1.25, num_points)
     points: list[FrontierPoint] = []
     for cap in tvar_grid:
-        sub_req = req.model_copy(update={"max_tvar_250_m": float(cap), "max_tvar_100_m": float(cap * 0.85)})
-        res = solve_portfolio_optimization(
-            req=sub_req,
-            programmes=programmes,
-            yelt=yelt,
-            ind_yelt=ind_yelt,
-            lineage=LineageRegistry(persist=False),
-            all_programmes=all_programmes,
+        _, status_str, opt_w, _ = _solve_handle(
+            handle, mat=mat, max_tvar_100_m=float(cap * 0.85), max_tvar_250_m=float(cap)
         )
-        dep = sum(d.optimal_limit_m for d in res.deals if d.direction == "ASSUMED")
+        opt_mat = np.ascontiguousarray(mat * opt_w[:, None], dtype=np.float64)
+        _, opt_tvar_250, _ = rle.euler_cotvar(opt_mat, 250.0)
+        opt_profit = float(sum(opt_w[i] * items[i]["profit_1x"] for i in range(m)))
+        opt_roc = ((opt_profit + yield_m) / req.total_capital) * 100.0
+        dep = float(sum(opt_w[i] * items[i]["limit_1x"] for i in range(m) if not is_hedge_direction(items[i]["direction"])))
         points.append(
             FrontierPoint(
                 max_tvar_250_m=round(float(cap), 2),
-                status=res.status,
-                expected_profit_m=res.after_expected_profit_m,
-                mean_roc_pct=res.after_mean_roc_pct,
-                actual_tvar_250_m=res.after_tvar_250_m,
+                status=status_str,
+                expected_profit_m=round(opt_profit, 4),
+                mean_roc_pct=round(opt_roc, 2),
+                actual_tvar_250_m=round(float(opt_tvar_250), 4),
                 deployed_collateral_m=round(dep, 2),
             )
         )
@@ -1092,13 +1253,23 @@ def explore_efficient_frontier(
     lineage: LineageRegistry,
     num_points: int = 12,
     all_programmes: dict[str, ProgrammeDeal] | None = None,
+    portfolio_unl_resolver: Callable[[str | None, ViewOfRisk], tuple[np.ndarray, str]] | None = None,
 ) -> FrontierExplorerResponse:
     """Build full interactive Pareto Frontier Explorer with per-point layer shares, Euler Co-TVaR, Co-VaR, and RP stacks."""
     t0 = time.perf_counter()
     layer_req = req.model_copy(update={"granularity": req.granularity})
-    items, mat = _build_vectors(programmes, yelt, ind_yelt, layer_req, all_programmes)
+    snapshot_hashes: dict[str, str] = {}
+    items, mat = _build_vectors(
+        programmes,
+        yelt,
+        ind_yelt,
+        layer_req,
+        all_programmes,
+        portfolio_unl_resolver=portfolio_unl_resolver,
+        snapshot_hashes_out=snapshot_hashes,
+    )
     m, n_trials = mat.shape
-    if not any(it["direction"] == "ASSUMED" for it in items):
+    if not any(not is_hedge_direction(it["direction"]) for it in items):
         raise ValueError(NO_DEALS_MESSAGE)
     included_statuses = resolve_optimizer_statuses(req.mode, req.included_statuses)
 
@@ -1118,17 +1289,16 @@ def explore_efficient_frontier(
     nearest = int(np.argmin(np.abs(tvar_grid - req.max_tvar_250_m)))
     tvar_grid[nearest] = req.max_tvar_250_m
 
+    # Build HiGHS LP/MILP once and sweep only the TVaR upper bounds so HiGHS warm-starts each point.
+    handle = _build_highs_model(req=layer_req, items=items, mat=mat, tail_mat=tail_mat)
+
     frontier_pts: list[FrontierExplorerPoint] = []
     for idx, cap in enumerate(tvar_grid):
-        sub_req = layer_req.model_copy(
-            update={
-                "max_tvar_250_m": float(cap),
-                # Let the 1-in-250 sweep trace a strictly monotonic Pareto frontier without
-                # an artificial 1-in-100 kink; explicit user tvar_caps still apply verbatim.
-                "max_tvar_100_m": float(cap),
-            }
+        # Let the 1-in-250 sweep trace a strictly monotonic Pareto frontier without
+        # an artificial 1-in-100 kink; explicit user tvar_caps still apply verbatim.
+        solver_name, status_str, opt_w, diags = _solve_handle(
+            handle, mat=mat, max_tvar_100_m=float(cap), max_tvar_250_m=float(cap)
         )
-        solver_name, status_str, opt_w, diags = _solve_core(req=sub_req, items=items, mat=mat, tail_mat=tail_mat)
         snap, layer_rows, rp_stack = _compute_portfolio_snapshot(items, mat, opt_w, req.total_capital)
         frontier_pts.append(
             FrontierExplorerPoint(
@@ -1153,9 +1323,22 @@ def explore_efficient_frontier(
         rec_idx = 0
 
     compute_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    explore_input_hashes = {"sim_set": yelt.content_hash, "req": canonical_hash(req.model_dump()), **snapshot_hashes}
+    explore_breadcrumb = [
+        BreadcrumbStep(entity_type="SIM_SET", entity_id=yelt.sim_set_id, label=yelt.name, content_hash=yelt.content_hash),
+        *[
+            BreadcrumbStep(
+                entity_type="PORTFOLIO_SNAPSHOT",
+                entity_id=f"unl-snapshot-{k.split(':', 1)[1]}",
+                label=f"UNL Portfolio Snapshot ({k.split(':', 1)[1]})",
+                content_hash=h,
+            )
+            for k, h in sorted(snapshot_hashes.items())
+        ],
+    ]
     manifest = lineage.record_manifest(
         run_type="FRONTIER_EXPLORER",
-        input_hashes={"sim_set": yelt.content_hash, "req": canonical_hash(req.model_dump())},
+        input_hashes=explore_input_hashes,
         parameters={
             "num_points": num_points,
             "granularity": req.granularity,
@@ -1170,7 +1353,7 @@ def explore_efficient_frontier(
             "recommended_profit_m": frontier_pts[rec_idx].metrics.expected_profit_m,
             "recommended_tvar_250_m": frontier_pts[rec_idx].metrics.tvar_250_m,
         },
-        breadcrumb=[BreadcrumbStep(entity_type="SIM_SET", entity_id=yelt.sim_set_id, label=yelt.name, content_hash=yelt.content_hash)],
+        breadcrumb=explore_breadcrumb,
     )
 
     return FrontierExplorerResponse(

@@ -106,6 +106,48 @@ pub fn compute_euler_cotvar(
     (port_var, port_tvar, co_tvars)
 }
 
+/// Compute exact Euler Co-TVaR across multiple return periods with a single parallel sort.
+pub fn compute_euler_cotvar_multi(
+    layer_matrix: &[f64],
+    num_layers: usize,
+    num_trials: usize,
+    return_periods: &[f64],
+) -> Vec<(f64, f64, Vec<f64>)> {
+    if num_layers == 0 || num_trials == 0 {
+        return return_periods.iter().map(|_| (0.0, 0.0, vec![])).collect();
+    }
+    let mut port = vec![0.0_f64; num_trials];
+    for l in 0..num_layers {
+        let row = &layer_matrix[l * num_trials..(l + 1) * num_trials];
+        for t in 0..num_trials {
+            port[t] += row[t];
+        }
+    }
+
+    let mut idx: Vec<usize> = (0..num_trials).collect();
+    idx.par_sort_unstable_by(|&a, &b| port[b].total_cmp(&port[a]));
+
+    return_periods
+        .iter()
+        .map(|&rp| {
+            let p = 1.0 / rp;
+            let k = ((p * (num_trials as f64)).round() as usize).clamp(1, num_trials);
+            let tail_indices = &idx[..k];
+            let port_var = port[idx[k - 1]];
+            let port_tvar = tail_indices.iter().map(|&t| port[t]).sum::<f64>() / (k as f64);
+            let co_tvars: Vec<f64> = (0..num_layers)
+                .into_par_iter()
+                .map(|l| {
+                    let row = &layer_matrix[l * num_trials..(l + 1) * num_trials];
+                    let s: f64 = tail_indices.iter().map(|&t| row[t]).sum();
+                    s / (k as f64)
+                })
+                .collect();
+            (port_var, port_tvar, co_tvars)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +165,18 @@ mod tests {
         let (_var, port_tvar, co_tvars) = compute_euler_cotvar(&mat, num_layers, num_trials, 100.0);
         let sum_co: f64 = co_tvars.iter().sum();
         assert!((sum_co - port_tvar).abs() < 1e-9);
+
+        let rps = [50.0, 100.0, 250.0];
+        let multi = compute_euler_cotvar_multi(&mat, num_layers, num_trials, &rps);
+        for (i, &rp) in rps.iter().enumerate() {
+            let (sv, st, sc) = compute_euler_cotvar(&mat, num_layers, num_trials, rp);
+            let (mv, mt, mc) = &multi[i];
+            assert!((sv - mv).abs() < 1e-12);
+            assert!((st - mt).abs() < 1e-12);
+            assert!((mc.iter().sum::<f64>() - mt).abs() < 1e-9);
+            for (a, b) in sc.iter().zip(mc.iter()) {
+                assert!((a - b).abs() < 1e-12);
+            }
+        }
     }
 }

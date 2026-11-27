@@ -69,24 +69,37 @@ class RollupLayerEntry:
     feeder_node_id: str | None = None
 
 
+def _safe_float(raw: Any, default: float) -> float:
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return default
+    return float(raw)
+
+
+def _opt_float(raw: Any) -> float | None:
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return None
+    return float(raw)
+
+
 def _layer_share_and_premium(node: Any, default_signed: float = 1.0) -> tuple[float, float]:
     p = node.params
     if node.node_type == NodeType.CASCADING_TOWER:
         subs = p.get("layers", []) or []
-        share = float(subs[0].get("placedShare", default_signed)) if subs else default_signed
-        return share, sum(float(l.get("depositPremium", 0) or 0) for l in subs)
-    return float(p.get("placedShare", default_signed)), float(p.get("depositPremium", 0.0) or 0.0)
+        share = _safe_float(subs[0].get("placedShare"), default_signed) if subs else default_signed
+        return share, sum(_safe_float(l.get("depositPremium"), 0.0) for l in subs)
+    return _safe_float(p.get("placedShare"), default_signed), _safe_float(p.get("depositPremium"), 0.0)
 
 
 def _layer_limit_1x(node: Any, fallback_limit: float) -> float:
     p = node.params
     if node.node_type == NodeType.CASCADING_TOWER:
         subs = p.get("layers", []) or []
-        total = sum(float(l.get("occLimit", 0) or 0) for l in subs)
+        total = sum(_safe_float(l.get("occLimit"), 0.0) for l in subs)
         return total if total > 0 else fallback_limit
     for key in ("occLimit", "aggLimit", "limit", "aggCap"):
-        if p.get(key) is not None:
-            return float(p[key])
+        val = _opt_float(p.get(key))
+        if val is not None:
+            return val
     return fallback_limit
 
 
@@ -99,8 +112,7 @@ def _layer_limit_attachment(node: Any) -> tuple[float | None, float | None]:
     }.get(node.node_type)
     if not keys:
         return None, None
-    lim, att = p.get(keys[0]), p.get(keys[1])
-    return (float(lim) if lim is not None else None), (float(att) if att is not None else None)
+    return _opt_float(p.get(keys[0])), _opt_float(p.get(keys[1]))
 
 
 def _ratio(num: float, den: float | None) -> float | None:
