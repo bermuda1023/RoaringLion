@@ -1238,6 +1238,178 @@ def test_imap_missing_rfc822_size_fails_closed_to_bodystructure(monkeypatch):
     client.post(f"/api/intake/drafts/{res.json()['drafts'][0]['draftId']}/discard")
 
 
+def test_imap_bodystructure_ignores_html_alternative_and_unnamed_inline_parts(monkeypatch):
+    """Bugbot: BODYSTRUCTURE must ignore text/html alternatives and unnamed inline parts; only real PDF becomes a draft."""
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "html-secret")
+
+    small_pdf = _make_minimal_pdf([
+        "Cedent: HtmlFilter Re",
+        "Programme: HtmlFilter Cat XL 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $10M xs $20M | Premium $2.0M",
+    ])
+    small_pdf_b64 = base64.b64encode(small_pdf)
+
+    # Multipart/mixed containing:
+    #   1: multipart/alternative -> 1.1 text/plain, 1.2 text/html (must NOT become a draft)
+    #   2: unnamed inline image/png (must NOT become a draft)
+    #   3: real PDF attachment (ONLY draft)
+    bs_response = (
+        b'1 (BODYSTRUCTURE ('
+        b'(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 25 1 NIL NIL NIL)'
+        b'("TEXT" "HTML" ("CHARSET" "utf-8") NIL NIL "7BIT" 60 2 NIL NIL NIL) "ALTERNATIVE" ("BOUNDARY" "alt") NIL NIL)'
+        b'("IMAGE" "PNG" NIL "<cid1>" NIL "BASE64" 500 NIL ("INLINE" NIL) NIL)'
+        + f'("APPLICATION" "PDF" ("NAME" "real_slip.pdf") NIL NIL "BASE64" {len(small_pdf_b64)} NIL ("ATTACHMENT" ("FILENAME" "real_slip.pdf")) NIL)'.encode("ascii")
+        + b' "MIXED" ("BOUNDARY" "mix") NIL NIL))'
+    )
+    fetched_cmds: list[str] = []
+
+    class FakeHtmlIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            return ("OK", [b"1"])
+
+        def fetch(self, num: bytes, cmd: str):
+            fetched_cmds.append(cmd)
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [b"1 (RFC822.SIZE 500000000)"])
+            if "HEADER.FIELDS" in cmd:
+                return ("OK", [(b"1 (BODY[HEADER.FIELDS] {80})", b"Message-ID: <html-alt@test>\r\nFrom: a@b.com\r\nSubject: Html Alt\r\n\r\n")])
+            if "BODYSTRUCTURE" in cmd:
+                return ("OK", [bs_response])
+            if cmd == "(BODY.PEEK[1.1])":
+                return ("OK", [(b"1 (BODY[1.1] {25})", b"Plain text cover message.")])
+            if cmd == "(BODY.PEEK[3])":
+                return ("OK", [(b"1 (BODY[3] {999})", small_pdf_b64)])
+            raise AssertionError(f"Should not fetch text/html (1.2) or unnamed inline image (2): {cmd}")
+
+        def store(self, num: bytes, op: str, flags: str):
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeHtmlIMAP)
+    res = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "html-secret"})
+    assert res.status_code == 200, res.text
+    drafts = res.json()["drafts"]
+    assert len(drafts) == 1
+    assert drafts[0]["sourceFilename"] == "real_slip.pdf"
+    assert "(BODY.PEEK[1.2])" not in fetched_cmds
+    assert "(BODY.PEEK[2])" not in fetched_cmds
+    client.post(f"/api/intake/drafts/{drafts[0]['draftId']}/discard")
+
+
+def test_imap_bodystructure_recurses_into_forwarded_message_rfc822(monkeypatch):
+    """Bugbot: Forwarded message/rfc822 wrapper in BODYSTRUCTURE must be walked so inner small PDFs are fetched."""
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "fwd-secret")
+
+    inner_pdf = _make_minimal_pdf([
+        "Cedent: Forwarded Mutual",
+        "Programme: Forwarded Wind XL 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $20M xs $40M | Premium $3.6M",
+    ])
+    inner_pdf_b64 = base64.b64encode(inner_pdf)
+
+    # Outer multipart/mixed:
+    #   1: text/plain ("FYI forwarding")
+    #   2: message/rfc822 (size 500MB wrapper!) containing inner multipart/mixed:
+    #        2.1: giant_forwarded.pdf (500MB - skipped without downloading)
+    #        2.2: inner_slip.pdf (small valid PDF - fetched via BODY.PEEK[2.2])
+    bs_response = (
+        b'1 (BODYSTRUCTURE ('
+        b'("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 15 1 NIL NIL NIL)'
+        b'("MESSAGE" "RFC822" NIL NIL NIL "7BIT" 500005000 '
+        b'("Fri, 27 Nov 2026 10:00:00 +0000" "Original Slip" NIL NIL NIL NIL NIL NIL NIL "<orig@test>") '
+        b'('
+        b'("APPLICATION" "PDF" ("NAME" "giant_forwarded.pdf") NIL NIL "BASE64" 500000000 NIL ("ATTACHMENT" ("FILENAME" "giant_forwarded.pdf")) NIL)'
+        + f'("APPLICATION" "PDF" ("NAME" "inner_slip.pdf") NIL NIL "BASE64" {len(inner_pdf_b64)} NIL ("ATTACHMENT" ("FILENAME" "inner_slip.pdf")) NIL)'.encode("ascii")
+        + b' "MIXED" ("BOUNDARY" "inner") NIL NIL) '
+        b'1000 NIL ("ATTACHMENT" NIL) NIL)'
+        b' "MIXED" ("BOUNDARY" "outer") NIL NIL))'
+    )
+    fetched_cmds: list[str] = []
+    marked_seen: list[bytes] = []
+
+    class FakeFwdIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            return ("OK", [b"1"])
+
+        def fetch(self, num: bytes, cmd: str):
+            fetched_cmds.append(cmd)
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [b"1 (RFC822.SIZE 500006000)"])
+            if "HEADER.FIELDS" in cmd:
+                return ("OK", [(b"1 (BODY[HEADER.FIELDS] {80})", b"Message-ID: <fwd-wrap@test>\r\nFrom: broker@example.com\r\nSubject: Fwd: Slip\r\n\r\n")])
+            if "BODYSTRUCTURE" in cmd:
+                return ("OK", [bs_response])
+            if cmd == "(BODY.PEEK[1])":
+                return ("OK", [(b"1 (BODY[1] {15})", b"FYI forwarding.")])
+            if cmd == "(BODY.PEEK[2.2])":
+                return ("OK", [(b"1 (BODY[2.2] {999})", inner_pdf_b64)])
+            raise AssertionError(f"Must not download full message, wrapper 2, or oversized 2.1: {cmd}")
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                marked_seen.append(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeFwdIMAP)
+    res = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "fwd-secret"})
+    assert res.status_code == 200, res.text
+    drafts = res.json()["drafts"]
+    assert len(drafts) == 1
+    assert drafts[0]["sourceFilename"] == "inner_slip.pdf"
+    assert drafts[0]["extracted"]["cedentName"] == "Forwarded Mutual"
+    assert any("giant_forwarded.pdf" in w for w in drafts[0]["extracted"]["warnings"])
+    assert "(BODY.PEEK[2.2])" in fetched_cmds
+    assert "(BODY.PEEK[2.1])" not in fetched_cmds
+    assert "(BODY.PEEK[2])" not in fetched_cmds
+    assert marked_seen == [b"1"]
+    client.post(f"/api/intake/drafts/{drafts[0]['draftId']}/discard")
+
+
 def test_parquet_yelt_reads_actual_trial_count():
     """Bugbot #2: Parquet YELT detection must read actual trial count instead of hardcoding 10,000."""
     import pyarrow as pa

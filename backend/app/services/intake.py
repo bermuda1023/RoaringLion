@@ -183,6 +183,19 @@ def _collect_bodystructure_parts(node: list, prefix: str, out: list[_ImapBodyPar
     if len(node) < 7 or not isinstance(node[0], str) or not isinstance(node[1], str):
         return
     media_type = f"{node[0].lower()}/{node[1].lower()}"
+    section = prefix or "1"
+
+    # RFC 3501 body-type-msg ("MESSAGE" "RFC822"): index 8 is the nested BODYSTRUCTURE of the forwarded email.
+    if media_type == "message/rfc822" and len(node) >= 9 and isinstance(node[8], list):
+        inner_body = node[8]
+        if inner_body and isinstance(inner_body[0], list):
+            # Inner body is multipart -> children are <section>.1, <section>.2, ...
+            _collect_bodystructure_parts(inner_body, section, out)
+        else:
+            # Inner body is a single leaf -> RFC 3501 section is <section>.1
+            _collect_bodystructure_parts(inner_body, f"{section}.1", out)
+        return
+
     encoding = str(node[5] or "7bit").lower()
     try:
         size_octets = int(node[6]) if node[6] is not None else 0
@@ -201,7 +214,7 @@ def _collect_bodystructure_parts(node: list, prefix: str, out: list[_ImapBodyPar
                 break
     out.append(
         _ImapBodyPart(
-            section=prefix or "1",
+            section=section,
             media_type=media_type,
             encoding=encoding,
             size_octets=size_octets,
@@ -1104,9 +1117,11 @@ class SubmissionIntakeService:
                             }
 
                         for bp in parts:
-                            is_att = bool(bp.filename) or bp.disposition == "attachment" or bp.media_type != "text/plain"
-                            if not is_att and bp.media_type == "text/plain":
-                                if bp.size_octets <= 256 * 1024:
+                            # Match the walk() rule: only named parts or disposition="attachment" are files.
+                            # Unnamed text/html alternatives and unnamed inline parts are never ingested as drafts.
+                            is_att = bool(bp.filename) or bp.disposition == "attachment"
+                            if not is_att:
+                                if bp.media_type == "text/plain" and bp.size_octets <= 256 * 1024:
                                     _, part_data = imap.fetch(num, f"(BODY.PEEK[{bp.section}])")
                                     raw_p = _extract_fetch_payload(part_data)
                                     if raw_p:
