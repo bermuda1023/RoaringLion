@@ -1,16 +1,10 @@
 import { Background, Controls, Position, ReactFlow, type Edge, type Node } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import type { GraphSpec, NodeViewMetrics } from '../types/contracts';
+import { nodeAccent } from '../utils/nodeAccent';
 
 function nodeStyle(nodeType: string): React.CSSProperties {
-  const accent =
-    nodeType === 'LOSS_SOURCE'
-      ? '#8a9bb0'
-      : nodeType === 'REGION_PERIL_FILTER' || nodeType === 'COMBINATION'
-        ? '#9a9082'
-        : nodeType === 'OCC_XL' || nodeType === 'AGG_XL'
-          ? '#e8a84a'
-          : '#7a9e8e';
+  const accent = nodeAccent(nodeType);
   return {
     borderRadius: 10,
     padding: '8px 12px',

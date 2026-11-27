@@ -42,6 +42,8 @@ from app.models.phase1 import (
     EltIngestRequest,
     IlwPriceRequest,
     IlwPriceResponse,
+    PricingBinding,
+    RelatedProgramme,
     SimSetDetail,
     SliceRollupRequest,
     StaleManifestInfo,
@@ -143,6 +145,9 @@ async def ingest_yelt_upload(
     region_peril_col: str | None = Form(None),
     default_region_peril: str = Form("US-FL-WS"),
     is_industry_catalog: bool = Form(False),
+    region: str | None = Form(None),
+    peril: str | None = Form(None),
+    vendor: str | None = Form(None),
 ) -> SimSetDetail:
     raw = await file.read()
     if not raw:
@@ -166,6 +171,9 @@ async def ingest_yelt_upload(
         default_region_peril=default_region_peril,
         is_industry_catalog=is_industry_catalog,
         lineage=LINEAGE,
+        region=region,
+        peril=peril,
+        vendor=vendor,
     )
     SIM_SETS[detail.sim_set_id] = SIM_STORE.get_yelt(detail.sim_set_id)
     return detail
@@ -438,6 +446,21 @@ def bind_programme_snapshot(programme_id: str) -> dict:
     return {"contract": full.model_dump(by_alias=True), "bindManifestId": manifest_id}
 
 
+@app.get("/api/programmes/{programme_id}/related", response_model=list[RelatedProgramme])
+def related_programmes(programme_id: str) -> list[RelatedProgramme]:
+    """Renewal-chain neighbours of the open programme. Does not list the whole book."""
+    rows = CONTRACT_STORE.related_programmes(programme_id)
+    if rows is None:
+        raise HTTPException(status_code=404, detail="Programme not found")
+    return rows
+
+
+@app.get("/api/pricing-bindings", response_model=list[PricingBinding])
+def pricing_bindings() -> list[PricingBinding]:
+    """CMS layers that already have a connected pricing output, on any programme."""
+    return CONTRACT_STORE.bound_pricing_slots()
+
+
 @app.get("/api/graph-templates", response_model=list[GraphTemplate])
 def list_graph_templates(programme_id: str | None = Query(default=None, alias="programmeId")) -> list[GraphTemplate]:
     """Blank-canvas node types, plus one CMS suggestion per contracted layer.
@@ -446,7 +469,8 @@ def list_graph_templates(programme_id: str | None = Query(default=None, alias="p
     """
     contract = CONTRACT_STORE.get_contract(programme_id) if programme_id else None
     prior = CONTRACT_STORE.get_contract(contract.prior_contract_id) if contract and contract.prior_contract_id else None
-    return build_graph_templates(contract, prior)
+    bound = {(slot.contract_id, slot.layer_node_id) for slot in CONTRACT_STORE.bound_pricing_slots()}
+    return build_graph_templates(contract, prior, bound)
 
 
 # ─────────────────────────── Background Industry ILW Engine ───────────────────────────

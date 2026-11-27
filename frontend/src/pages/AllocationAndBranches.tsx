@@ -131,18 +131,18 @@ export function AllocationAndBranches() {
                 <div className="kpi-val">{alloc.retroCostConservationError.toExponential(1)}</div>
               </div>
             </div>
-            <div className="table-wrap"><table>
+            <div className="table-wrap"><table className="dense-table">
               <thead>
                 <tr>
                   <th>Cedent</th>
                   <th>Layer</th>
-                  <th className="num">Gross Co-TVaR</th>
-                  <th className="num">Gross mROC</th>
-                  <th className="num">Alloc Retro Cost</th>
-                  <th className="num">Alloc Retro Rec</th>
-                  <th className="num">TVaR Relief</th>
-                  <th className="num">Net Co-TVaR</th>
-                  <th className="num">Net mROC</th>
+                  <th className="num" title="Gross co-TVaR">Gross</th>
+                  <th className="num" title="Gross marginal return on capital">GmROC</th>
+                  <th className="num" title="Allocated retro cost">Cost</th>
+                  <th className="num" title="Allocated retro recovery">Rec</th>
+                  <th className="num" title="TVaR relief">Relief</th>
+                  <th className="num" title="Net co-TVaR">Net</th>
+                  <th className="num" title="Net marginal return on capital">NmROC</th>
                 </tr>
               </thead>
               <tbody>

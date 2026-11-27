@@ -71,6 +71,31 @@ export interface ContractFull extends ProgrammeDeal {
   contentHash: string;
 }
 
+export interface LossFileRecord {
+  fileId: string;
+  simSetId: string;
+  name: string;
+  region: string;
+  peril: string;
+  regionPeril: string;
+  vendor?: string | null;
+}
+
+export interface RelatedProgramme {
+  programmeId: string;
+  cedentName: string;
+  programmeName: string;
+  treatyYear: number;
+  renewalPeriod: string;
+  status: string;
+}
+
+export interface PricingBinding {
+  contractId: string;
+  layerNodeId: string;
+  programmeId: string;
+}
+
 export interface SimSetDetail {
   simSetId: string;
   name: string;
@@ -80,6 +105,7 @@ export interface SimSetDetail {
   totalEvents: number;
   currency: string;
   regionPerils: string[];
+  lossFiles?: LossFileRecord[];
   contentHash: string;
   parquetPath: string;
   isIndustryCatalog: boolean;
@@ -191,6 +217,9 @@ export const api = {
   updateContract: (id: string, patch: Record<string, unknown>) =>
     fetchJson<ContractFull>(`/api/contracts/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
   listSimSets: () => fetchJson<SimSetDetail[]>('/api/sim-sets'),
+  listRelatedProgrammes: (programmeId: string) =>
+    fetchJson<RelatedProgramme[]>(`/api/programmes/${encodeURIComponent(programmeId)}/related`),
+  listPricingBindings: () => fetchJson<PricingBinding[]>('/api/pricing-bindings'),
   ingestYeltFile: async (formData: FormData): Promise<SimSetDetail> => {
     const res = await fetch(apiUrl('/api/sim-sets/ingest/yelt'), { method: 'POST', body: formData });
     if (!res.ok) throw new Error(readableError(res.status, await res.text()));

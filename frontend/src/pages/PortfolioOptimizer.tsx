@@ -1140,19 +1140,19 @@ export function PortfolioOptimizer() {
                 Layer Summary — Frontier Point #{activePoint.pointIndex + 1} (TVaR 250: $
                 {activePoint.metrics.tvar250M.toFixed(1)}m · Exp Return: ${activePoint.metrics.expectedProfitM.toFixed(2)}m)
               </div>
-              <div className="table-wrap"><table>
+              <div className="table-wrap"><table className="dense-table">
                 <thead>
                   <tr>
                     <th>Layer</th>
-                    <th>Status</th>
-                    <th className="num">Share</th>
-                    <th>Share Change (Δ)</th>
-                    <th className="num">Limit ($M)</th>
-                    <th className="num">Prem ($M)</th>
-                    <th className="num">EL ($M)</th>
-                    <th className="num">Co-TVaR 250</th>
-                    <th className="num">TVaR %</th>
-                    <th className="num">VaR %</th>
+                    <th title="Deal status">Status</th>
+                    <th className="num" title="Share">Share</th>
+                    <th title="Share change versus the initial portfolio">Δ</th>
+                    <th className="num" title="Limit, $M">Lim</th>
+                    <th className="num" title="Premium, $M">Prem</th>
+                    <th className="num" title="Expected loss, $M">EL</th>
+                    <th className="num" title="Co-TVaR at 1-in-250">CoTVaR</th>
+                    <th className="num" title="Share of TVaR">TVaR %</th>
+                    <th className="num" title="Share of VaR">VaR %</th>
                   </tr>
                 </thead>
                 <tbody>

@@ -245,11 +245,7 @@ export function App() {
         {tab === 'modelsops' && <CatModelsAndOps />}
 
         {tab === 'dag' && selectedProg && programmesQ.data && (
-          <StructuringStudio
-            programmes={programmesQ.data}
-            selectedProg={selectedProg}
-            onSelectProgramme={setSelectedProgId}
-          />
+          <StructuringStudio selectedProg={selectedProg} onSelectProgramme={setSelectedProgId} />
         )}
 
         {tab === 'portfolio' && portfolioQ.data && (
@@ -359,19 +355,19 @@ export function App() {
               <div className="card-title">
                 <span>Euler Capital Allocation · Co-TVaR 1-in-250</span>
               </div>
-              <div className="table-wrap"><table>
+              <div className="table-wrap"><table className="dense-table">
                 <thead>
                   <tr>
                     <th>Cedent</th>
                     <th>Layer</th>
-                    <th className="num">Limit</th>
-                    <th className="num">Premium</th>
-                    <th className="num">EL</th>
-                    <th className="num">Exp RIP</th>
-                    <th className="num">Standalone TVaR 250</th>
-                    <th className="num">Euler Co-TVaR 250</th>
-                    <th className="num">Div Credit</th>
-                    <th className="num">Marginal ROC</th>
+                    <th className="num" title="Limit">Lim</th>
+                    <th className="num" title="Premium">Prem</th>
+                    <th className="num" title="Expected loss">EL</th>
+                    <th className="num" title="Expected reinstatement premium">RIP</th>
+                    <th className="num" title="Standalone 1-in-250 TVaR">TVaR</th>
+                    <th className="num" title="Euler co-TVaR at 1-in-250">Euler</th>
+                    <th className="num" title="Diversification credit">Div</th>
+                    <th className="num" title="Marginal return on capital">mROC</th>
                   </tr>
                 </thead>
                 <tbody>

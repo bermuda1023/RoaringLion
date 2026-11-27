@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { fetchJson } from '../api/client';
 import { fmtMoneyM, fmtNum, fmtRatioPct } from '../utils/format';
 import { composeLabel, nextLayerCode, nodeTerms } from '../utils/nodeLabels';
@@ -57,6 +57,16 @@ const TYPE_LABEL: Record<string, string> = {
   AGG_QUOTA_SHARE: 'Agg Quota Share',
   SURPLUS_SHARE: 'Surplus Share',
   CASCADING_TOWER: 'Cascading Tower',
+  ILW_OPTION: 'ILW',
+};
+
+const TYPE_SHORT: Record<string, string> = {
+  OCC_XL: 'Occ',
+  AGG_XL: 'Agg',
+  QUOTA_SHARE: 'QS',
+  AGG_QUOTA_SHARE: 'AQS',
+  SURPLUS_SHARE: 'SS',
+  CASCADING_TOWER: 'Casc',
   ILW_OPTION: 'ILW',
 };
 
@@ -122,6 +132,7 @@ export function ContractLayersEditor({
   const [draft, setDraft] = useState<Draft>({});
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [newLayer, setNewLayer] = useState<NewLayerDraft | null>(null);
+  const [openRows, setOpenRows] = useState<Record<string, boolean>>({});
 
   const layersQ = useQuery({
     queryKey: ['contractLayers', programmeId],
@@ -359,7 +370,7 @@ export function ContractLayersEditor({
         value={newLayer[key]}
         onChange={(e) => setNewLayer({ ...newLayer, [key]: e.target.value })}
         className={`cell-input changed${key === 'layerCode' ? ' mono' : ''}`}
-        style={{ width: opts.width ?? 86, textAlign: key === 'name' || key === 'layerCode' ? 'left' : 'right' }}
+        style={{ textAlign: key === 'name' || key === 'layerCode' ? 'left' : 'right' }}
       />
     );
 
@@ -377,7 +388,7 @@ export function ContractLayersEditor({
         value={text(layer, field)}
         onChange={(e) => setField(layer.nodeId, field, e.target.value)}
         className={`cell-input ${changed ? 'changed' : ''}${field === 'layerCode' ? ' mono' : ''}`}
-        style={{ width: opts.width ?? 86, textAlign: isText ? 'left' : 'right' }}
+        style={{ textAlign: isText ? 'left' : 'right' }}
       />
     );
   };
@@ -393,8 +404,7 @@ export function ContractLayersEditor({
             Layer Terms &amp; Lines
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            Each layer has its own price, brokerage and lines. Limits, attachments and premiums at 100% ({currency} M); edit
-            premium or ROL. Our share = 100% amount × signed line.
+            Limits, attachments and premiums are $M at 100%. Open a row for technical ROL, reinstatements, RIP and the pricing link. Our share = 100% × signed line ({currency}).
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -434,117 +444,158 @@ export function ContractLayersEditor({
       {layers.length === 0 && !newLayer ? (
         <div className="empty-cell">This programme has no layers yet. Use “+ Add layer” or add financial-terms nodes in the Structuring Studio.</div>
       ) : (
-        <div className="table-wrap">
+        <div className="table-wrap layer-terms">
           <table>
+            <colgroup>
+              <col className="col-toggle" />
+              <col className="col-id" />
+              <col className="col-name" />
+              <col className="col-type" />
+              <col className="col-xs" />
+              <col className="col-price" />
+              <col className="col-lines" />
+              <col className="col-ours" />
+              <col className="col-act" />
+            </colgroup>
             <thead>
               <tr>
-                <th title="Unique identifier within this programme">Layer ID</th>
-                <th>Layer name</th>
-                <th>Type</th>
-                <th className="num">Limit</th>
-                <th className="num">Attachment</th>
-                <th className="num">Premium (100%)</th>
-                <th className="num">ROL %</th>
-                <th className="num" title="Technical (modelled) rate on line">Tech ROL %</th>
-                <th className="num" title="ROL ÷ technical ROL">Adequacy</th>
-                <th className="num">Reinst.</th>
-                <th className="num">RIP %</th>
-                <th className="num">Brokerage %</th>
-                <th className="num" title="Authorised line">Auth. %</th>
-                <th className="num">Written %</th>
-                <th className="num">Signed %</th>
-                <th className="num">Our Limit</th>
-                <th className="num">Our Premium</th>
-                <th className="num" title="Our premium net of brokerage">Our Net Prem.</th>
+                <th aria-label="Row detail" />
+                <th title="Unique identifier within this programme">ID</th>
+                <th title="Layer name">Name</th>
+                <th title="Layer type">Type</th>
+                <th title="Limit and attachment, $M at 100%">Limit xs att</th>
+                <th title="Deposit premium $M at 100%, and rate on line">Prem / ROL</th>
+                <th title="Authorised, written and signed line, and brokerage, percent">A / W / S / Br</th>
+                <th title="Our limit, premium and premium net of brokerage">Ours</th>
                 <th aria-label="Actions" />
               </tr>
             </thead>
             <tbody>
               {layers.map((layer) => {
                 const l = live(layer);
+                const open = Boolean(openRows[layer.nodeId]);
+                const fullLabel = l.terms ? composeLabel(text(layer, 'label'), l.terms) : layer.label;
+                const linkTitle = layer.linkedPricingLabel
+                  ? layer.linkedFeederLabel
+                    ? `1:1 linked Pricing Output: ${layer.linkedPricingLabel} · Feeder: ${layer.linkedFeederLabel}`
+                    : `1:1 linked Pricing Output: ${layer.linkedPricingLabel}`
+                  : 'No pricing output linked';
                 return (
-                  <tr key={layer.nodeId}>
-                    <td>{cell(layer, 'layerCode', { width: 84 })}</td>
-                    <td>
-                      {cell(layer, 'label', { width: 230 })}
-                      {layer.autoLabel && l.terms && (
-                        <div className="layer-label-preview" title="Full label (updates automatically from the terms)">
-                          {composeLabel(text(layer, 'label'), l.terms)}
-                        </div>
-                      )}
-                      {layer.linkedPricingLabel && (
-                        <div
-                          className="layer-link-preview"
-                          title={
-                            layer.linkedFeederLabel
-                              ? `1:1 linked Pricing Output: ${layer.linkedPricingLabel} · Feeder: ${layer.linkedFeederLabel}`
-                              : `1:1 linked Pricing Output: ${layer.linkedPricingLabel}`
-                          }
+                  <Fragment key={layer.nodeId}>
+                    <tr>
+                      <td>
+                        <button
+                          type="button"
+                          className="icon-btn"
+                          aria-expanded={open}
+                          aria-label={`${open ? 'Hide' : 'Show'} detail for ${layer.label}`}
+                          title="Technical ROL, reinstatements, RIP and the pricing link"
+                          onClick={() => setOpenRows((rows) => ({ ...rows, [layer.nodeId]: !rows[layer.nodeId] }))}
                         >
-                          1:1 → {layer.linkedPricingLabel}
-                          {layer.linkedFeederNodeId && layer.linkedFeederNodeId !== layer.nodeId && layer.linkedFeederLabel
-                            ? ` (feeder: ${layer.linkedFeederLabel})`
-                            : ''}
+                          {open ? '▾' : '▸'}
+                        </button>
+                      </td>
+                      <td>{cell(layer, 'layerCode')}</td>
+                      <td>
+                        {cell(layer, 'label')}
+                        {fullLabel && (
+                          <div className="layer-terms-line" title={fullLabel}>
+                            {fullLabel}
+                          </div>
+                        )}
+                      </td>
+                      <td title={TYPE_LABEL[layer.nodeType] ?? layer.nodeType}>{TYPE_SHORT[layer.nodeType] ?? layer.nodeType}</td>
+                      <td>
+                        <div className="layer-cluster">
+                          {cell(layer, 'limit', { step: '1' })}
+                          <span className="sep">xs</span>
+                          {cell(layer, 'attachment', { step: '1' })}
                         </div>
-                      )}
-                    </td>
-                    <td style={{ color: 'var(--text-muted)' }}>{TYPE_LABEL[layer.nodeType] ?? layer.nodeType}</td>
-                    <td className="num">{cell(layer, 'limit', { step: '1' })}</td>
-                    <td className="num">{cell(layer, 'attachment', { step: '1' })}</td>
-                    <td className="num">{cell(layer, 'depositPremium', { step: '0.1' })}</td>
-                    <td className="num">
-                      {layer.editable.includes('rol') ? (
-                        <input
-                          type="number"
-                          step="0.25"
-                          value={draft[layer.nodeId]?.rol ?? (l.rol == null ? '' : String(Number((l.rol * 100).toFixed(4))))}
-                          onChange={(e) => setField(layer.nodeId, 'rol', e.target.value)}
-                          className={`cell-input ${draft[layer.nodeId]?.rol !== undefined ? 'changed' : ''}`}
-                          style={{ width: 72, textAlign: 'right' }}
-                          title="Edit ROL to reprice the layer; premium follows"
-                        />
-                      ) : l.rol == null ? (
-                        '—'
-                      ) : (
-                        fmtRatioPct(l.rol, 2)
-                      )}
-                    </td>
-                    <td className="num">{cell(layer, 'technicalRol', { width: 72, step: '0.25' })}</td>
-                    <td
-                      className="num"
-                      style={{ color: l.adequacy == null ? undefined : l.adequacy >= 1 ? 'var(--positive)' : 'var(--negative)', fontWeight: 600 }}
-                    >
-                      {l.adequacy == null ? '—' : fmtRatioPct(l.adequacy, 0)}
-                    </td>
-                    <td className="num">{cell(layer, 'reinstatements', { width: 64, step: '1' })}</td>
-                    <td className="num">{cell(layer, 'ripRate', { width: 72, step: '5', suffix: '%' })}</td>
-                    <td className="num">{cell(layer, 'brokeragePct', { width: 72, step: '0.5' })}</td>
-                    <td className="num">{cell(layer, 'authorizedLine', { width: 72, step: '0.5' })}</td>
-                    <td className="num">{cell(layer, 'writtenLine', { width: 76, step: '0.5' })}</td>
-                    <td className="num">{cell(layer, 'signedLine', { width: 76, step: '0.5' })}</td>
-                    <td className="num" style={{ fontWeight: 600 }}>
-                      {l.ourLimit == null ? '—' : fmtMoneyM(l.ourLimit, 2)}
-                    </td>
-                    <td className="num" style={{ fontWeight: 600 }}>
-                      {l.ourPremium == null ? '—' : fmtMoneyM(l.ourPremium, 2)}
-                    </td>
-                    <td className="num">{l.ourNet == null ? '—' : fmtMoneyM(l.ourNet, 2)}</td>
-                    <td>
-                      <button
-                        className="icon-btn"
-                        title={layers.length > 1 ? `Remove ${layer.label}` : 'A programme needs at least one layer'}
-                        aria-label={`Remove ${layer.label}`}
-                        disabled={layers.length <= 1 || removeMut.isPending}
-                        onClick={() => {
-                          if (window.confirm(`Remove ${layer.label} from this programme? Its pricing output is removed too.`)) {
-                            removeMut.mutate(layer.nodeId);
-                          }
-                        }}
-                      >
-                        ×
-                      </button>
-                    </td>
-                  </tr>
+                      </td>
+                      <td>
+                        <div className="layer-cluster">
+                          {cell(layer, 'depositPremium', { step: '0.1' })}
+                          {layer.editable.includes('rol') ? (
+                            <input
+                              type="number"
+                              step="0.25"
+                              aria-label={`ROL for ${layer.label}`}
+                              value={draft[layer.nodeId]?.rol ?? (l.rol == null ? '' : String(Number((l.rol * 100).toFixed(2))))}
+                              onChange={(e) => setField(layer.nodeId, 'rol', e.target.value)}
+                              className={`cell-input ${draft[layer.nodeId]?.rol !== undefined ? 'changed' : ''}`}
+                              style={{ textAlign: 'right' }}
+                              title="Edit ROL to reprice the layer; premium follows"
+                            />
+                          ) : (
+                            <span>{l.rol == null ? '—' : fmtRatioPct(l.rol, 1)}</span>
+                          )}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="layer-cluster">
+                          {cell(layer, 'authorizedLine', { step: '0.5' })}
+                          {cell(layer, 'writtenLine', { step: '0.5' })}
+                          {cell(layer, 'signedLine', { step: '0.5' })}
+                          {cell(layer, 'brokeragePct', { step: '0.5' })}
+                        </div>
+                      </td>
+                      <td className="ours">
+                        <span title="Our limit">{l.ourLimit == null ? '—' : fmtMoneyM(l.ourLimit, 1)}</span>
+                        <span title="Our premium">{l.ourPremium == null ? '—' : fmtMoneyM(l.ourPremium, 1)}</span>
+                        <span title="Our premium net of brokerage">{l.ourNet == null ? '—' : fmtMoneyM(l.ourNet, 1)}</span>
+                      </td>
+                      <td>
+                        <button
+                          className="icon-btn"
+                          title={layers.length > 1 ? `Remove ${layer.label}` : 'A programme needs at least one layer'}
+                          aria-label={`Remove ${layer.label}`}
+                          disabled={layers.length <= 1 || removeMut.isPending}
+                          onClick={() => {
+                            if (window.confirm(`Remove ${layer.label} from this programme? Its pricing output is removed too.`)) {
+                              removeMut.mutate(layer.nodeId);
+                            }
+                          }}
+                        >
+                          ×
+                        </button>
+                      </td>
+                    </tr>
+                    {open && (
+                      <tr className="layer-detail">
+                        <td colSpan={9}>
+                          <div className="layer-detail-grid">
+                            <label>
+                              Technical ROL %
+                              {cell(layer, 'technicalRol', { step: '0.25' })}
+                            </label>
+                            <div>
+                              <span>Adequacy</span>
+                              <b style={{ color: l.adequacy == null ? undefined : l.adequacy >= 1 ? 'var(--positive)' : 'var(--negative)' }}>
+                                {l.adequacy == null ? '—' : fmtRatioPct(l.adequacy, 0)}
+                              </b>
+                            </div>
+                            <label>
+                              Reinstatements
+                              {cell(layer, 'reinstatements', { step: '1' })}
+                            </label>
+                            <label>
+                              RIP %
+                              {cell(layer, 'ripRate', { step: '5' })}
+                            </label>
+                            <div title={linkTitle}>
+                              <span>Pricing output</span>
+                              <b>{layer.linkedPricingLabel || 'Not linked'}</b>
+                              {layer.linkedFeederLabel ? <b>Feeder {layer.linkedFeederLabel}</b> : null}
+                            </div>
+                            <div>
+                              <span>Full label</span>
+                              <b>{fullLabel}</b>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 );
               })}
               {newLayer && (() => {
@@ -561,84 +612,122 @@ export function ContractLayersEditor({
                         placedShare: sg == null ? 1 : sg / 100,
                       })
                     : null;
+                const net = sg != null ? ((prem * sg) / 100) * (1 - (parseNum(newLayer.brokeragePct) ?? 10) / 100) : null;
                 return (
-                  <tr className="new-layer-row">
-                    <td>{nlField('layerCode', { width: 84, placeholder: 'L1' })}</td>
-                    <td>
-                      {nlField('name', { width: 230, placeholder: 'Layer name (optional)' })}
-                      {terms && <div className="layer-label-preview">{composeLabel(newLayer.name.trim() || 'New layer', terms)}</div>}
-                    </td>
-                    <td>
-                      <select
-                        value={newLayer.layerType}
-                        onChange={(e) => setNewLayer({ ...newLayer, layerType: e.target.value as NewLayerDraft['layerType'] })}
-                        className="cell-input changed"
-                      >
-                        <option value="OCC_XL">Occurrence XL</option>
-                        <option value="AGG_XL">Aggregate XL</option>
-                      </select>
-                    </td>
-                    <td className="num">{nlField('limit', { step: '1' })}</td>
-                    <td className="num">{nlField('attachment', { step: '1' })}</td>
-                    <td className="num">{nlField('depositPremium', { step: '0.1', placeholder: '0' })}</td>
-                    <td className="num">{lim ? fmtRatioPct(prem / lim, 2) : '—'}</td>
-                    <td className="num" style={{ color: 'var(--text-faint)' }}>—</td>
-                    <td className="num" style={{ color: 'var(--text-faint)' }}>—</td>
-                    <td className="num">{newLayer.layerType === 'OCC_XL' ? nlField('reinstatements', { width: 64, step: '1' }) : '—'}</td>
-                    <td className="num" style={{ color: 'var(--text-faint)' }}>{newLayer.layerType === 'OCC_XL' ? '100%' : '—'}</td>
-                    <td className="num">{nlField('brokeragePct', { width: 72, step: '0.5' })}</td>
-                    <td className="num" style={{ color: 'var(--text-faint)' }}>100%</td>
-                    <td className="num">{nlField('writtenLine', { width: 76, step: '0.5' })}</td>
-                    <td className="num">{nlField('signedLine', { width: 76, step: '0.5' })}</td>
-                    <td className="num">{lim != null && sg != null ? fmtMoneyM((lim * sg) / 100, 2) : '—'}</td>
-                    <td className="num">{sg != null ? fmtMoneyM((prem * sg) / 100, 2) : '—'}</td>
-                    <td className="num">
-                      {sg != null ? fmtMoneyM(((prem * sg) / 100) * (1 - (parseNum(newLayer.brokeragePct) ?? 10) / 100), 2) : '—'}
-                    </td>
-                    <td>
-                      <button
-                        className="btn"
-                        onClick={() => addMut.mutate(newLayer)}
-                        disabled={newLayerProblems.length > 0 || addMut.isPending}
-                        title={newLayerProblems.join(' · ')}
-                      >
-                        {addMut.isPending ? 'Adding…' : 'Add'}
-                      </button>
-                    </td>
-                  </tr>
+                  <Fragment key="new-layer">
+                    <tr className="new-layer-row">
+                      <td />
+                      <td>{nlField('layerCode', { placeholder: 'L1' })}</td>
+                      <td>
+                        {nlField('name', { placeholder: 'Name' })}
+                        {terms && (
+                          <div className="layer-terms-line" title={composeLabel(newLayer.name.trim() || 'New layer', terms)}>
+                            {composeLabel(newLayer.name.trim() || 'New layer', terms)}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <select
+                          aria-label="New layer type"
+                          value={newLayer.layerType}
+                          onChange={(e) => setNewLayer({ ...newLayer, layerType: e.target.value as NewLayerDraft['layerType'] })}
+                          className="cell-input changed"
+                        >
+                          <option value="OCC_XL">Occ</option>
+                          <option value="AGG_XL">Agg</option>
+                        </select>
+                      </td>
+                      <td>
+                        <div className="layer-cluster">
+                          {nlField('limit', { step: '1' })}
+                          <span className="sep">xs</span>
+                          {nlField('attachment', { step: '1' })}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="layer-cluster">
+                          {nlField('depositPremium', { step: '0.1', placeholder: '0' })}
+                          <span title="ROL from premium and limit">{lim ? fmtRatioPct(prem / lim, 1) : '—'}</span>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="layer-cluster">
+                          <span title="Authorised line defaults to 100%">100</span>
+                          {nlField('writtenLine', { step: '0.5' })}
+                          {nlField('signedLine', { step: '0.5' })}
+                          {nlField('brokeragePct', { step: '0.5' })}
+                        </div>
+                      </td>
+                      <td className="ours">
+                        <span title="Our limit">{lim != null && sg != null ? fmtMoneyM((lim * sg) / 100, 1) : '—'}</span>
+                        <span title="Our premium">{sg != null ? fmtMoneyM((prem * sg) / 100, 1) : '—'}</span>
+                        <span title="Our premium net of brokerage">{net == null ? '—' : fmtMoneyM(net, 1)}</span>
+                      </td>
+                      <td>
+                        <button
+                          className="btn"
+                          onClick={() => addMut.mutate(newLayer)}
+                          disabled={newLayerProblems.length > 0 || addMut.isPending}
+                          title={newLayerProblems.join(' · ') || 'Add layer'}
+                        >
+                          {addMut.isPending ? '…' : 'Add'}
+                        </button>
+                      </td>
+                    </tr>
+                    <tr className="layer-detail">
+                      <td colSpan={9}>
+                        <div className="layer-detail-grid">
+                          <label>
+                            Reinstatements
+                            {newLayer.layerType === 'OCC_XL' ? nlField('reinstatements', { step: '1' }) : <b>—</b>}
+                          </label>
+                          <div>
+                            <span>RIP %</span>
+                            <b>{newLayer.layerType === 'OCC_XL' ? '100%' : '—'}</b>
+                          </div>
+                          <div>
+                            <span>Technical ROL</span>
+                            <b>—</b>
+                          </div>
+                          <div>
+                            <span>Adequacy</span>
+                            <b>—</b>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  </Fragment>
                 );
               })()}
               <tr className="total-row">
                 <td />
+                <td />
                 <td>Total</td>
                 <td />
-                <td className="num">{fmtMoneyM(totals.limit, 1)}</td>
-                <td />
-                <td className="num">{fmtMoneyM(totals.premium, 2)}</td>
-                <td className="num">{totals.limit ? fmtRatioPct(totals.premium / totals.limit, 2) : '—'}</td>
-                <td className="num" style={{ color: 'var(--text-muted)' }}>
-                  {totals.limit && totals.techComplete ? fmtRatioPct(totals.tech / totals.limit, 2) : '—'}
+                <td title="Total limit">{fmtMoneyM(totals.limit, 1)}</td>
+                <td title="Total premium and limit-weighted ROL">
+                  {fmtMoneyM(totals.premium, 1)}
+                  <div className="layer-terms-line">
+                    {totals.limit ? fmtRatioPct(totals.premium / totals.limit, 1) : '—'}
+                    {' · tech '}
+                    {totals.limit && totals.techComplete ? fmtRatioPct(totals.tech / totals.limit, 1) : '—'}
+                    {' · '}
+                    {totals.limit && totals.techComplete && totals.tech ? fmtRatioPct(totals.premium / totals.tech, 0) : '—'}
+                  </div>
                 </td>
-                <td className="num" style={{ color: 'var(--text-muted)' }}>
-                  {totals.limit && totals.techComplete && totals.tech ? fmtRatioPct(totals.premium / totals.tech, 0) : '—'}
+                <td title="Limit-weighted authorised, written and signed lines, and premium-weighted brokerage">
+                  <div className="layer-cluster">
+                    <span>{totals.limit ? fmtNum((totals.authorized / totals.limit) * 100, 0) : '—'}</span>
+                    <span>{totals.limit ? fmtNum((totals.written / totals.limit) * 100, 0) : '—'}</span>
+                    <span>{totals.limit ? fmtNum((totals.ourLimit / totals.limit) * 100, 0) : '—'}</span>
+                    <span>{totals.premium ? fmtNum((totals.brokerage / totals.premium) * 100, 0) : '—'}</span>
+                  </div>
                 </td>
-                <td />
-                <td />
-                <td className="num" style={{ color: 'var(--text-muted)' }}>
-                  {totals.premium ? fmtNum((totals.brokerage / totals.premium) * 100, 1) + '%' : '—'}
+                <td className="ours">
+                  <span title="Our limit">{fmtMoneyM(totals.ourLimit, 1)}</span>
+                  <span title="Our premium">{fmtMoneyM(totals.ourPremium, 1)}</span>
+                  <span title="Our premium net of brokerage">{fmtMoneyM(totals.ourNet, 1)}</span>
                 </td>
-                <td className="num" style={{ color: 'var(--text-muted)' }}>
-                  {totals.limit ? fmtNum((totals.authorized / totals.limit) * 100, 1) + '%' : '—'}
-                </td>
-                <td className="num" style={{ color: 'var(--text-muted)' }}>
-                  {totals.limit ? fmtNum((totals.written / totals.limit) * 100, 1) + '%' : '—'}
-                </td>
-                <td className="num" style={{ color: 'var(--text-muted)' }}>
-                  {totals.limit ? fmtNum((totals.ourLimit / totals.limit) * 100, 1) + '%' : '—'}
-                </td>
-                <td className="num">{fmtMoneyM(totals.ourLimit, 2)}</td>
-                <td className="num">{fmtMoneyM(totals.ourPremium, 2)}</td>
-                <td className="num">{fmtMoneyM(totals.ourNet, 2)}</td>
                 <td />
               </tr>
             </tbody>
