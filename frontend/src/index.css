@@ -401,13 +401,15 @@ select { min-width: 0; text-overflow: ellipsis; }
 }
 .layer-terms th { font-size: 10px; line-height: 1.15; letter-spacing: 0; }
 .layer-terms .col-toggle { width: 26px; }
-.layer-terms .col-id { width: 46px; }
-.layer-terms .col-type { width: 46px; }
-.layer-terms .col-xs { width: 118px; }
-.layer-terms .col-price { width: 108px; }
-.layer-terms .col-lines { width: 176px; }
-.layer-terms .col-ours { width: 72px; }
-.layer-terms .col-act { width: 42px; }
+.layer-terms .col-id { width: 44px; }
+.layer-terms .col-type { width: 44px; }
+.layer-terms .col-xs { width: 116px; }
+.layer-terms .col-price { width: 106px; }
+.layer-terms .col-lines { width: 130px; }
+.layer-terms .col-rarc { width: 62px; }
+.layer-terms .col-lr { width: 60px; }
+.layer-terms .col-ours { width: 70px; }
+.layer-terms .col-act { width: 40px; }
 .layer-terms .cell-input, .layer-terms select.cell-input {
   width: 100% !important;
   max-width: 100%;

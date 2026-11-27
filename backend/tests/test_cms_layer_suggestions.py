@@ -124,7 +124,7 @@ def test_cms_layer_templates_each_include_one_pricing_output_outside_blank_palet
 def test_suggesting_a_cms_layer_places_one_linked_pricing_output_beside_it():
     c = _create(
         "Place",
-        [{"layerCode": "L1", "name": "Cat XL", "limit": 40, "attachment": 60, "depositPremium": 8.0, "signedLine": 0.5, "brokeragePct": 0.1, "technicalRol": 0.18}],
+        [{"layerCode": "L1", "name": "Cat XL", "limit": 40, "attachment": 60, "depositPremium": 8.0, "signedLine": 0.5, "brokeragePct": 0.1, "rarcPct": 5.0}],
     )
     pid = c["programmeId"]
     graph = GraphSpec.model_validate(c["graph"])

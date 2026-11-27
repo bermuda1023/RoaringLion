@@ -63,7 +63,13 @@ from app.models.phase1 import (
 )
 from app.services.branching import BranchCreate, BranchDiffResponse, BranchOut, BranchService
 from app.services.claims import ClaimCreate, ClaimOut, ClaimRevision, ClaimsService
-from app.services.contracts import ContractStore, contract_to_programme_deal
+from app.services.contracts import (
+    ContractStore,
+    compute_programme_loss_ratio,
+    contract_layers,
+    contract_to_programme_deal,
+)
+from app.services.node_outputs import resolve_pricing_links
 from app.services.exports import build_portfolio_csv, build_portfolio_tearsheet_html, build_programme_tearsheet_html
 from app.services.fund_ops import CashEntry, EventReserve, FundOpsStore, InvestorSeries, MarketMark, SlipIntakeDraft, check_permission
 from app.services.lineage import LineageRegistry
@@ -566,11 +572,19 @@ def create_extended_router(
 
         prog = contract_to_programme_deal(c)
         yelt = sim_store.get_yelt(prog.sim_set_id)
+        pricing_links = resolve_pricing_links(prog.graph, c, contract_store.get_contract)
         dag_eval, _ = evaluate_programme_dag(
             prog,
             yelt,
             LineageRegistry(persist=False),
             industry_yelt=sim_store.get_yelt(ind_sim_id),
+            pricing_links=pricing_links,
+        )
+        adj_nodes = dag_eval.views.get("ADJUSTED", [])
+        programme_loss_ratio = compute_programme_loss_ratio(
+            contract_layers(c),
+            adj_nodes,
+            c.programme_id,
         )
 
         # Related programmes for same cedent
@@ -630,8 +644,9 @@ def create_extended_router(
                 "graphId": dag_eval.graph_id,
                 "graphVersion": dag_eval.graph_version,
                 "computeMs": dag_eval.compute_ms,
+                "programmeLossRatio": programme_loss_ratio,
                 "unadjustedNodes": [m.model_dump(by_alias=True) for m in dag_eval.views.get("UNADJUSTED", [])],
-                "adjustedNodes": [m.model_dump(by_alias=True) for m in dag_eval.views.get("ADJUSTED", [])],
+                "adjustedNodes": [m.model_dump(by_alias=True) for m in adj_nodes],
             },
             "exposureLink": ee_match,
             "modelingLink": {

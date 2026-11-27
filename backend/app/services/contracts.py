@@ -126,12 +126,10 @@ def _layer_node(spec: ContractLayerSpec, node_id: str, written: float, signed: f
     if spec.rol is not None:
         params["depositPremium"] = round(spec.rol * spec.limit, 6)
     params["writtenLine"] = written_line
-    if spec.authorized_line is not None:
-        params["authorizedLine"] = max(spec.authorized_line, written_line)
     if spec.brokerage_pct is not None:
         params["brokeragePct"] = spec.brokerage_pct
-    if spec.technical_rol is not None:
-        params["technicalRol"] = spec.technical_rol
+    if spec.rarc_pct is not None:
+        params["rarcPct"] = spec.rarc_pct
     if spec.layer_code is not None and spec.layer_code.strip():
         params["layerCode"] = spec.layer_code.strip()
     params["labelName"] = (spec.name or "").strip() or default_name
@@ -359,14 +357,12 @@ def _record_to_full(r: ContractRecord) -> ContractFull:
         inception_date=r.inception_date,
         expiry_date=r.expiry_date,
         hours_clause=r.hours_clause,
-        authorized_line=r.authorized_line,
-        written_line=r.written_line,
+        written_line=r.written_line if r.written_line is not None else 1.0,
         signed_line=r.signed_line,
         limit=r.limit,
         attachment=r.attachment,
         deposit_premium=r.deposit_premium,
         rol=r.rol,
-        technical_rol=r.technical_rol,
         brokerage_pct=r.brokerage_pct,
         fronting_fee_pct=r.fronting_fee_pct,
         collateral_required=r.collateral_required,
@@ -428,19 +424,95 @@ def _opt_float(v) -> float | None:
     return None if v is None else float(v)
 
 
+def compute_weighted_rarc(layers: list[ContractLayer]) -> float | None:
+    """Line-size-weighted average RARC (in percentage points) across layers with RARC set.
+
+    Weighting hierarchy:
+    1. Signed line size: ``limit * signed_line`` (our placed exposure in $M).
+    2. Written line size: ``limit * written_line`` when total signed line size across RARC layers is 0.
+    3. 100% layer limit: ``limit`` when both signed and written line sizes are 0.
+    """
+    with_rarc = [l for l in layers if l.rarc_pct is not None and (l.limit or 0.0) > 0]
+    if not with_rarc:
+        return None
+    for weight_fn in (
+        lambda l: (l.limit or 0.0) * l.signed_line,
+        lambda l: (l.limit or 0.0) * l.written_line,
+        lambda l: (l.limit or 0.0),
+    ):
+        total_w = sum(weight_fn(l) for l in with_rarc)
+        if total_w > 0:
+            return round(sum(weight_fn(l) * (l.rarc_pct or 0.0) for l in with_rarc) / total_w, 4)
+    return None
+
+
+def enrich_layers_with_loss_ratio(
+    layers: list[ContractLayer],
+    adjusted_nodes: list,
+    programme_id: str,
+) -> list[ContractLayer]:
+    """Attach read-only modelled Adjusted EL, Expected RIP, and Loss Ratio to each ContractLayer."""
+    pricing_by_layer = {
+        m.pricing.layer_node_id: m.pricing
+        for m in adjusted_nodes
+        if getattr(m, "pricing", None) is not None and m.pricing.contract_id == programme_id
+    }
+    node_by_id = {m.node_id: m for m in adjusted_nodes}
+    for l in layers:
+        p = pricing_by_layer.get(l.node_id)
+        if p is not None:
+            l.expected_loss = round(float(p.expected_loss), 6)
+            l.expected_rip = round(float(p.expected_rip), 6)
+            l.loss_ratio = p.loss_ratio
+            continue
+        m = node_by_id.get(l.node_id)
+        if m is not None:
+            l.expected_loss = round(float(m.el), 6)
+            l.expected_rip = round(float(m.expected_rip), 6)
+            if m.elr is not None:
+                l.loss_ratio = m.elr
+            elif l.our_premium > 0:
+                income = l.our_premium + (l.expected_rip or 0.0)
+                l.loss_ratio = round(l.expected_loss / income, 6) if income > 0 else None
+            else:
+                l.loss_ratio = None
+    return layers
+
+
+def compute_programme_loss_ratio(
+    layers: list[ContractLayer],
+    adjusted_nodes: list,
+    programme_id: str,
+) -> float | None:
+    """Programme-level Loss Ratio = sum(Adjusted EL) / sum(Our Deposit Premium + Expected RIP)."""
+    enriched = enrich_layers_with_loss_ratio(
+        [l.model_copy() for l in layers],
+        adjusted_nodes,
+        programme_id,
+    )
+    linked = [l for l in enriched if l.linked_pricing_node_id]
+    active = linked if linked else enriched
+    total_el = 0.0
+    total_income = 0.0
+    for l in active:
+        if l.expected_loss is None or l.our_premium <= 0:
+            continue
+        total_el += l.expected_loss
+        total_income += l.our_premium + (l.expected_rip or 0.0)
+    return round(total_el / total_income, 6) if total_income > 0 else None
+
+
 def graph_layers(
     graph: GraphSpec,
     default_written: float,
     default_signed: float,
     *,
-    default_authorized: float = 1.0,
     default_brokerage: float = 0.10,
-    default_technical_rol: float | None = None,
     programme_id: str | None = None,
     pricing_link_map: dict[str, tuple[str, str, str | None, str | None]] | None = None,
 ) -> list[ContractLayer]:
     """Financial-terms nodes of a programme graph presented as contract layers (limits at 100%).
-    Each layer carries its own price, lines, brokerage and technical rate; contract values are defaults."""
+    Each layer carries its own price, lines, brokerage and RARC; contract values are defaults."""
     out: list[ContractLayer] = []
     used_codes: set[str] = set()
     assigned_codes: dict[str, str] = {}
@@ -478,7 +550,7 @@ def graph_layers(
             continue
         p = node.params
         limit_key, attach_key = _LAYER_TYPES[node.node_type]
-        editable = ["layerCode", "label", "depositPremium", "authorizedLine", "writtenLine", "signedLine", "brokeragePct", "technicalRol"]
+        editable = ["layerCode", "label", "depositPremium", "writtenLine", "signedLine", "brokeragePct", "rarcPct"]
         if node.node_type == NodeType.CASCADING_TOWER:
             subs = p.get("layers", []) or []
             limit = sum(float(l.get("occLimit", 0) or 0) for l in subs) or None
@@ -497,10 +569,12 @@ def graph_layers(
                 editable.append("attachment")
             if node.node_type == NodeType.OCC_XL:
                 editable += ["reinstatements", "ripRate"]
-        written = float(p.get("writtenLine", max(default_written, signed)))
-        authorized = float(p.get("authorizedLine", max(default_authorized, written)))
+        raw_written = p.get("writtenLine")
+        if raw_written is None:
+            raw_written = p.get("authorizedLine")
+        written = float(raw_written) if raw_written is not None else max(default_written, signed)
         brokerage = float(p.get("brokeragePct", default_brokerage))
-        tech = _opt_float(p.get("technicalRol", default_technical_rol))
+        rarc_pct = _opt_float(p.get("rarcPct"))
         rol = premium / limit if limit else None
         our_premium = premium * signed
         link_info = link_by_layer.get(node.node_id)
@@ -516,15 +590,13 @@ def graph_layers(
                 rol=round(rol, 6) if rol is not None else None,
                 reinstatements=_opt_float(p.get("reinstatements")) if node.node_type == NodeType.OCC_XL else None,
                 rip_rate=_opt_float(p.get("ripRate")) if node.node_type == NodeType.OCC_XL else None,
-                authorized_line=authorized,
                 written_line=written,
                 signed_line=signed,
                 our_limit=round(limit * signed, 6) if limit else None,
                 our_premium=round(our_premium, 6),
                 brokerage_pct=brokerage,
                 our_net_premium=round(our_premium * (1 - brokerage), 6),
-                technical_rol=tech,
-                price_adequacy=round(rol / tech, 6) if rol and tech else None,
+                rarc_pct=rarc_pct,
                 editable=editable,
                 name=label_name(p, node.label),
                 terms=node_terms(node.node_type, p),
@@ -557,9 +629,7 @@ def contract_layers(c: ContractFull, *, all_contracts: list[ContractFull] | None
         c.graph,
         c.written_line,
         c.signed_line,
-        default_authorized=c.authorized_line,
         default_brokerage=c.brokerage_pct,
-        default_technical_rol=c.technical_rol,
         programme_id=c.programme_id,
         pricing_link_map=link_map,
     )
@@ -646,7 +716,6 @@ def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) ->
         if node is None or node.node_type not in _LAYER_TYPES:
             raise KeyError(f"Layer {u.node_id} not found on this programme")
         for name, val in (
-            ("Authorised line", u.authorized_line),
             ("Written line", u.written_line),
             ("Signed line", u.signed_line),
         ):
@@ -654,10 +723,13 @@ def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) ->
                 raise ValueError(f"{node.label}: {name} must be between 0% and 100%")
         if u.brokerage_pct is not None and not 0.0 <= u.brokerage_pct <= 0.9:
             raise ValueError(f"{node.label}: brokerage must be between 0% and 90%")
-        for name, val in (("ROL", u.rol), ("Technical ROL", u.technical_rol)):
-            if val is not None and not 0.0 <= val <= 5.0:
-                raise ValueError(f"{node.label}: {name} must be between 0% and 500%")
+        if u.rol is not None and not 0.0 <= u.rol <= 5.0:
+            raise ValueError(f"{node.label}: ROL must be between 0% and 500%")
+        if u.rarc_pct is not None and not -100.0 <= u.rarc_pct <= 500.0:
+            raise ValueError(f"{node.label}: RARC must be between -100% and 500%")
         p = dict(node.params)
+        p.pop("authorizedLine", None)
+        p.pop("technicalRol", None)
         if u.layer_code is not None:
             code = u.layer_code.strip()
             if not code:
@@ -694,33 +766,28 @@ def apply_layer_updates(graph: GraphSpec, updates: list[ContractLayerUpdate]) ->
                 p["ripRate"] = u.rip_rate
             if u.signed_line is not None:
                 p["placedShare"] = u.signed_line
-        if u.authorized_line is not None:
-            p["authorizedLine"] = u.authorized_line
         if u.written_line is not None:
             p["writtenLine"] = u.written_line
         if u.brokerage_pct is not None:
             p["brokeragePct"] = u.brokerage_pct
-        if u.technical_rol is not None:
-            p["technicalRol"] = u.technical_rol
+        if "rarc_pct" in u.model_fields_set:
+            if u.rarc_pct is None:
+                p.pop("rarcPct", None)
+            else:
+                p["rarcPct"] = u.rarc_pct
         node.params = p
         node.label = smart_label(node.node_type, p, node.label)
     ensure_layer_codes(graph, strict=True)
     return graph
 
 
-def _roll_up_layers(rec: ContractRecord, graph: GraphSpec) -> None:
-    """Programme totals follow the layers: summed 100% limit/premium, limit-weighted lines and technical
-    rate, premium-weighted brokerage. When the graph has explicit Pricing Output -> CMS links for this
-    programme, only those linked CMS layers roll up into contract totals (unlinked exploratory canvas
-    layers stay out of the booked totals)."""
+def _active_rollup_layers(rec: ContractRecord, graph: GraphSpec) -> list[ContractLayer]:
     all_layers = [
         l for l in graph_layers(
             graph,
-            rec.written_line,
+            rec.written_line if rec.written_line is not None else 1.0,
             rec.signed_line,
-            default_authorized=rec.authorized_line,
             default_brokerage=rec.brokerage_pct,
-            default_technical_rol=rec.technical_rol,
             programme_id=rec.programme_id,
         )
         if l.limit
@@ -732,7 +799,29 @@ def _roll_up_layers(rec: ContractRecord, graph: GraphSpec) -> None:
         and str(n.params.get("contractId") or "").strip() == rec.programme_id
         and str(n.params.get("layerNodeId") or "").strip()
     }
-    layers = [l for l in all_layers if l.node_id in linked_ids] if linked_ids else all_layers
+    return [l for l in all_layers if l.node_id in linked_ids] if linked_ids else all_layers
+
+
+def _sync_profile_rarc_from_layers(
+    rec: ContractRecord,
+    layers: list[ContractLayer],
+    *,
+    clear_if_empty: bool = False,
+) -> None:
+    weighted_rarc = compute_weighted_rarc(layers)
+    if weighted_rarc is None and not clear_if_empty:
+        return
+    prof = ProgrammeProfile(**json.loads(rec.profile_json)) if rec.profile_json else ProgrammeProfile()
+    prof.rarc_total_pct = weighted_rarc if weighted_rarc is not None else 0.0
+    rec.profile_json = prof.model_dump_json()
+
+
+def _roll_up_layers(rec: ContractRecord, graph: GraphSpec, *, clear_rarc_if_empty: bool = False) -> None:
+    """Programme totals follow the layers: summed 100% limit/premium, limit-weighted lines,
+    premium-weighted brokerage, and line-size-weighted RARC. When the graph has explicit Pricing
+    Output -> CMS links for this programme, only those linked CMS layers roll up into contract
+    totals (unlinked exploratory canvas layers stay out of the booked totals)."""
+    layers = _active_rollup_layers(rec, graph)
     total_limit = sum(l.limit or 0.0 for l in layers)
     if total_limit <= 0:
         return
@@ -743,16 +832,14 @@ def _roll_up_layers(rec: ContractRecord, graph: GraphSpec) -> None:
     rec.limit = round(total_limit, 6)
     rec.deposit_premium = round(sum(l.deposit_premium for l in layers), 6)
     rec.rol = round(rec.deposit_premium / total_limit, 6)
-    rec.authorized_line = by_limit(lambda l: l.authorized_line)
     rec.written_line = by_limit(lambda l: l.written_line)
     rec.signed_line = by_limit(lambda l: l.signed_line)
     if rec.deposit_premium > 0:
         rec.brokerage_pct = round(sum(l.deposit_premium * l.brokerage_pct for l in layers) / rec.deposit_premium, 6)
-    if all(l.technical_rol is not None for l in layers):
-        rec.technical_rol = by_limit(lambda l: l.technical_rol)
     attachments = [l.attachment for l in layers if l.attachment is not None]
     if attachments:
         rec.attachment = min(attachments)
+    _sync_profile_rarc_from_layers(rec, layers, clear_if_empty=clear_rarc_if_empty)
 
 
 class ContractStore:
@@ -830,14 +917,12 @@ class ContractStore:
                     inception_date=f"{prog.treaty_year}-01-01",
                     expiry_date=f"{prog.treaty_year}-12-31",
                     hours_clause=72,
-                    authorized_line=prog.written_line,
                     written_line=prog.written_line,
                     signed_line=prog.signed_line,
                     limit=prog.limit,
                     attachment=80.0 if is_farmers else (70.0 if is_pacific else 45.0),
                     deposit_premium=prog.deposit_premium,
                     rol=prog.rol,
-                    technical_rol=round(prog.rol * 0.92, 4),
                     brokerage_pct=0.10,
                     fronting_fee_pct=0.02,
                     collateral_required=prog.collateral_required,
@@ -884,8 +969,12 @@ class ContractStore:
                         update={"uplift_set_id": "upl-farmers-us-26", "name": "Farmers US 2026 House Uplift"}
                     )
                     prior_graph = prog.graph.model_copy(
-                        update={"graph_id": "grp-farmers-us-26", "name": "Farmers US Wind Tower 2026"}
+                        deep=True,
+                        update={"graph_id": "grp-farmers-us-26", "name": "Farmers US Wind Tower 2026"},
                     )
+                    for n in prior_graph.nodes:
+                        if n.node_type in _LAYER_TYPES:
+                            n.params = {**n.params, "rarcPct": 4.5}
                     db.add(
                         ContractRecord(
                             programme_id="prog-farmers-us-26",
@@ -908,14 +997,12 @@ class ContractStore:
                             inception_date="2026-01-01",
                             expiry_date="2026-12-31",
                             hours_clause=72,
-                            authorized_line=1.0,
                             written_line=1.0,
                             signed_line=1.0,
                             limit=80.0,
                             attachment=75.0,
                             deposit_premium=17.6,
                             rol=0.22,
-                            technical_rol=0.202,
                             brokerage_pct=0.10,
                             fronting_fee_pct=0.02,
                             collateral_required=80.0,
@@ -1086,14 +1173,12 @@ class ContractStore:
             inception_date=payload.inception_date,
             expiry_date=payload.expiry_date,
             hours_clause=payload.hours_clause,
-            authorized_line=payload.authorized_line,
             written_line=payload.written_line,
             signed_line=payload.signed_line,
             limit=payload.limit,
             attachment=payload.attachment,
             deposit_premium=payload.deposit_premium,
             rol=payload.rol,
-            technical_rol=payload.technical_rol,
             brokerage_pct=payload.brokerage_pct,
             fronting_fee_pct=payload.fronting_fee_pct,
             collateral_required=payload.collateral_required,
@@ -1113,6 +1198,8 @@ class ContractStore:
         if payload.layers and payload.graph is None:
             _roll_up_layers(rec, graph)
             rec.collateral_required = rec.limit * rec.signed_line
+        else:
+            _sync_profile_rarc_from_layers(rec, _active_rollup_layers(rec, graph))
         with get_session() as db:
             db.add(rec)
             db.commit()
@@ -1133,7 +1220,14 @@ class ContractStore:
                 if k == "custom_tags":
                     rec.custom_tags_json = json.dumps(v)
                 elif k == "profile" and v is not None:
-                    rec.profile_json = ProgrammeProfile(**v).model_dump_json()
+                    prev_prof = ProgrammeProfile(**json.loads(rec.profile_json)) if rec.profile_json else ProgrammeProfile()
+                    next_prof = ProgrammeProfile(**v)
+                    next_prof.rarc_total_pct = prev_prof.rarc_total_pct
+                    rec.profile_json = next_prof.model_dump_json()
+                    _sync_profile_rarc_from_layers(
+                        rec,
+                        _active_rollup_layers(rec, GraphSpec(**json.loads(rec.graph_json))),
+                    )
                 elif hasattr(v, "value"):
                     setattr(rec, k, v.value)
                 else:
@@ -1170,7 +1264,12 @@ class ContractStore:
             return _record_to_full(rec)
 
     def update_layers(self, programme_id: str, updates: list[ContractLayerUpdate]) -> ContractFull | None:
-        return self._edit_layers(programme_id, lambda graph, rec: apply_layer_updates(graph, updates))
+        clear_rarc = any("rarc_pct" in u.model_fields_set for u in updates)
+        return self._edit_layers(
+            programme_id,
+            lambda graph, rec: apply_layer_updates(graph, updates),
+            clear_rarc_if_empty=clear_rarc,
+        )
 
     def add_layer(self, programme_id: str, spec: ContractLayerSpec) -> ContractFull | None:
         def edit(graph: GraphSpec, rec: ContractRecord) -> GraphSpec:
@@ -1184,9 +1283,9 @@ class ContractStore:
             remove_layer_from_graph(graph, node_id, programme_id=programme_id)
             return graph
 
-        return self._edit_layers(programme_id, edit)
+        return self._edit_layers(programme_id, edit, clear_rarc_if_empty=True)
 
-    def _edit_layers(self, programme_id: str, edit) -> ContractFull | None:
+    def _edit_layers(self, programme_id: str, edit, *, clear_rarc_if_empty: bool = False) -> ContractFull | None:
         from app.engine.slice_runner import validate_dag_acyclic
 
         with get_session() as db:
@@ -1202,7 +1301,7 @@ class ContractStore:
             })
             rec.graph_json = graph.model_dump_json()
 
-            _roll_up_layers(rec, graph)
+            _roll_up_layers(rec, graph, clear_rarc_if_empty=clear_rarc_if_empty)
 
             rec.version += 1
             rec.content_hash = canonical_hash({"programme_id": rec.programme_id, "version": rec.version, "graph": graph.content_hash})
@@ -1477,6 +1576,8 @@ class ContractStore:
             src_graph = GraphSpec(**json.loads(src.graph_json))
             ensure_layer_codes(src_graph, strict=False)
             for node in src_graph.nodes:
+                if node.node_type in _LAYER_TYPES and req.rarc_total_pct is not None:
+                    node.params = {**node.params, "rarcPct": req.rarc_total_pct}
                 if node.node_type == NodeType.PRICING_OUTPUT and node.params.get("contractId") == src.programme_id:
                     updated_params = {**node.params, "contractId": new_id}
                     if isinstance(updated_params.get("linkedLabel"), str) and src_prof.unique_code:
@@ -1514,14 +1615,12 @@ class ContractStore:
                 inception_date=f"{next_year}-01-01",
                 expiry_date=f"{next_year}-12-31",
                 hours_clause=src.hours_clause,
-                authorized_line=src.authorized_line,
                 written_line=new_signed,
                 signed_line=new_signed,
                 limit=new_limit,
                 attachment=new_att,
                 deposit_premium=new_prem,
                 rol=new_rol,
-                technical_rol=src.technical_rol,
                 brokerage_pct=src.brokerage_pct,
                 fronting_fee_pct=src.fronting_fee_pct,
                 collateral_required=new_limit,

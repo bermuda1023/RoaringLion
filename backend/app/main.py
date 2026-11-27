@@ -49,7 +49,12 @@ from app.models.phase1 import (
     StaleManifestInfo,
     YeltFromNodeRequest,
 )
-from app.services.contracts import ContractStore, contract_layers, contract_to_programme_deal
+from app.services.contracts import (
+    ContractStore,
+    contract_layers,
+    contract_to_programme_deal,
+    enrich_layers_with_loss_ratio,
+)
 from app.services.graph_templates import GraphTemplate, build_graph_templates
 from app.services.lineage import LineageRegistry
 from app.services.node_outputs import node_yelt_table, resolve_pricing_links, yelt_export_bytes, yelt_summary
@@ -238,12 +243,25 @@ def update_contract(programme_id: str, patch: ContractUpdate) -> ContractFull:
     return full
 
 
+def _layers_with_loss_ratio(c: ContractFull, *, include_all_links: bool = False) -> list[ContractLayer]:
+    layers = contract_layers(c, all_contracts=CONTRACT_STORE.list_contracts() if include_all_links else None)
+    if not layers:
+        return layers
+    try:
+        dag_eval, _, _ = _evaluate_contract(c, LineageRegistry(persist=False), views=[ViewOfRisk.ADJUSTED])
+        enrich_layers_with_loss_ratio(layers, dag_eval.views.get("ADJUSTED", []), c.programme_id)
+    except Exception:
+        # Leave modelled fields None if the graph cannot be evaluated yet (e.g. missing loss source).
+        pass
+    return layers
+
+
 @app.get("/api/contracts/{programme_id}/layers", response_model=list[ContractLayer])
 def get_contract_layers(programme_id: str) -> list[ContractLayer]:
     c = CONTRACT_STORE.get_contract(programme_id)
     if not c:
         raise HTTPException(status_code=404, detail="Contract not found")
-    return contract_layers(c, all_contracts=CONTRACT_STORE.list_contracts())
+    return _layers_with_loss_ratio(c, include_all_links=True)
 
 
 @app.put("/api/contracts/{programme_id}/layers", response_model=list[ContractLayer])
@@ -257,7 +275,7 @@ def update_contract_layers(programme_id: str, payload: ContractLayersUpdateReque
     if not c:
         raise HTTPException(status_code=404, detail="Contract not found")
     _sync_memory_aliases()
-    return contract_layers(c)
+    return _layers_with_loss_ratio(c)
 
 
 @app.post("/api/contracts/{programme_id}/layers", response_model=list[ContractLayer])
@@ -269,7 +287,7 @@ def add_contract_layer(programme_id: str, spec: ContractLayerSpec) -> list[Contr
     if not c:
         raise HTTPException(status_code=404, detail="Contract not found")
     _sync_memory_aliases()
-    return contract_layers(c)
+    return _layers_with_loss_ratio(c)
 
 
 @app.delete("/api/contracts/{programme_id}/layers/{node_id}", response_model=list[ContractLayer])
@@ -283,7 +301,7 @@ def remove_contract_layer(programme_id: str, node_id: str) -> list[ContractLayer
     if not c:
         raise HTTPException(status_code=404, detail="Contract not found")
     _sync_memory_aliases()
-    return contract_layers(c)
+    return _layers_with_loss_ratio(c)
 
 
 @app.get("/api/programmes", response_model=list[ProgrammeDeal])

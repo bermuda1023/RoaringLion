@@ -34,7 +34,6 @@ def _link_from_layer(source: str, contract: ContractFull, layer: ContractLayer, 
         written_line=layer.written_line,
         signed_line=layer.signed_line,
         brokerage_pct=layer.brokerage_pct,
-        technical_rol=layer.technical_rol,
         rolls_up=rolls_up,
     )
 

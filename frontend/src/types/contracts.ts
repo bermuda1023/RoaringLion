@@ -148,8 +148,6 @@ export interface PricingEconomics {
   multiple?: number | null;
   tvar250: number;
   returnOnTvar?: number | null;
-  technicalRol?: number | null;
-  priceAdequacy?: number | null;
   warnings: string[];
 }
 

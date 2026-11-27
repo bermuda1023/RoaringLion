@@ -170,8 +170,6 @@ class PricingEconomics(CamelModel):
     multiple: float | None = None
     tvar_250: float
     return_on_tvar: float | None = None
-    technical_rol: float | None = None
-    price_adequacy: float | None = None
     warnings: list[str] = []
 
 
