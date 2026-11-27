@@ -103,6 +103,46 @@ a client-side workaround.
    hash routes, `PAGE_INFO` copy, or financial calculations to make a
    visual fix. Do not edit `backend/`, `engine/`, or generated files.
 
+## Design review: gemini-frontend-design, adapted for a dense workbench
+
+`.cursor/skills/gemini-frontend-design/SKILL.md` (Google Gemini, Apache-2.0,
+vendored verbatim with its LICENSE) is the design-review checklist for UI
+work. Apply it with these RoaringLion adaptations — the workbench wins
+where the generic skill and the dense tool disagree:
+
+- **Opening format (§2):** this is a dashboard/utility tool — it correctly
+  opens directly into live content. Never add a hero, marketing banner,
+  or decorative imagery (§3: no photos inside dense workspaces).
+- **Typography (§1):** two purposeful families — Fraunces
+  (`--font-display`) for the brand and page/card headings only, Plus
+  Jakarta Sans (`--font`) for body and all data figures with
+  `tabular-nums`. IBM Plex Mono (`--mono`) is the allowed exception for
+  code-like IDs (manifest IDs, hashes), not for prices/counts. Body steps
+  are `--fs-display/--fs-heading/--fs-body/--fs-sm/--fs-xs`; dense tables
+  may use smaller compact steps (the skill's dense-dashboard allowance).
+  Sentence case for UI labels and table headers — no tracked-out
+  uppercase micro-labels.
+- **Color (§1):** muted text must meet WCAG AA 4.5:1 on the surface it
+  sits on. `--text-faint` is `#8a8071` (4.84:1 on `--surface`) — do not
+  darken it back. One deliberate accent (amber) plus genuine semantic
+  status colors only.
+- **Clutter (§4):** no pre-heading eyebrows/kickers, no decorative
+  non-interactive chips/badges above headings or in the page header
+  (header metadata is plain typography in `.page-meta`), no decorative
+  numbering. Exceptions that stay: `.badge` status cells in tables,
+  peak/conflict pills, and the header status dot — they report real
+  polled engine health and calculation state, not fake telemetry.
+- **Motion (§3):** transitions 140–240ms, `var(--ease-out)`
+  (`cubic-bezier(0.22, 1, 0.36, 1)`), named properties only (never
+  `transition: all`), animate transform/opacity, and the global
+  `prefers-reduced-motion` block stays intact.
+- **Copy (§4):** preserve user/domain text verbatim (including em-dashes
+  in existing financial copy); the no-em-dash rule applies only to new
+  marketing-style copy, which this tool does not have.
+- **Pre-delivery (§5):** run the checklist in the skill, then visually
+  inspect desktop and 390×844 before finishing; never claim a visual
+  check you did not run.
+
 ## Workflow when invoked
 
 1. Read the target page/component, `index.css` sections it uses, and one

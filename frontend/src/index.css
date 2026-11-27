@@ -10,7 +10,9 @@
   --text: #ebe4d8;
   --text-strong: #f7f1e6;
   --text-muted: #9a9082;
-  --text-faint: #6b6358;
+  /* WCAG AA on all surfaces: #8a8071 is 4.84:1 on --surface, 5.09:1 on --bg
+     (previous #6b6358 was ~3.1:1 and failed for the small labels using it) */
+  --text-faint: #8a8071;
 
   --accent: #e8a84a;
   --accent-strong: #d4922e;
@@ -46,6 +48,14 @@
   --font: 'Plus Jakarta Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-display: 'Fraunces', 'Plus Jakarta Sans', Georgia, serif;
   --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Type scale: display/headings in Fraunces, data and body in the sans
+     (tabular-nums), mono reserved for code-like IDs (manifests, hashes).
+     Dense tables may use the compact steps below the body steps. */
+  --fs-display: 22px;
+  --fs-heading: 14.5px;
+  --fs-body: 13.5px;
+  --fs-sm: 12.5px;
+  --fs-xs: 11.5px;
   --sidebar-w: 248px;
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -66,7 +76,7 @@ body {
     var(--bg);
   background-attachment: fixed;
   color: var(--text);
-  font-size: 13.5px;
+  font-size: var(--fs-body);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   font-feature-settings: 'ss01', 'cv11';
@@ -182,7 +192,7 @@ a { color: var(--accent-soft); }
   border-color: rgba(232, 168, 74, 0.22);
 }
 .nav-item.active .nav-icon { color: var(--accent); }
-.nav-icon { width: 16px; height: 16px; flex-shrink: 0; color: var(--text-faint); transition: color 0.18s; }
+.nav-icon { width: 16px; height: 16px; flex-shrink: 0; color: var(--text-faint); transition: color 0.18s var(--ease-out); }
 
 .sidebar-footer {
   margin-top: auto;
@@ -212,15 +222,9 @@ a { color: var(--accent-soft); }
   backdrop-filter: blur(14px) saturate(1.1);
   border-bottom: 1px solid rgba(42, 36, 30, 0.85);
 }
-.page-eyebrow {
-  font-size: 12px;
-  color: var(--accent-soft);
-  letter-spacing: 0.01em;
-  font-weight: 500;
-}
 .page-title {
   font-family: var(--font-display);
-  font-size: 22px;
+  font-size: var(--fs-display);
   font-weight: 500;
   color: var(--text-strong);
   letter-spacing: -0.025em;
@@ -228,18 +232,16 @@ a { color: var(--accent-soft); }
   line-height: 1.2;
 }
 .page-subtitle { font-size: 13px; color: var(--text-muted); margin-top: 4px; max-width: 52ch; line-height: 1.45; }
-.page-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.page-meta { display: flex; align-items: center; gap: 10px 22px; flex-wrap: wrap; justify-content: flex-end; }
+/* Header metadata is plain typography, not decorative chips; the only
+   bordered/capsule shapes in the header belong to interactive controls.
+   The status dot stays: it reports the polled engine health (semantic). */
 .meta-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
-  padding: 0 11px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: rgba(27, 23, 19, 0.75);
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   white-space: nowrap;
 }
 .meta-chip strong { color: var(--text); font-weight: 600; }
@@ -280,7 +282,7 @@ a { color: var(--accent-soft); }
   flex-wrap: wrap;
   gap: 10px;
   font-weight: 600;
-  font-size: 14.5px;
+  font-size: var(--fs-heading);
   letter-spacing: -0.01em;
   color: var(--text-strong);
   margin: -2px 0 16px;
@@ -360,11 +362,13 @@ select { min-width: 0; text-overflow: ellipsis; }
   letter-spacing: -0.02em;
   margin-top: 3px;
   color: var(--text-strong);
+  /* Data figures in the sans with tabular figures; Fraunces is for
+     headings/brand only and has no tabular figures for aligned numbers. */
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-family: var(--font-display);
+  font-family: var(--font);
 }
 .kpi-sub {
   font-size: 10px;
@@ -393,8 +397,7 @@ select { min-width: 0; text-overflow: ellipsis; }
 .kpi-peak-tag {
   font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: 0.01em;
   padding: 1px 5px;
   border-radius: 4px;
   background: var(--positive-bg);
@@ -573,7 +576,7 @@ th {
 }
 thead th:first-child { border-top-left-radius: var(--radius-sm); }
 thead th:last-child { border-top-right-radius: var(--radius-sm); }
-tbody tr { transition: background 0.12s; }
+tbody tr { transition: background 0.16s var(--ease-out); }
 tbody tr:hover td { background: rgba(255, 236, 210, 0.025); }
 tbody tr:last-child td { border-bottom: none; }
 td.num, th.num { text-align: right; }
@@ -596,7 +599,7 @@ td.num, th.num { text-align: right; }
   cursor: pointer;
   white-space: nowrap;
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.22) inset, 0 6px 14px rgba(196, 114, 42, 0.28);
-  transition: filter 0.15s, transform 0.1s var(--ease-out);
+  transition: filter 0.16s var(--ease-out), transform 0.1s var(--ease-out);
   text-decoration: none;
 }
 .btn:hover { filter: brightness(1.06); }
@@ -622,7 +625,7 @@ input, select, textarea {
   font-size: 13px;
   max-width: 100%;
   outline: none;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition: border-color 0.16s var(--ease-out), box-shadow 0.16s var(--ease-out);
 }
 textarea { height: auto; line-height: 1.5; }
 input[type='checkbox'] { height: 15px; width: 15px; padding: 0; accent-color: var(--accent); }
@@ -633,6 +636,10 @@ input:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 3px rgba(232, 168, 74, 0.16);
 }
 input::placeholder, textarea::placeholder { color: var(--text-faint); }
+button:focus-visible, a:focus-visible, .tab:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 input:disabled { opacity: 0.5; }
 select { padding-right: 28px; cursor: pointer; }
 label { color: var(--text-muted); }
@@ -650,7 +657,7 @@ label { color: var(--text-muted); }
   font-size: 12.5px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: background 0.16s var(--ease-out), color 0.16s var(--ease-out), border-color 0.16s var(--ease-out);
 }
 .tab:hover { color: var(--text); background: rgba(255, 236, 210, 0.04); }
 .tab.active {
@@ -969,7 +976,7 @@ tr.row-conflict-warn > td:first-child { box-shadow: inset 3px 0 0 var(--warning)
   font-size: 12px;
   text-align: left;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, transform 0.15s var(--ease-out);
+  transition: border-color 0.16s var(--ease-out), background 0.16s var(--ease-out), transform 0.16s var(--ease-out);
 }
 .palette-item:hover {
   border-color: rgba(232, 168, 74, 0.35);
@@ -1002,8 +1009,7 @@ tr.row-conflict-warn > td:first-child { box-shadow: inset 3px 0 0 var(--warning)
 }
 .suggestion-kind {
   font-size: 9px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: 0.01em;
   color: var(--text-faint);
 }
 .suggestion-stem {
@@ -1196,8 +1202,7 @@ tr.total-row td { font-weight: 600; border-top: 1px solid var(--border-strong); 
   font-size: 10.5px;
   font-weight: 600;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.01em;
 }
 .pricing-hint {
   font-size: 10px;
@@ -1287,7 +1292,7 @@ tr.total-row td { font-weight: 600; border-top: 1px solid var(--border-strong); 
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  transition: color 0.16s var(--ease-out), border-color 0.16s var(--ease-out), background 0.16s var(--ease-out);
 }
 .icon-btn:hover:not(:disabled) { color: var(--negative); border-color: rgba(224, 112, 106, 0.5); background: var(--negative-bg); }
 .icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
@@ -1361,6 +1366,10 @@ tr.total-row td { font-weight: 600; border-top: 1px solid var(--border-strong); 
 .delta-neg { color: var(--negative) !important; }
 
 @media (prefers-reduced-motion: reduce) {
-  .main { animation: none; }
-  .brand-mark, .nav-item, .kpi, .palette-item, .btn { transition: none; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
