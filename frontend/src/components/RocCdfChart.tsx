@@ -1,4 +1,5 @@
 import * as echarts from 'echarts';
+import { chartTheme } from './chartTheme';
 import { useEffect, useRef } from 'react';
 import type { PortfolioRollupResponse } from '../types/contracts';
 
@@ -24,13 +25,13 @@ export function RocCdfChart({
         yAxis: 0,
         name: 'Break-Even (0%)',
         lineStyle: {
-          color: '#7a9e8e',
+          color: chartTheme.teal,
           type: 'dashed' as const,
           width: 1.2,
         },
         label: {
           formatter: isNarrow ? '0%' : 'Break-Even (0%)',
-          color: '#a8c4b6',
+          color: chartTheme.teal,
           fontSize: isNarrow ? 9 : 10,
         },
       },
@@ -42,7 +43,7 @@ export function RocCdfChart({
         type: 'line',
         smooth: false,
         showSymbol: false,
-        lineStyle: { color: '#e8a84a', width: 2.5 },
+        lineStyle: { color: chartTheme.brass, width: 2.5 },
         data: data.cdfCurve.map((p) => [p.cumulativeProb, p.rocPct]),
         markLine: { silent: true, symbol: 'none', data: markLines },
       },
@@ -54,7 +55,7 @@ export function RocCdfChart({
         type: 'line',
         smooth: false,
         showSymbol: false,
-        lineStyle: { color: '#6e9cd4', width: 2, type: 'dashed' },
+        lineStyle: { color: chartTheme.blue, width: 2, type: 'dashed' },
         data: comparisonData.cdfCurve.map((p) => [p.cumulativeProb, p.rocPct]),
       });
     }
@@ -63,17 +64,19 @@ export function RocCdfChart({
       backgroundColor: 'transparent',
       legend: comparisonData
         ? {
+            type: 'scroll',
             top: 0,
+            left: 0,
             right: 8,
-            textStyle: { color: '#9a9082', fontSize: 11 },
+            textStyle: { color: chartTheme.text, fontSize: 12 },
           }
         : undefined,
       tooltip: {
         trigger: 'axis',
         confine: true,
-        backgroundColor: '#1b1713',
-        borderColor: '#3a3229',
-        textStyle: { color: '#f7f1e6', fontSize: 12 },
+        backgroundColor: chartTheme.tooltipBg,
+        borderColor: chartTheme.axis,
+        textStyle: { color: chartTheme.textStrong, fontSize: 12 },
         formatter: (params: unknown) => {
           const arr = params as { seriesName: string; data: [number, number] }[];
           const first = arr?.[0]?.data;
@@ -87,7 +90,7 @@ export function RocCdfChart({
           return lines.join('<br/>');
         },
       },
-      grid: { left: isNarrow ? 50 : 55, right: isNarrow ? 34 : 30, top: comparisonData ? 34 : 28, bottom: 45 },
+      grid: { left: isNarrow ? 58 : 78, right: isNarrow ? 24 : 20, top: comparisonData ? 36 : 24, bottom: 48 },
       xAxis: {
         type: 'value',
         min: 0,
@@ -95,14 +98,17 @@ export function RocCdfChart({
         name: 'Cumulative Probability (%)',
         nameLocation: 'middle',
         nameGap: 26,
-        axisLabel: { color: '#9a9082', formatter: '{value}%' },
-        splitLine: { lineStyle: { color: '#2a241e' } },
+        axisLabel: { color: chartTheme.text, formatter: '{value}%' },
+        splitLine: { lineStyle: { color: chartTheme.grid } },
       },
       yAxis: {
         type: 'value',
         name: isNarrow ? 'ROC (%)' : 'Return on Capital (%)',
-        axisLabel: { color: '#9a9082', formatter: '{value}%' },
-        splitLine: { lineStyle: { color: '#2a241e' } },
+        nameLocation: 'middle',
+        nameGap: isNarrow ? 40 : 56,
+        nameTextStyle: { color: chartTheme.text, fontSize: 12 },
+        axisLabel: { color: chartTheme.text, formatter: '{value}%' },
+        splitLine: { lineStyle: { color: chartTheme.grid } },
       },
       series,
     });

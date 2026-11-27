@@ -79,7 +79,7 @@ export function DagCanvas({
   return (
     <div style={{ height: 360, background: 'var(--surface-sunken)', borderRadius: 6, border: '1px solid var(--border-strong)' }}>
       <ReactFlow nodes={nodes} edges={edges} fitView proOptions={{ hideAttribution: true }}>
-        <Background color="#232b3a" gap={22} />
+        <Background color="#2a4156" gap={22} />
         <Controls />
       </ReactFlow>
     </div>

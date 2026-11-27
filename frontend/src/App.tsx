@@ -164,7 +164,6 @@ export function App() {
   const staleMap = Object.fromEntries((stalenessQ.data ?? []).map((s) => [s.manifestId, s]));
 
   const page = PAGE_INFO[tab];
-  const group = NAV_GROUPS.find((g) => g.items.some((i) => i.key === tab))?.label;
   const apiUp = healthQ.isSuccess;
 
   return (
@@ -206,10 +205,9 @@ export function App() {
 
       <div className="app-main">
         <header className="page-header">
-          <div style={{ minWidth: 0 }}>
-            <div className="page-eyebrow">{group}</div>
-            <div className="page-title">{page.title}</div>
-            <div className="page-subtitle">{page.subtitle}</div>
+          <div className="page-heading">
+            <h1 className="page-title">{page.title}</h1>
+            <p className="page-subtitle">{page.subtitle}</p>
           </div>
           <div className="page-meta">
             {selectedProg && ['dag', 'burnclaims', 'deterministic'].includes(tab) && (

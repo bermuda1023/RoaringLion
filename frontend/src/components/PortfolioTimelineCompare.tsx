@@ -474,7 +474,7 @@ export function PortfolioTimelineCompareView({
         <div className="grid-2">
           <SliceBuilderCard
             title="Portfolio A (Target / Current)"
-            accentColor="#e8a84a"
+            accentColor="#e2b15a"
             slice={sliceA}
             onChange={(next) => {
               setActivePresetId('custom');
@@ -486,7 +486,7 @@ export function PortfolioTimelineCompareView({
           />
           <SliceBuilderCard
             title="Portfolio B (Baseline / Prior)"
-            accentColor="#6e9cd4"
+            accentColor="#7eb0e0"
             slice={sliceB}
             onChange={(next) => {
               setActivePresetId('custom');
@@ -528,10 +528,10 @@ export function PortfolioTimelineCompareView({
                 <thead>
                   <tr>
                     <th>Portfolio Metric</th>
-                    <th className="num" style={{ color: '#f0c57a' }}>
+                    <th className="num" style={{ color: 'var(--accent-soft)' }}>
                       A · {result.portfolioA.portfolioName}
                     </th>
-                    <th className="num" style={{ color: '#9abce6' }}>
+                    <th className="num" style={{ color: 'var(--info-soft)' }}>
                       B · {result.portfolioB.portfolioName}
                     </th>
                     <th className="num">Δ (A − B)</th>

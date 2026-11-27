@@ -1,4 +1,5 @@
 import * as echarts from 'echarts';
+import { chartTheme } from './chartTheme';
 import { useEffect, useRef } from 'react';
 import type { EpDeltaPoint, PortfolioEpPoint, PortfolioEpSlice } from '../types/contracts';
 import { fmtMoneyM } from '../utils/format';
@@ -23,7 +24,7 @@ const METRIC_LABELS: Record<EpMetricKey, string> = {
   oepTvar: 'OEP TVaR',
 };
 
-const SPLIT_PALETTE = ['#e8a84a', '#6e9cd4', '#5cad7a', '#e0706a', '#b88ce8', '#7a9e8e', '#e0a84a', '#9ab4d6'];
+const SPLIT_PALETTE = [chartTheme.brass, chartTheme.blue, chartTheme.positive, chartTheme.negative, chartTheme.violet, chartTheme.teal, chartTheme.cyan, chartTheme.slate];
 
 export function PortfolioEpChart({
   epCurve,
@@ -64,8 +65,8 @@ export function PortfolioEpChart({
           smooth: false,
           symbol: 'circle',
           symbolSize: 6,
-          lineStyle: { color: '#e0706a', width: 2, type: 'dotted' },
-          itemStyle: { color: '#e0706a' },
+          lineStyle: { color: chartTheme.negative, width: 2, type: 'dotted' },
+          itemStyle: { color: chartTheme.negative },
           data: epCurve.map((p) => p.aepTvar),
         },
         {
@@ -74,8 +75,8 @@ export function PortfolioEpChart({
           smooth: false,
           symbol: 'circle',
           symbolSize: 6,
-          lineStyle: { color: '#e8a84a', width: 2.5 },
-          itemStyle: { color: '#e8a84a' },
+          lineStyle: { color: chartTheme.brass, width: 2.5 },
+          itemStyle: { color: chartTheme.brass },
           data: epCurve.map((p) => p.aep),
         },
         {
@@ -84,8 +85,8 @@ export function PortfolioEpChart({
           smooth: false,
           symbol: 'diamond',
           symbolSize: 6,
-          lineStyle: { color: '#5cad7a', width: 2.2 },
-          itemStyle: { color: '#5cad7a' },
+          lineStyle: { color: chartTheme.positive, width: 2.2 },
+          itemStyle: { color: chartTheme.positive },
           data: epCurve.map((p) => p.oep),
         },
       );
@@ -95,8 +96,8 @@ export function PortfolioEpChart({
           type: 'line',
           smooth: false,
           symbol: 'none',
-          lineStyle: { color: '#6e9cd4', width: 1.8, type: 'dashed' },
-          itemStyle: { color: '#6e9cd4' },
+          lineStyle: { color: chartTheme.blue, width: 1.8, type: 'dashed' },
+          itemStyle: { color: chartTheme.blue },
           data: comparisonEpCurve.map((p) => p.aep),
         });
       }
@@ -110,8 +111,8 @@ export function PortfolioEpChart({
             smooth: false,
             symbol: 'circle',
             symbolSize: 6,
-            lineStyle: { color: '#e0706a', width: 2, type: 'dotted' },
-            itemStyle: { color: '#e0706a' },
+            lineStyle: { color: chartTheme.negative, width: 2, type: 'dotted' },
+            itemStyle: { color: chartTheme.negative },
             data: target.epPoints.map((p) => p.aepTvar),
           },
           {
@@ -120,8 +121,8 @@ export function PortfolioEpChart({
             smooth: false,
             symbol: 'circle',
             symbolSize: 6,
-            lineStyle: { color: '#e8a84a', width: 2.5 },
-            itemStyle: { color: '#e8a84a' },
+            lineStyle: { color: chartTheme.brass, width: 2.5 },
+            itemStyle: { color: chartTheme.brass },
             data: target.epPoints.map((p) => p.aep),
           },
           {
@@ -130,8 +131,8 @@ export function PortfolioEpChart({
             smooth: false,
             symbol: 'diamond',
             symbolSize: 6,
-            lineStyle: { color: '#5cad7a', width: 2.2 },
-            itemStyle: { color: '#5cad7a' },
+            lineStyle: { color: chartTheme.positive, width: 2.2 },
+            itemStyle: { color: chartTheme.positive },
             data: target.epPoints.map((p) => p.oep),
           },
         );
@@ -156,17 +157,19 @@ export function PortfolioEpChart({
     chart.setOption({
       backgroundColor: 'transparent',
       legend: {
-        top: 0,
-        right: 6,
         type: 'scroll',
-        textStyle: { color: '#9a9082', fontSize: 11 },
+        top: 0,
+        left: 0,
+        right: 8,
+        itemGap: 10,
+        textStyle: { color: chartTheme.text, fontSize: 12 },
       },
       tooltip: {
         trigger: 'axis',
         confine: true,
-        backgroundColor: '#1b1713',
-        borderColor: '#3a3229',
-        textStyle: { color: '#f7f1e6', fontSize: 12 },
+        backgroundColor: chartTheme.tooltipBg,
+        borderColor: chartTheme.axis,
+        textStyle: { color: chartTheme.textStrong, fontSize: 12 },
         formatter: (params: unknown) => {
           const arr = params as { seriesName: string; value: number; marker: string; axisValue: string }[];
           if (!arr?.length) return '';
@@ -177,21 +180,24 @@ export function PortfolioEpChart({
           return lines.join('<br/>');
         },
       },
-      grid: { left: isNarrow ? 52 : 60, right: 20, top: 38, bottom: 42 },
+      grid: { left: isNarrow ? 58 : 72, right: 16, top: isNarrow ? 56 : 36, bottom: 42 },
       xAxis: {
         type: 'category',
         data: rps,
         name: 'Return Period',
         nameLocation: 'middle',
         nameGap: 26,
-        axisLabel: { color: '#9a9082', fontSize: 11 },
-        axisLine: { lineStyle: { color: '#3a3229' } },
+        axisLabel: { color: chartTheme.text, fontSize: 11 },
+        axisLine: { lineStyle: { color: chartTheme.axis } },
       },
       yAxis: {
         type: 'value',
         name: dimension === 'TOTAL' || selectedSliceKey ? `Loss (${currency} M)` : `${METRIC_LABELS[metric]} (${currency} M)`,
-        axisLabel: { color: '#9a9082', formatter: currencyAxisLabel(currency) },
-        splitLine: { lineStyle: { color: '#2a241e' } },
+        nameLocation: 'middle',
+        nameGap: isNarrow ? 38 : 50,
+        nameTextStyle: { color: chartTheme.text, fontSize: 12 },
+        axisLabel: { color: chartTheme.text, formatter: currencyAxisLabel(currency) },
+        splitLine: { lineStyle: { color: chartTheme.grid } },
       },
       series,
     });
@@ -241,8 +247,8 @@ export function PortfolioCompareEpChart({
           type: 'line',
           symbol: 'circle',
           symbolSize: 6,
-          lineStyle: { color: '#e8a84a', width: 2.5 },
-          itemStyle: { color: '#e8a84a' },
+          lineStyle: { color: chartTheme.brass, width: 2.5 },
+          itemStyle: { color: chartTheme.brass },
           data: epDeltas.map((p) => p.aepA),
         },
         {
@@ -250,8 +256,8 @@ export function PortfolioCompareEpChart({
           type: 'line',
           symbol: 'circle',
           symbolSize: 5,
-          lineStyle: { color: '#6e9cd4', width: 2.2, type: 'dashed' },
-          itemStyle: { color: '#6e9cd4' },
+          lineStyle: { color: chartTheme.blue, width: 2.2, type: 'dashed' },
+          itemStyle: { color: chartTheme.blue },
           data: epDeltas.map((p) => p.aepB),
         },
         {
@@ -259,8 +265,8 @@ export function PortfolioCompareEpChart({
           type: 'line',
           symbol: 'diamond',
           symbolSize: 6,
-          lineStyle: { color: '#5cad7a', width: 2.2 },
-          itemStyle: { color: '#5cad7a' },
+          lineStyle: { color: chartTheme.positive, width: 2.2 },
+          itemStyle: { color: chartTheme.positive },
           data: epDeltas.map((p) => p.oepA),
         },
         {
@@ -268,8 +274,8 @@ export function PortfolioCompareEpChart({
           type: 'line',
           symbol: 'diamond',
           symbolSize: 5,
-          lineStyle: { color: '#b88ce8', width: 2, type: 'dashed' },
-          itemStyle: { color: '#b88ce8' },
+          lineStyle: { color: chartTheme.violet, width: 2, type: 'dashed' },
+          itemStyle: { color: chartTheme.violet },
           data: epDeltas.map((p) => p.oepB),
         },
       );
@@ -280,8 +286,8 @@ export function PortfolioCompareEpChart({
           type: 'line',
           symbol: 'circle',
           symbolSize: 6,
-          lineStyle: { color: '#e0706a', width: 2.5 },
-          itemStyle: { color: '#e0706a' },
+          lineStyle: { color: chartTheme.negative, width: 2.5 },
+          itemStyle: { color: chartTheme.negative },
           data: epDeltas.map((p) => p.aepTvarA),
         },
         {
@@ -289,8 +295,8 @@ export function PortfolioCompareEpChart({
           type: 'line',
           symbol: 'circle',
           symbolSize: 5,
-          lineStyle: { color: '#b88ce8', width: 2.2, type: 'dashed' },
-          itemStyle: { color: '#b88ce8' },
+          lineStyle: { color: chartTheme.violet, width: 2.2, type: 'dashed' },
+          itemStyle: { color: chartTheme.violet },
           data: epDeltas.map((p) => p.aepTvarB),
         },
         {
@@ -298,8 +304,8 @@ export function PortfolioCompareEpChart({
           type: 'line',
           symbol: 'diamond',
           symbolSize: 5,
-          lineStyle: { color: '#e8a84a', width: 2 },
-          itemStyle: { color: '#e8a84a' },
+          lineStyle: { color: chartTheme.brass, width: 2 },
+          itemStyle: { color: chartTheme.brass },
           data: epDeltas.map((p) => p.aepA),
         },
         {
@@ -307,8 +313,8 @@ export function PortfolioCompareEpChart({
           type: 'line',
           symbol: 'diamond',
           symbolSize: 5,
-          lineStyle: { color: '#6e9cd4', width: 2, type: 'dashed' },
-          itemStyle: { color: '#6e9cd4' },
+          lineStyle: { color: chartTheme.blue, width: 2, type: 'dashed' },
+          itemStyle: { color: chartTheme.blue },
           data: epDeltas.map((p) => p.aepB),
         },
       );
@@ -319,8 +325,8 @@ export function PortfolioCompareEpChart({
           type: 'line',
           symbol: 'circle',
           symbolSize: 6,
-          lineStyle: { color: '#e0706a', width: 2.5 },
-          itemStyle: { color: '#e0706a' },
+          lineStyle: { color: chartTheme.negative, width: 2.5 },
+          itemStyle: { color: chartTheme.negative },
           data: epDeltas.map((p) => p.oepTvarA),
         },
         {
@@ -328,8 +334,8 @@ export function PortfolioCompareEpChart({
           type: 'line',
           symbol: 'circle',
           symbolSize: 5,
-          lineStyle: { color: '#b88ce8', width: 2.2, type: 'dashed' },
-          itemStyle: { color: '#b88ce8' },
+          lineStyle: { color: chartTheme.violet, width: 2.2, type: 'dashed' },
+          itemStyle: { color: chartTheme.violet },
           data: epDeltas.map((p) => p.oepTvarB),
         },
         {
@@ -337,8 +343,8 @@ export function PortfolioCompareEpChart({
           type: 'line',
           symbol: 'diamond',
           symbolSize: 5,
-          lineStyle: { color: '#5cad7a', width: 2 },
-          itemStyle: { color: '#5cad7a' },
+          lineStyle: { color: chartTheme.positive, width: 2 },
+          itemStyle: { color: chartTheme.positive },
           data: epDeltas.map((p) => p.oepA),
         },
         {
@@ -346,8 +352,8 @@ export function PortfolioCompareEpChart({
           type: 'line',
           symbol: 'diamond',
           symbolSize: 5,
-          lineStyle: { color: '#6e9cd4', width: 2, type: 'dashed' },
-          itemStyle: { color: '#6e9cd4' },
+          lineStyle: { color: chartTheme.blue, width: 2, type: 'dashed' },
+          itemStyle: { color: chartTheme.blue },
           data: epDeltas.map((p) => p.oepB),
         },
       );
@@ -356,17 +362,19 @@ export function PortfolioCompareEpChart({
     chart.setOption({
       backgroundColor: 'transparent',
       legend: {
-        top: 0,
-        right: 6,
         type: 'scroll',
-        textStyle: { color: '#9a9082', fontSize: 11 },
+        top: 0,
+        left: 0,
+        right: 8,
+        itemGap: 10,
+        textStyle: { color: chartTheme.text, fontSize: 12 },
       },
       tooltip: {
         trigger: 'axis',
         confine: true,
-        backgroundColor: '#1b1713',
-        borderColor: '#3a3229',
-        textStyle: { color: '#f7f1e6', fontSize: 12 },
+        backgroundColor: chartTheme.tooltipBg,
+        borderColor: chartTheme.axis,
+        textStyle: { color: chartTheme.textStrong, fontSize: 12 },
         formatter: (params: unknown) => {
           const arr = params as { seriesName: string; value: number; marker: string; axisValue: string }[];
           if (!arr?.length) return '';
@@ -377,21 +385,24 @@ export function PortfolioCompareEpChart({
           return lines.join('<br/>');
         },
       },
-      grid: { left: isNarrow ? 52 : 60, right: 20, top: 38, bottom: 42 },
+      grid: { left: isNarrow ? 58 : 72, right: 16, top: isNarrow ? 56 : 36, bottom: 42 },
       xAxis: {
         type: 'category',
         data: rps,
         name: 'Return Period',
         nameLocation: 'middle',
         nameGap: 26,
-        axisLabel: { color: '#9a9082', fontSize: 11 },
-        axisLine: { lineStyle: { color: '#3a3229' } },
+        axisLabel: { color: chartTheme.text, fontSize: 11 },
+        axisLine: { lineStyle: { color: chartTheme.axis } },
       },
       yAxis: {
         type: 'value',
         name: `Loss (${currency} M)`,
-        axisLabel: { color: '#9a9082', formatter: currencyAxisLabel(currency) },
-        splitLine: { lineStyle: { color: '#2a241e' } },
+        nameLocation: 'middle',
+        nameGap: isNarrow ? 38 : 50,
+        nameTextStyle: { color: chartTheme.text, fontSize: 12 },
+        axisLabel: { color: chartTheme.text, formatter: currencyAxisLabel(currency) },
+        splitLine: { lineStyle: { color: chartTheme.grid } },
       },
       series,
     });
