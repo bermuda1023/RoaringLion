@@ -65,6 +65,7 @@ function renderTable(over: Partial<Parameters<typeof OptimizerCandidatesTable>[0
     page: page(),
     isFetching: false,
     error: null,
+    onRetry: vi.fn(),
     search: '',
     onSearch: vi.fn(),
     onPage: vi.fn(),
@@ -116,6 +117,20 @@ describe('OptimizerCandidatesTable', () => {
     expect(screen.getByText(/No deal in the selected statuses matches “nobody”/)).toBeTruthy();
     expect(screen.getByText('No programmes')).toBeTruthy();
     expect(screen.queryByText('ILW Market Hedge')).toBeNull();
+  });
+
+  it('says so when the programmes on a page have no layer of their own', () => {
+    renderTable({ page: page({ layers: [], programmeIds: ['a'], matchedProgrammes: 1, offset: 0, retroCandidate: null }) });
+    expect(screen.getByText(/have no layer that rolls up/)).toBeTruthy();
+    expect(screen.getByText(/Programmes 1–1 of 1 · 0 layers/)).toBeTruthy();
+  });
+
+  it('offers a retry instead of a loading message when the deals cannot be loaded', () => {
+    const props = renderTable({ page: undefined, error: new Error('Backend unreachable') });
+    expect(screen.getByText('Deals could not be loaded')).toBeTruthy();
+    expect(screen.queryByText('Loading deals…')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(props.onRetry).toHaveBeenCalled();
   });
 
   it('locks a layer at its current share and shows an API error', () => {

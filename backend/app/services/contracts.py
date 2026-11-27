@@ -989,7 +989,7 @@ class ContractStore:
             if order_by == "NAME":
                 q = q.order_by(ContractRecord.cedent_name, ContractRecord.programme_name, ContractRecord.programme_id)
             else:
-                q = q.order_by(ContractRecord.updated_at.desc())
+                q = q.order_by(ContractRecord.updated_at.desc(), ContractRecord.programme_id)
             if offset:
                 q = q.offset(offset)
             if limit is not None:

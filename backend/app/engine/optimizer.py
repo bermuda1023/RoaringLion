@@ -11,11 +11,11 @@ import roaring_lion_engine as rle
 from pydantic import Field, model_validator
 
 from app.engine.ilw import evaluate_ilw_trial_payouts
-from app.engine.pricing_link import extract_rollup_layers
+from app.engine.pricing_link import LAYER_NODE_TYPES, _layer_share_and_premium, extract_rollup_layers
 from app.engine.sim_generator import YeltTable
 from app.engine.slice_runner import evaluate_programme_dag
 from app.models.common import CamelModel
-from app.models.domain import BreadcrumbStep, ProgrammeDeal, RunManifest
+from app.models.domain import BreadcrumbStep, GraphNodeSpec, ProgrammeDeal, RunManifest
 from app.models.enums import ContractDirection, IlwTriggerType, NodeType, ProgrammeStatus, ViewOfRisk
 from app.models.phase1 import IlwPriceRequest
 from app.services.lineage import LineageRegistry, canonical_hash
@@ -300,6 +300,69 @@ class FrontierExplorerResponse(CamelModel):
     manifest: RunManifest
 
 
+# A layer recorded at a 0% line (usual for a declined or NTU deal) is "unplaced".
+_UNPLACED_SHARE = 1e-9
+
+
+def _is_unplaced(node: GraphNodeSpec, programme_signed_line: float) -> bool:
+    if node.node_type not in LAYER_NODE_TYPES:
+        return False
+    if node.node_type == NodeType.CASCADING_TOWER:
+        subs = node.params.get("layers") or []
+        return bool(subs) and all(float(l.get("placedShare", 1.0)) <= _UNPLACED_SHARE for l in subs)
+    return _layer_share_and_premium(node, programme_signed_line)[0] <= _UNPLACED_SHARE
+
+
+def _at_full_share(node: GraphNodeSpec) -> GraphNodeSpec:
+    params = dict(node.params)
+    if node.node_type == NodeType.CASCADING_TOWER:
+        params["layers"] = [{**l, "placedShare": 1.0} for l in params.get("layers") or []]
+    else:
+        params["placedShare"] = 1.0
+    return node.model_copy(update={"params": params})
+
+
+def _with_nodes(programme: ProgrammeDeal, nodes: list[GraphNodeSpec]) -> ProgrammeDeal:
+    return programme.model_copy(update={"graph": programme.graph.model_copy(update={"nodes": nodes})})
+
+
+def _evaluate_for_rollup(
+    programme: ProgrammeDeal, yelt: YeltTable, view: ViewOfRisk
+) -> tuple[ProgrammeDeal, dict[str, np.ndarray], dict[str, np.ndarray], set[str]]:
+    """Evaluate a programme's graph and make its unplaced layers scalable.
+
+    Losses come out of the graph at each layer's placed share, and the optimizer restates them to 100%
+    by dividing by that share. A layer at a 0% line has no loss to restate, which would leave it with
+    premium and no risk. Each such layer is therefore re-run on its own at 100% (so it cannot disturb
+    the other nodes it feeds), and its vectors, with those of a Pricing Output fed only by it, replace
+    the zero ones. Returns the programme with those layers at 100%, its annual and RIP vectors by node,
+    and the ids of the unplaced layers, whose current share stays 0.
+    """
+    _, out = evaluate_programme_dag(programme, yelt, LineageRegistry(persist=False), views=[view])
+    ann, rip = out["annual"][view.value], out["rip"][view.value]
+    unplaced = {n.node_id for n in programme.graph.nodes if _is_unplaced(n, programme.signed_line)}
+    if not unplaced:
+        return programme, ann, rip, unplaced
+
+    ann, rip = dict(ann), dict(rip)
+    sources_by_target: dict[str, list[str]] = {}
+    for e in programme.graph.edges:
+        sources_by_target.setdefault(e.target, []).append(e.source)
+    for layer_id in unplaced:
+        solo = _with_nodes(programme, [_at_full_share(n) if n.node_id == layer_id else n for n in programme.graph.nodes])
+        _, solo_out = evaluate_programme_dag(solo, yelt, LineageRegistry(persist=False), views=[view])
+        priced_by = [
+            n.node_id
+            for n in programme.graph.nodes
+            if n.node_type == NodeType.PRICING_OUTPUT and sources_by_target.get(n.node_id) == [layer_id]
+        ]
+        for node_id in (layer_id, *priced_by):
+            ann[node_id] = solo_out["annual"][view.value][node_id]
+            rip[node_id] = solo_out["rip"][view.value][node_id]
+    restated = _with_nodes(programme, [_at_full_share(n) if n.node_id in unplaced else n for n in programme.graph.nodes])
+    return restated, ann, rip, unplaced
+
+
 def _build_vectors(
     programmes: list[ProgrammeDeal],
     yelt: YeltTable,
@@ -323,17 +386,29 @@ def _build_vectors(
     link_targets = {pid: p for pid, p in link_source.items() if p.status in link_allowed}
     ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
     rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
+    rollup_progs: list[ProgrammeDeal] = []
+    unplaced_layers: set[tuple[str, str]] = set()
     for p in active_progs:
-        _, out = evaluate_programme_dag(p, yelt, LineageRegistry(persist=False), views=[req.view])
-        ann_by_prog[p.programme_id] = out["annual"][req.view.value]
-        rip_by_prog[p.programme_id] = out["rip"][req.view.value]
+        restated, ann, rip, unplaced = _evaluate_for_rollup(p, yelt, req.view)
+        rollup_progs.append(restated)
+        ann_by_prog[p.programme_id] = ann
+        rip_by_prog[p.programme_id] = rip
+        unplaced_layers.update((p.programme_id, layer_id) for layer_id in unplaced)
 
     rollup_entries = extract_rollup_layers(
-        active_progs,
+        rollup_progs,
         ann_by_prog,
         rip_by_prog,
         all_programmes=link_targets,
     )
+    for entry in rollup_entries:
+        if (entry.programme_id, entry.layer_id) in unplaced_layers:
+            # Restated at 100% above; the line actually held is still 0.
+            entry.signed_line = 0.0
+            entry.limit = 0.0
+            entry.premium = 0.0
+            entry.loss_vec = np.zeros_like(entry.loss_vec_1x)
+            entry.rip_vec = np.zeros_like(entry.rip_vec_1x)
 
     if req.granularity == "LAYER":
         for entry in rollup_entries:
@@ -368,14 +443,24 @@ def _build_vectors(
                 continue
             ann_total = np.zeros(yelt.num_trials, dtype=np.float64)
             rip_total = np.zeros(yelt.num_trials, dtype=np.float64)
-            for entry in p_entries:
-                ann_total += entry.loss_vec
-                rip_total += entry.rip_vec
-            scale = 1.0 / max(p.signed_line, 1e-6)
-            loss_1x = ann_total * scale
-            rip_1x = float(np.mean(rip_total * scale))
-            prem_1x = p.deposit_premium * scale
-            lim_1x = p.limit * scale
+            if p.signed_line <= _UNPLACED_SHARE:
+                # No line is held, so there is no current mix to scale: 100% means 100% of every layer.
+                for entry in p_entries:
+                    ann_total += entry.loss_vec_1x
+                    rip_total += entry.rip_vec_1x
+                loss_1x = ann_total
+                rip_1x = float(np.mean(rip_total))
+                prem_1x = sum(entry.prem_1x for entry in p_entries)
+                lim_1x = sum(entry.limit_1x for entry in p_entries)
+            else:
+                for entry in p_entries:
+                    ann_total += entry.loss_vec
+                    rip_total += entry.rip_vec
+                scale = 1.0 / max(p.signed_line, 1e-6)
+                loss_1x = ann_total * scale
+                rip_1x = float(np.mean(rip_total * scale))
+                prem_1x = p.deposit_premium * scale
+                lim_1x = p.limit * scale
             el_1x = float(np.mean(loss_1x))
             items.append({
                 "layer_key": p.programme_id,
@@ -900,10 +985,13 @@ def solve_portfolio_optimization(
         )
 
     compute_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    included_statuses = resolve_optimizer_statuses(req.mode, req.included_statuses)
     manifest = lineage.record_manifest(
         run_type="PORTFOLIO_OPTIMIZER",
         input_hashes={"sim_set": yelt.content_hash, "req": canonical_hash(req.model_dump())},
-        parameters=req.model_dump(),
+        # `included_statuses` is what was asked for (None = the mode's defaults); `effective_statuses` is
+        # what that meant at run time, so the record stays readable if the defaults ever change.
+        parameters={**req.model_dump(), "effective_statuses": [s.value for s in included_statuses]},
         output_payload={"status": status_str, "after_expected_profit_m": round(opt_profit, 4), "after_tvar_250_m": round(float(opt_tvar_250), 4)},
         breadcrumb=[BreadcrumbStep(entity_type="SIM_SET", entity_id=yelt.sim_set_id, label=yelt.name, content_hash=yelt.content_hash)],
     )
@@ -920,7 +1008,7 @@ def solve_portfolio_optimization(
         after_tvar_250_m=round(float(opt_tvar_250), 4),
         before_mean_roc_pct=round(base_roc, 2),
         after_mean_roc_pct=round(opt_roc, 2),
-        included_statuses=resolve_optimizer_statuses(req.mode, req.included_statuses),
+        included_statuses=included_statuses,
         deals=deal_rows,
         constraints=diags,
         manifest=manifest,
@@ -1042,7 +1130,8 @@ def explore_efficient_frontier(
             "granularity": req.granularity,
             "mode": req.mode,
             "view": req.view.value,
-            "included_statuses": [s.value for s in included_statuses],
+            "included_statuses": None if req.included_statuses is None else [s.value for s in req.included_statuses],
+            "effective_statuses": [s.value for s in included_statuses],
         },
         output_payload={
             "points": len(frontier_pts),

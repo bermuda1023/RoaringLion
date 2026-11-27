@@ -3,7 +3,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchJson, postJson } from '../api/client';
-import { PROGRAMME_STATUSES, type OptimizerCandidatesPage, type ProgrammeStatus } from '../types/contracts';
+import {
+  PROGRAMME_STATUSES,
+  type OptimizerCandidatesPage,
+  type OptimizerLayerCatalogItem,
+  type OptimizerMode,
+  type ProgrammeStatus,
+} from '../types/contracts';
 import { defaultStatusesForMode } from '../utils/optimizerStatuses';
 import { PortfolioOptimizer } from './PortfolioOptimizer';
 
@@ -42,14 +48,35 @@ function dealsIn(statuses: readonly string[]) {
   return DEALS.filter((d) => statuses.includes(d.status));
 }
 
+const HEDGE: OptimizerLayerCatalogItem = {
+  layerKey: 'cand-retro-ilw-fl',
+  programmeId: 'cand-retro-ilw-fl',
+  layerId: 'cand-retro-ilw-fl',
+  cedentName: 'ILW Market Hedge',
+  programmeName: 'Retro FL ILW',
+  layerName: 'Retro FL ILW',
+  direction: 'EXTERNAL_RETRO',
+  status: 'PLANNED',
+  regionPerils: ['US-FL-WS'],
+  currentShare: 0,
+  limit1xM: 0,
+  premium1xM: 5,
+  el1xM: 0.6,
+  expectedProfit1xM: -4.4,
+  rolPct: 20,
+  defaultMinShare: 0,
+  defaultMaxShare: 2,
+};
+
 function candidatesPage(url: string): OptimizerCandidatesPage {
   const qs = new URL(url, 'http://x').searchParams;
   const picked = qs.getAll('includedStatuses') as ProgrammeStatus[];
-  const defaults = defaultStatusesForMode('FORWARD_PLANNING');
+  const mode = qs.get('mode') as OptimizerMode;
+  const defaults = defaultStatusesForMode(mode);
   const statuses = picked.length ? picked : defaults;
   const deals = dealsIn(statuses);
   return {
-    mode: 'FORWARD_PLANNING',
+    mode,
     view: 'ADJUSTED',
     includedStatuses: statuses,
     defaultStatuses: defaults,
@@ -85,7 +112,7 @@ function candidatesPage(url: string): OptimizerCandidatesPage {
       defaultMinShare: 0,
       defaultMaxShare: 1.5,
     })),
-    retroCandidate: null,
+    retroCandidate: HEDGE,
   };
 }
 
@@ -145,9 +172,25 @@ function candidateUrls(): URLSearchParams[] {
   return fetchMock.mock.calls.map(([url]) => new URL(url, 'http://x').searchParams);
 }
 
+interface ExplorePayload {
+  includedStatuses: ProgrammeStatus[] | null;
+  mode: string;
+  layerBounds: { layerKey: string; minShare: number; maxShare: number; locked: boolean }[];
+}
+
 function lastExplorePayload() {
   const calls = postMock.mock.calls.filter(([url]) => url.startsWith('/api/optimizer/explore'));
-  return calls[calls.length - 1][1] as { includedStatuses: ProgrammeStatus[] | null; mode: string };
+  return calls[calls.length - 1][1] as ExplorePayload;
+}
+
+/** Run the explorer from the config tab and return the request it sent. */
+async function runAndGetPayload(): Promise<ExplorePayload> {
+  const before = postMock.mock.calls.length;
+  fireEvent.click(screen.getByRole('button', { name: 'Run Frontier Explorer' }));
+  await waitFor(() => expect(postMock.mock.calls.length).toBe(before + 1));
+  const payload = lastExplorePayload();
+  fireEvent.click(screen.getByRole('button', { name: '1. Optimization Config' }));
+  return payload;
 }
 
 function rowFor(cedent: string): HTMLElement {
@@ -252,5 +295,94 @@ describe('PortfolioOptimizer deal status selection', () => {
     fireEvent.click(await openConfig());
     fireEvent.click(screen.getByRole('button', { name: '2. Results Dashboard' }));
     expect(await screen.findByText(/status selection changed after this run/)).toBeTruthy();
+  });
+
+  it('selects every status with one click', async () => {
+    await openConfig();
+    fireEvent.click(screen.getByRole('button', { name: 'All statuses' }));
+    await waitFor(() => expect(candidateUrls().at(-1)?.getAll('includedStatuses')).toEqual([...PROGRAMME_STATUSES]));
+    expect((await runAndGetPayload()).includedStatuses).toEqual([...PROGRAMME_STATUSES]);
+  });
+
+  it('treats a selection equal to the new mode\'s defaults as the defaults after a mode switch', async () => {
+    await openConfig();
+    for (const status of ['SUBMISSION', 'INDICATIVE', 'AUTHORIZED', 'BOUND_FOR_OPS', 'PLANNED']) {
+      fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(`^${status}\\b`) }));
+    }
+    await waitFor(() =>
+      expect(candidateUrls().at(-1)?.getAll('includedStatuses')).toEqual(['QUOTED', 'FIRM_ORDER', 'BOUND']),
+    );
+    expect(screen.getByText(/Custom selection/)).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText(/Horizon Mode/), { target: { value: 'CURRENT' } });
+    await waitFor(() => expect(candidateUrls().at(-1)?.get('mode')).toBe('CURRENT'));
+    expect(candidateUrls().at(-1)?.getAll('includedStatuses')).toEqual([]);
+    expect(await screen.findByText(/Default for Current Portfolio Rebalance/)).toBeTruthy();
+    const payload = await runAndGetPayload();
+    expect(payload.mode).toBe('CURRENT');
+    expect(payload.includedStatuses).toBeNull();
+  });
+
+  it('keeps a custom selection that is not the new mode\'s defaults when the mode changes', async () => {
+    fireEvent.click(await openConfig());
+    fireEvent.change(screen.getByLabelText(/Horizon Mode/), { target: { value: 'CURRENT' } });
+    await waitFor(() => expect(candidateUrls().at(-1)?.get('mode')).toBe('CURRENT'));
+    expect(candidateUrls().at(-1)?.getAll('includedStatuses')).toContain('DECLINED');
+    expect((await runAndGetPayload()).includedStatuses).toContain('DECLINED');
+  });
+
+  it('sends only the bounds the user set and keeps them across pages', async () => {
+    await openConfig();
+    expect((await runAndGetPayload()).layerBounds).toEqual([]);
+
+    fireEvent.change(await screen.findByRole('spinbutton', { name: /Minimum share % for Farmers Group/ }), {
+      target: { value: '10' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(candidateUrls().at(-1)?.get('offset')).toBe('25'));
+    expect((await runAndGetPayload()).layerBounds).toEqual([
+      { layerKey: 'prog-farmers::lyr', minShare: 0.1, maxShare: 1.5, locked: false },
+    ]);
+  });
+
+  it('applies Lock All to the listed layers only, leaving a hedge hidden by a search alone', async () => {
+    await openConfig();
+    await screen.findByText('ILW Market Hedge');
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search deals' }), { target: { value: 'farm' } });
+    await waitFor(() => expect(screen.queryByText('ILW Market Hedge')).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Lock All' }));
+    const whileSearching = await runAndGetPayload();
+    expect(whileSearching.layerBounds.map((b) => b.layerKey).sort()).toEqual(['prog-farmers::lyr', 'prog-pacific::lyr']);
+    expect(whileSearching.layerBounds.every((b) => b.locked && b.minShare === 0.5 && b.maxShare === 0.5)).toBe(true);
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search deals' }), { target: { value: '' } });
+    await screen.findByText('ILW Market Hedge');
+    fireEvent.click(screen.getByRole('button', { name: 'Lock All' }));
+    const hedge = (await runAndGetPayload()).layerBounds.find((b) => b.layerKey === 'cand-retro-ilw-fl');
+    expect(hedge).toEqual({ layerKey: 'cand-retro-ilw-fl', minShare: 0, maxShare: 0, locked: true });
+
+    fireEvent.click(screen.getByRole('button', { name: '0–150% Open' }));
+    expect((await runAndGetPayload()).layerBounds).toEqual([]);
+  });
+
+  it('shows the server\'s reason when a run is rejected', async () => {
+    await openConfig();
+    postMock.mockRejectedValueOnce(new Error('No programmes match the selected deal statuses, so there is no portfolio to optimize'));
+    fireEvent.click(screen.getByRole('button', { name: 'Run Frontier Explorer' }));
+    expect(await screen.findByText(/No programmes match the selected deal statuses/)).toBeTruthy();
+  });
+
+  it('offers a retry when the deal list cannot be loaded', async () => {
+    const declined = await openConfig();
+    fetchMock.mockRejectedValue(new Error('Backend unreachable'));
+    fireEvent.click(declined);
+    expect(await screen.findByText('Backend unreachable')).toBeTruthy();
+    expect(screen.getByText('Deals could not be loaded')).toBeTruthy();
+
+    fetchMock.mockImplementation(async (url: string) => candidatesPage(url) as never);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    const row = await waitFor(() => rowFor('Zed Declined Re'));
+    expect(within(row).getByText('DECLINED')).toBeTruthy();
+    expect(screen.queryByText('Backend unreachable')).toBeNull();
   });
 });

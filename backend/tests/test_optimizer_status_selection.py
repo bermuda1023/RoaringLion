@@ -9,24 +9,34 @@ from fastapi.testclient import TestClient
 from app.engine.optimizer import (
     OptimizerRequest,
     _build_vectors,
+    _evaluate_for_rollup,
     default_optimizer_statuses,
+    list_optimizable_layers,
     resolve_optimizer_statuses,
 )
+from app.engine.slice_runner import evaluate_programme_dag
 from app.main import CONTRACT_STORE, SIM_STORE, _base_yelt, _ind_yelt, app
-from app.models.enums import ProgrammeStatus, StructureType
+from app.models.enums import ProgrammeStatus, StructureType, ViewOfRisk
 from app.services.contracts import contract_to_programme_deal
+from app.services.lineage import LineageRegistry
 
 client = TestClient(app)
 
 S = ProgrammeStatus
 CEDENT_TAG = "Statusfilter"
+# Deals made by individual tests carry another tag so the paging tests can count the fixture's deals.
+EXTRA_TAG = "Statusextra"
 
 
-def _create(name: str, status: str, **extra) -> str:
+def _create(name: str, status: str, tag: str = EXTRA_TAG, **extra) -> str:
+    return _create_full(name, status, tag, **extra)["programmeId"]
+
+
+def _create_full(name: str, status: str, tag: str = EXTRA_TAG, **extra) -> dict:
     res = client.post(
         "/api/contracts",
         json={
-            "cedentName": f"{CEDENT_TAG} {name} Re",
+            "cedentName": f"{tag} {name} Re",
             "programmeName": f"{name} Cat XL",
             "status": status,
             "limit": 20.0,
@@ -39,7 +49,11 @@ def _create(name: str, status: str, **extra) -> str:
         },
     )
     assert res.status_code == 200, res.text
-    return res.json()["programmeId"]
+    return res.json()
+
+
+def _yelts():
+    return SIM_STORE.get_yelt(_base_yelt.sim_set_id), SIM_STORE.get_yelt(_ind_yelt.sim_set_id)
 
 
 @pytest.fixture(scope="module")
@@ -47,11 +61,11 @@ def deals() -> dict[str, str]:
     """One deal per status of interest. Deals that today's defaults include are parked as DECLINED
     afterwards so they cannot leak into other test modules' default optimizer runs."""
     ids = {
-        "declined": _create("Declined", "DECLINED"),
-        "ntu": _create("Ntu", "NTU"),
-        "expired": _create("Expired", "EXPIRED"),
-        "authorized": _create("Authorized", "AUTHORIZED"),
-        "quoted": _create("Quoted", "QUOTED"),
+        "declined": _create("Declined", "DECLINED", CEDENT_TAG),
+        "ntu": _create("Ntu", "NTU", CEDENT_TAG),
+        "expired": _create("Expired", "EXPIRED", CEDENT_TAG),
+        "authorized": _create("Authorized", "AUTHORIZED", CEDENT_TAG),
+        "quoted": _create("Quoted", "QUOTED", CEDENT_TAG),
     }
     yield ids
     for key in ("authorized", "quoted"):
@@ -102,6 +116,36 @@ def test_current_mode_default_still_means_bound_quoted_and_firm_order(deals):
     assert {deals["quoted"], "prog-farmers-us-27"} <= progs
     assert not progs & {deals["authorized"], deals["declined"], deals["ntu"], deals["expired"]}
     assert body["includedStatuses"] == ["QUOTED", "FIRM_ORDER", "BOUND"]
+
+
+def test_default_selection_gives_what_the_previous_rule_gave(deals):
+    """Before statuses were selectable the routes loaded every contract, dropped ILWs and declined, NTU
+    and expired deals, and the engine narrowed CURRENT mode. Scoping in SQL must give the same layers."""
+    off_risk = {S.DECLINED, S.NTU, S.EXPIRED}
+    previous_universe = [
+        contract_to_programme_deal(c)
+        for c in CONTRACT_STORE.list_contracts()
+        if c.structure != StructureType.ILW and c.status not in off_risk
+    ]
+    yelt, ind_yelt = _yelts()
+    for mode in ("CURRENT", "FORWARD_PLANNING"):
+        expected = list_optimizable_layers(
+            programmes=previous_universe, yelt=yelt, ind_yelt=ind_yelt, view=ViewOfRisk.ADJUSTED, mode=mode
+        )
+        got = client.get(f"/api/optimizer/layers?view=ADJUSTED&mode={mode}").json()
+        assert {l["layerKey"]: l for l in got} == {l.layer_key: l.model_dump(by_alias=True, mode="json") for l in expected}
+        assert len(got) == len(expected) > 1
+
+
+def test_manifest_records_the_statuses_asked_for_and_the_ones_used(deals):
+    default = client.post("/api/optimizer/solve", json={"mode": "CURRENT"}).json()["manifest"]["parameters"]
+    assert default["included_statuses"] is None
+    assert default["effective_statuses"] == ["QUOTED", "FIRM_ORDER", "BOUND"]
+
+    explored = _explore(mode="CURRENT", includedStatuses=["NTU", "BOUND"])["manifest"]["parameters"]
+    assert explored["included_statuses"] == ["BOUND", "NTU"]
+    assert explored["effective_statuses"] == ["BOUND", "NTU"]
+    assert _explore(mode="CURRENT")["manifest"]["parameters"]["included_statuses"] is None
 
 
 # ── Any status can be selected ──
@@ -166,6 +210,70 @@ def test_selecting_a_status_does_not_change_any_deal_status(deals):
     after = {c["programmeId"]: c["status"] for c in client.get("/api/contracts").json()}
     assert after == before
     assert after[deals["declined"]] == "DECLINED"
+
+
+# ── Deals recorded at a 0% line (usual for declined and NTU deals) ──
+
+
+def test_a_deal_at_a_zero_line_keeps_its_risk_and_starts_from_zero_share():
+    """Losses are restated to 100% by dividing by the placed share. At a 0% line that used to leave a deal
+    with premium and no loss, which the optimizer would have treated as free profit."""
+    terms = {"limit": 22.0, "attachment": 41.0, "depositPremium": 3.3}
+    zero = _create("ZeroLine", "DECLINED", **terms, signedLine=0.0, writtenLine=0.0)
+    half = _create("HalfLine", "DECLINED", **terms, signedLine=0.5)
+
+    rows = client.get("/api/optimizer/layers?includedStatuses=DECLINED").json()
+    by_prog = {r["programmeId"]: r for r in rows}
+    assert by_prog[zero]["currentShare"] == 0.0 and by_prog[half]["currentShare"] == 0.5
+    assert by_prog[zero]["el1xM"] == by_prog[half]["el1xM"] > 0.1
+    for field in ("limit1xM", "premium1xM", "expectedProfit1xM", "rolPct"):
+        assert by_prog[zero][field] == by_prog[half][field]
+    assert by_prog[zero]["expectedProfit1xM"] < by_prog[zero]["premium1xM"]
+
+    body = _explore(includedStatuses=["DECLINED"], includeRetroIlwCandidate=False)
+    start = {l["programmeId"]: l for l in body["initialLayers"]}
+    assert start[zero]["optimalShare"] == 0.0 and start[zero]["optimalLimitM"] == 0.0 and start[zero]["optimalElM"] == 0.0
+    best = {l["programmeId"]: l for l in body["frontier"][body["recommendedIndex"]]["layers"]}
+    if best[zero]["optimalShare"] > 0:
+        assert best[zero]["optimalElM"] == pytest.approx(best[zero]["optimalShare"] * by_prog[zero]["el1xM"], abs=1e-3)
+
+    # Deal granularity has no current mix to scale either: 100% is 100% of the deal's layers.
+    solved = client.post(
+        "/api/optimizer/solve",
+        json={"granularity": "DEAL", "includedStatuses": ["DECLINED"], "includeRetroIlwCandidate": False},
+    ).json()
+    deal = next(d for d in solved["deals"] if d["programmeId"] == zero)
+    assert deal["currentShare"] == 0.0
+    assert deal["optimalLimitM"] == pytest.approx(deal["optimalShare"] * 22.0, abs=1e-3)
+    assert deal["optimalElM"] == pytest.approx(deal["optimalShare"] * by_prog[zero]["el1xM"], abs=1e-3)
+
+
+def test_restating_a_zero_line_layer_leaves_the_rest_of_the_programme_alone():
+    full = _create_full(
+        "MixedLines",
+        "NTU",
+        layers=[
+            {"limit": 20, "attachment": 40, "depositPremium": 3.0, "signedLine": 0.0},
+            {"limit": 20, "attachment": 60, "depositPremium": 2.0, "signedLine": 0.5},
+        ],
+    )
+    programme = contract_to_programme_deal(CONTRACT_STORE.get_contract(full["programmeId"]))
+    zero_layer, held_layer = [n.node_id for n in programme.graph.nodes if n.node_type.value == "OCC_XL"]
+    yelt, _ = _yelts()
+
+    _, plain = evaluate_programme_dag(programme, yelt, LineageRegistry(persist=False), views=[ViewOfRisk.ADJUSTED])
+    restated, ann, _, unplaced = _evaluate_for_rollup(programme, yelt, ViewOfRisk.ADJUSTED)
+
+    assert unplaced == {zero_layer}
+    assert float(plain["annual"]["ADJUSTED"][zero_layer].sum()) == 0.0
+    assert float(ann[zero_layer].mean()) > 0.1
+    assert (ann[f"px-{zero_layer}"] == ann[zero_layer]).all()
+    for node_id in (held_layer, f"px-{held_layer}", f"out-{programme.programme_id}"):
+        assert (ann[node_id] == plain["annual"]["ADJUSTED"][node_id]).all()
+    shares = {n.node_id: n.params.get("placedShare") for n in restated.graph.nodes}
+    assert shares[zero_layer] == 1.0 and shares[held_layer] == 0.5
+    # The stored programme is untouched.
+    assert CONTRACT_STORE.get_contract(full["programmeId"]).graph == programme.graph
 
 
 # ── Invalid selections ──
@@ -274,6 +382,46 @@ def test_contract_store_filters_pages_and_counts_in_sql(deals):
     assert counts[S.NTU] == sum(1 for c in everything if c.status == S.NTU)
 
 
+def test_search_escapes_wildcards_and_ignores_case_beyond_ascii():
+    accented = _create("Élan_Münchener 100% Rück", "DECLINED")
+    plain = _create("Elan Munchener 100 Ruck", "DECLINED")
+
+    def found(term: str) -> list[str]:
+        return [c.programme_id for c in CONTRACT_STORE.query_contracts(statuses=[S.DECLINED], search=term, order_by="NAME")[0]]
+
+    assert found("élan_münchener") == [accented]
+    assert found("ÉLAN_MÜNCHENER 100% RÜCK") == [accented]
+    # `_` and `%` are literal, so they do not match the plain-ASCII twin.
+    assert found("n_M") == [accented]
+    assert found("100%") == [accented]
+    assert found("100") == [plain, accented] or found("100") == [accented, plain]
+    assert found("\\") == []
+    assert _candidates(includedStatuses=["DECLINED"], search="MÜNCHENER")["programmeIds"] == [accented]
+
+
+def test_recent_order_is_deterministic_and_pages_without_gaps(deals):
+    everything, total = CONTRACT_STORE.query_contracts(statuses=[S.DECLINED, S.NTU, S.EXPIRED])
+    ids = [c.programme_id for c in everything]
+    assert total == len(ids) == len(set(ids)) >= 3
+    assert ids == [c.programme_id for c in CONTRACT_STORE.query_contracts(statuses=[S.DECLINED, S.NTU, S.EXPIRED])[0]]
+    paged: list[str] = []
+    for offset in range(0, total, 2):
+        rows, n = CONTRACT_STORE.query_contracts(statuses=[S.DECLINED, S.NTU, S.EXPIRED], limit=2, offset=offset)
+        assert n == total
+        paged += [c.programme_id for c in rows]
+    assert paged == ids
+
+
+def test_ilw_contracts_stay_out_of_the_optimizer_whatever_their_status():
+    ilw = _create("IlwStructure", "DECLINED", structure="ILW")
+    page = _candidates(includedStatuses=["DECLINED"], search=f"{EXTRA_TAG} IlwStructure")
+    assert page["programmeIds"] == [] and page["matchedProgrammes"] == 0
+    assert ilw not in _programmes(client.get("/api/optimizer/layers?includedStatuses=DECLINED").json())
+    declined = [c for c in client.get("/api/contracts?status=DECLINED").json() if c["structure"] != "ILW"]
+    counts = {c["status"]: c["programmes"] for c in _candidates()["statusCounts"]}
+    assert counts["DECLINED"] == len(declined)
+
+
 def test_legacy_layers_endpoint_accepts_the_status_selection(deals):
     default_keys = {l["programmeId"] for l in client.get("/api/optimizer/layers?mode=FORWARD_PLANNING").json()}
     assert deals["declined"] not in default_keys
@@ -307,3 +455,50 @@ def test_linked_layer_follows_the_status_selection(deals):
     assert linked_statuses(S.DECLINED, included_statuses=[S.BOUND]) == []
     assert linked_statuses(S.AUTHORIZED, included_statuses=[S.BOUND]) == []
     assert linked_statuses(S.DECLINED, included_statuses=[S.BOUND, S.DECLINED]) == ["DECLINED"]
+
+
+def test_stored_cross_status_link_resolves_as_before_by_default_and_follows_an_explicit_selection():
+    """A QUOTED programme's graph prices an AUTHORIZED contract's layer. CURRENT mode has always rolled
+    that layer up (the route now fetches the linked contract by id); an explicit selection that leaves
+    AUTHORIZED out drops it, and says it is not the default."""
+    modelled = _create_full("LinkModelled", "QUOTED")
+    priced = _create_full("LinkPriced", "AUTHORIZED", limit=30.0, depositPremium=6.0)
+    try:
+        priced_layer = next(n["nodeId"] for n in priced["graph"]["nodes"] if n["nodeType"] == "OCC_XL")
+        for n in priced["graph"]["nodes"]:
+            if n["nodeType"] == "PRICING_OUTPUT":
+                n["params"] = {"unlinked": True}
+        assert client.put(f"/api/programmes/{priced['programmeId']}/graph", json=priced["graph"]).status_code == 200
+        graph = modelled["graph"]
+        feeder = next(n["nodeId"] for n in graph["nodes"] if n["nodeType"] == "OCC_XL")
+        graph["nodes"].append({
+            "nodeId": "px-cross",
+            "nodeType": "PRICING_OUTPUT",
+            "label": "Pricing Output",
+            "params": {"contractId": priced["programmeId"], "layerNodeId": priced_layer},
+            "position": {"x": 900, "y": 260},
+        })
+        graph["edges"].append({"edgeId": "e-cross", "source": feeder, "target": "px-cross", "sign": 1, "weight": 1.0})
+        assert client.put(f"/api/programmes/{modelled['programmeId']}/graph", json=graph).status_code == 200
+        linked_key = f"{priced['programmeId']}::{priced_layer}"
+        current_defaults = ["QUOTED", "FIRM_ORDER", "BOUND"]
+
+        by_default = {l["layerKey"]: l for l in _explore(mode="CURRENT")["initialLayers"]}
+        assert by_default[linked_key]["status"] == "AUTHORIZED"
+        assert by_default[linked_key]["optimalLimitM"] == pytest.approx(30.0 * 0.5)
+
+        explicit = _explore(mode="CURRENT", includedStatuses=current_defaults)
+        assert linked_key not in {l["layerKey"] for l in explicit["initialLayers"]}
+        assert {l["status"] for l in explicit["initialLayers"] if l["direction"] == "ASSUMED"} <= set(current_defaults)
+
+        search = f"{EXTRA_TAG} LinkModelled"
+        page = _candidates(mode="CURRENT", search=search)
+        assert page["usesDefaultStatuses"] is True
+        assert linked_key in {l["layerKey"] for l in page["layers"]}
+        explicit_page = _candidates(mode="CURRENT", includedStatuses=current_defaults, search=search)
+        assert explicit_page["usesDefaultStatuses"] is False
+        assert explicit_page["includedStatuses"] == page["includedStatuses"]
+        assert linked_key not in {l["layerKey"] for l in explicit_page["layers"]}
+    finally:
+        for c in (modelled, priced):
+            assert client.put(f"/api/contracts/{c['programmeId']}", json={"status": "DECLINED"}).status_code == 200

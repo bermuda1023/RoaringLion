@@ -507,6 +507,7 @@ label { color: var(--text-muted); }
 .candidates-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
 .candidates-toolbar input[type='search'] { flex: 1 1 100%; min-width: 0; }
 .candidates-range { flex: 1 1 auto; font-size: 12px; color: var(--text-muted); }
+.candidates-error { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .bound-input { width: 64px; min-width: 64px; padding-left: 6px; padding-right: 6px; text-align: right; }
 .bound-input.raised { color: var(--negative); }
 .deal-name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-weight: 600; font-size: 12px; }

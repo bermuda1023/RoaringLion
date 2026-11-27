@@ -2,7 +2,11 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { useEffect, useMemo, useState } from 'react';
 import { fetchJson, postJson } from '../api/client';
 import { DealStatusBadge, LayerStatusBadge } from '../components/DealStatusBadge';
-import { OptimizerCandidatesTable, type LayerBoundState } from '../components/OptimizerCandidatesTable';
+import {
+  OptimizerCandidatesTable,
+  listedLayers,
+  type LayerBoundState,
+} from '../components/OptimizerCandidatesTable';
 import { OptimizerStatusFilter } from '../components/OptimizerStatusFilter';
 import {
   PROGRAMME_STATUSES,
@@ -361,8 +365,7 @@ export function PortfolioOptimizer() {
       setLayerBounds({});
       return;
     }
-    if (!candidates) return;
-    const listed = [...candidates.layers, ...(candidates.retroCandidate ? [candidates.retroCandidate] : [])];
+    const listed = listedLayers(candidates);
     setLayerBounds((prev) => {
       const next = { ...prev };
       for (const l of listed) {
@@ -471,7 +474,12 @@ export function PortfolioOptimizer() {
                     <select
                       value={mode}
                       onChange={(e) => {
-                        setMode(e.target.value as OptimizerMode);
+                        const next = e.target.value as OptimizerMode;
+                        setMode(next);
+                        // A selection that is exactly the new mode's defaults means "defaults" again.
+                        if (customStatuses && sameStatuses(customStatuses, defaultStatusesForMode(next))) {
+                          setCustomStatuses(null);
+                        }
                         setOffset(0);
                       }}
                       style={{ width: '100%', marginTop: 4 }}
@@ -850,6 +858,7 @@ export function PortfolioOptimizer() {
                 page={candidates}
                 isFetching={candidatesQ.isFetching}
                 error={candidatesQ.error}
+                onRetry={() => void candidatesQ.refetch()}
                 search={search}
                 onSearch={setSearch}
                 onPage={setOffset}

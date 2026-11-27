@@ -17,10 +17,26 @@ export function defaultLayerBound(layer: OptimizerLayerCatalogItem): LayerBoundS
   };
 }
 
+/**
+ * Rows the table lists for a page. The retro hedge candidate is a decision variable, not a deal, so a
+ * deal search leaves it out.
+ */
+export function listedLayers(page: OptimizerCandidatesPage | undefined): OptimizerLayerCatalogItem[] {
+  if (!page) return [];
+  return [...page.layers, ...(page.retroCandidate && !page.search ? [page.retroCandidate] : [])];
+}
+
+function emptyMessage(page: OptimizerCandidatesPage): string {
+  if (page.matchedProgrammes > 0) return 'The programmes on this page have no layer that rolls up into a portfolio.';
+  if (page.search) return `No deal in the selected statuses matches “${page.search}”.`;
+  return 'No deal has a selected status. Tick another status above.';
+}
+
 interface OptimizerCandidatesTableProps {
   page: OptimizerCandidatesPage | undefined;
   isFetching: boolean;
   error: Error | null;
+  onRetry: () => void;
   search: string;
   onSearch: (value: string) => void;
   onPage: (offset: number) => void;
@@ -33,15 +49,14 @@ export function OptimizerCandidatesTable({
   page,
   isFetching,
   error,
+  onRetry,
   search,
   onSearch,
   onPage,
   bounds,
   onBoundChange,
 }: OptimizerCandidatesTableProps) {
-  // The retro hedge candidate is a decision variable, not a deal, so a deal search leaves it out.
-  const hedge = page && !page.search ? page.retroCandidate : null;
-  const rows = page ? [...page.layers, ...(hedge ? [hedge] : [])] : [];
+  const rows = listedLayers(page);
   const shown = page?.programmeIds.length ?? 0;
   const matched = page?.matchedProgrammes ?? 0;
   const offset = page?.offset ?? 0;
@@ -59,7 +74,9 @@ export function OptimizerCandidatesTable({
         />
         <span className="candidates-range" aria-live="polite">
           {!page
-            ? 'Loading deals…'
+            ? error
+              ? 'Deals could not be loaded'
+              : 'Loading deals…'
             : matched === 0
               ? 'No programmes'
               : `Programmes ${fmtInt(offset + 1)}–${fmtInt(offset + shown)} of ${fmtInt(matched)} · ${fmtInt(page.layers.length)} ${page.layers.length === 1 ? 'layer' : 'layers'}`}
@@ -83,7 +100,14 @@ export function OptimizerCandidatesTable({
         </button>
       </div>
 
-      {error && <div className="error-banner">{error.message}</div>}
+      {error && (
+        <div className="error-banner candidates-error">
+          <span>{error.message}</span>
+          <button type="button" className="btn btn-ghost" onClick={onRetry}>
+            Retry
+          </button>
+        </div>
+      )}
 
       <div className="table-wrap">
         <table>
@@ -100,9 +124,7 @@ export function OptimizerCandidatesTable({
             {page && page.layers.length === 0 && (
               <tr>
                 <td colSpan={5} className="empty-cell">
-                  {page.search
-                    ? `No deal in the selected statuses matches “${page.search}”.`
-                    : 'No deal has a selected status. Tick another status above.'}
+                  {emptyMessage(page)}
                 </td>
               </tr>
             )}

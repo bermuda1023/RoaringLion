@@ -319,7 +319,8 @@ def create_extended_router(
         """One page of the deals a portfolio is built from, with their layers and per-status deal counts.
 
         Only the page's programmes are loaded and evaluated; `search` matches cedent, programme, broker
-        or programme id.
+        or programme id. Layers are worked out from the page's own graphs, so a layer that another
+        programme's graph prices is listed with that programme and can also show on its own contract's page.
         """
         chosen = included_statuses or None
         statuses = resolve_optimizer_statuses(mode, chosen)
@@ -340,7 +341,7 @@ def create_extended_router(
             view=view.value,
             included_statuses=statuses,
             default_statuses=defaults,
-            uses_default_statuses=set(statuses) == set(defaults),
+            uses_default_statuses=chosen is None,
             status_counts=[
                 OptimizerStatusCount(
                     status=s,
