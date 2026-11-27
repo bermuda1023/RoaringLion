@@ -10,6 +10,7 @@ const PATHS: Record<string, string> = {
   database: 'M12 5c4.4 0 8 1.3 8 3s-3.6 3-8 3-8-1.3-8-3 3.6-3 8-3z M4 8v8c0 1.7 3.6 3 8 3s8-1.3 8-3V8 M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3',
   cpu: 'M7 7h10v10H7z M10 3v4 M14 3v4 M10 17v4 M14 17v4 M3 10h4 M3 14h4 M17 10h4 M17 14h4',
   shield: 'M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z M9 12l2 2 4-4',
+  inbox: 'M4 13h4l2 3h4l2-3h4 M5 5h14l2 8v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6z',
 };
 
 export function NavIcon({ name }: { name: string }) {
