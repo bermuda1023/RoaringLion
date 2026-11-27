@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { api, apiUrl } from '../api/client';
 import { BreadcrumbBar } from '../components/BreadcrumbBar';
@@ -25,6 +25,11 @@ export function PortfolioReturnsView({
   const { withHedges, withoutHedges, accretion } = data;
   const active: PortfolioRollupResponse = mode === 'without' ? withoutHedges : withHedges;
   const includeHedgesForExport = mode !== 'without';
+  const deployedCapitalM = active.deployedCollateral;
+  const capitalUtilPct =
+    active.capitalUtilizationPct ?? (totalCapital > 0 ? (deployedCapitalM / totalCapital) * 100 : 0);
+  const capitalHeadroomM = active.capitalHeadroomM ?? totalCapital - deployedCapitalM;
+  const capitalExceeded = active.capitalExceeded ?? deployedCapitalM > totalCapital + 1e-6;
 
   const verdictTone = !accretion.hasHedges
     ? 'neutral'
@@ -145,9 +150,13 @@ export function PortfolioReturnsView({
               Fund Capital ($M)
               <input
                 type="number"
+                min={1}
                 value={totalCapital}
-                onChange={(e) => onChangeCapital(Number(e.target.value) || 160)}
-                style={{ width: 80, marginLeft: 6 }}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  if (Number.isFinite(val) && val > 0) onChangeCapital(val);
+                }}
+                style={{ width: 84, marginLeft: 6 }}
               />
             </label>
             <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
@@ -223,6 +232,16 @@ export function PortfolioReturnsView({
           )}
         </div>
 
+        {capitalExceeded && (
+          <div className="error-banner" role="alert" data-testid="capital-exceeded-banner">
+            <strong>Capital Constraint Violation:</strong> Auto-calculated Deployed Capital (
+            <strong>{fmtMoneyM(deployedCapitalM, 2)}</strong>, Σ (Limit − Premium) × Line) exceeds Fund Capital (
+            <strong>{fmtMoneyM(totalCapital, 2)}</strong>) by{' '}
+            <strong>{fmtMoneyM(Math.abs(capitalHeadroomM), 2)}</strong> ({fmtPct(capitalUtilPct, 1)} utilization).
+            Increase Fund Capital or reduce bound lines.
+          </div>
+        )}
+
         <div className="grid-kpi">
           <div className="kpi">
             <div className="kpi-label">Mean ROC</div>
@@ -231,6 +250,18 @@ export function PortfolioReturnsView({
           <div className="kpi">
             <div className="kpi-label">Return on 1-in-250 TVaR</div>
             <div className="kpi-val">{fmtPct(active.returnOnTvarPct ?? 0, 2)}</div>
+          </div>
+          <div className="kpi" data-testid="deployed-capital-kpi" title="Auto-calculated: sum of max(0, (Limit − Deposit Premium) × Signed Line) across assumed layers">
+            <div className="kpi-label">Deployed Capital (Auto)</div>
+            <div className="kpi-val" style={{ color: capitalExceeded ? 'var(--negative)' : 'var(--text-strong)' }}>
+              {fmtMoneyM(deployedCapitalM, 2)}
+            </div>
+            <div className="kpi-sub">
+              {fmtPct(capitalUtilPct, 1)} of {fmtMoneyM(totalCapital, 0)} ·{' '}
+              {capitalExceeded
+                ? `Over by ${fmtMoneyM(Math.abs(capitalHeadroomM), 1)}`
+                : `${fmtMoneyM(capitalHeadroomM, 1)} headroom`}
+            </div>
           </div>
           <div className="kpi">
             <div className="kpi-label">Break-Even Prob</div>
@@ -454,6 +485,7 @@ export function PortfolioReturns({
   const compQ = useQuery({
     queryKey: ['portfolio', portfolioView, totalCapital, refreshKey],
     queryFn: () => api.getPortfolioComparison(portfolioView, totalCapital),
+    placeholderData: keepPreviousData,
   });
 
   if (compQ.isError) {

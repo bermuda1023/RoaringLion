@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { fetchJson, postJson } from '../api/client';
 import { fmtMoneyM, fmtPct } from '../utils/format';
 
-export function AllocationAndBranches() {
+export function AllocationAndBranches({ totalCapital = 450 }: { totalCapital?: number }) {
   const qc = useQueryClient();
   const [allocMethod, setAllocMethod] = useState('TAIL_RELIEF_COTVAR');
   const [retroLimit, setRetroLimit] = useState(25);
@@ -15,7 +15,7 @@ export function AllocationAndBranches() {
     mutationFn: () =>
       postJson<any>('/api/allocation/gross-net', {
         view: 'ADJUSTED',
-        totalCapital: 160,
+        totalCapital,
         allocationMethod: allocMethod,
         retroIlwRegionPerils: ['US-FL-WS'],
         retroIlwTriggerBn: 40,
@@ -43,7 +43,8 @@ export function AllocationAndBranches() {
   });
 
   const diffMut = useMutation({
-    mutationFn: (branchId: string) => postJson<any>(`/api/branches/${branchId}/diff?view=ADJUSTED&totalCapital=160`),
+    mutationFn: (branchId: string) =>
+      postJson<any>(`/api/branches/${branchId}/diff?view=ADJUSTED&totalCapital=${totalCapital}`),
   });
 
   const btMut = useMutation({
@@ -61,7 +62,7 @@ export function AllocationAndBranches() {
       postJson<any>('/api/scenarios/reverse-stress', {
         name: `Reverse Stress ROC <= ${targetRoc}%`,
         targetRocPct: targetRoc,
-        totalCapital: 160,
+        totalCapital,
         seedRegionPeril: 'US-FL-WS',
         baseGroundUpM: 100,
       }),

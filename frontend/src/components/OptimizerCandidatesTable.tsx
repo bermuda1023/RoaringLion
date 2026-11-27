@@ -1,5 +1,11 @@
 import type { OptimizerCandidatesPage, OptimizerLayerCatalogItem } from '../types/contracts';
 import { fmtInt, fmtMoneyM, fmtRatioPct } from '../utils/format';
+import {
+  clampSharePct,
+  computeLayerCapital1xM,
+  normalizeLayerBound,
+  type RowConflictHighlight,
+} from '../utils/optimizerConstraints';
 import { isOffRiskStatus } from '../utils/optimizerStatuses';
 import { LayerStatusBadge } from './DealStatusBadge';
 
@@ -10,9 +16,11 @@ export interface LayerBoundState {
 }
 
 export function defaultLayerBound(layer: OptimizerLayerCatalogItem): LayerBoundState {
+  const minPct = clampSharePct(layer.defaultMinShare * 100);
+  const maxPct = Math.max(minPct, clampSharePct(Math.min(1, layer.defaultMaxShare) * 100));
   return {
-    minPct: Math.round(layer.defaultMinShare * 100),
-    maxPct: Math.round(layer.defaultMaxShare * 100),
+    minPct,
+    maxPct,
     locked: false,
   };
 }
@@ -53,6 +61,7 @@ interface OptimizerCandidatesTableProps {
   onPage: (offset: number) => void;
   bounds: Record<string, LayerBoundState>;
   onBoundChange: (layerKey: string, next: LayerBoundState) => void;
+  rowConflicts?: Record<string, RowConflictHighlight>;
 }
 
 /** The deals in the portfolio, one page of programmes at a time, with each layer's participation bounds. */
@@ -69,6 +78,7 @@ export function OptimizerCandidatesTable({
   onPage,
   bounds,
   onBoundChange,
+  rowConflicts = {},
 }: OptimizerCandidatesTableProps) {
   const rows = listedLayers(page);
   const shown = page?.programmeIds.length ?? 0;
@@ -147,17 +157,36 @@ export function OptimizerCandidatesTable({
             )}
             {rows.map((l) => {
               const b = bounds[l.layerKey] ?? defaultLayerBound(l);
-              const cur = Math.round(l.currentShare * 100);
+              const cur = clampSharePct(l.currentShare * 100);
+              const cap1x = computeLayerCapital1xM(l);
+              const conflict = rowConflicts[l.layerKey];
+              const rowClasses = [
+                isOffRiskStatus(l.status) ? 'row-off-risk' : '',
+                conflict ? (conflict.severity === 'ERROR' ? 'row-conflict-error' : 'row-conflict-warn') : '',
+              ]
+                .filter(Boolean)
+                .join(' ');
               return (
-                <tr key={l.layerKey} className={isOffRiskStatus(l.status) ? 'row-off-risk' : undefined}>
+                <tr
+                  key={l.layerKey}
+                  className={rowClasses || undefined}
+                  data-conflict={conflict ? conflict.severity : undefined}
+                  title={conflict ? conflict.reasons.join(' ') : undefined}
+                >
                   <td className="deal-cell">
                     <div className="deal-name">
                       {l.cedentName}
                       <LayerStatusBadge status={l.status} direction={l.direction} />
                     </div>
                     <div className="deal-sub">
-                      {l.layerName} · {fmtMoneyM(l.limit1xM, 0)} lim · EL {fmtMoneyM(l.el1xM, 2)}
+                      {l.layerName} · {fmtMoneyM(l.limit1xM, 0)} lim · {fmtMoneyM(cap1x, 0)} cap · EL{' '}
+                      {fmtMoneyM(l.el1xM, 2)}
                     </div>
+                    {conflict && (
+                      <div className={`conflict-pill ${conflict.severity === 'ERROR' ? 'error' : 'warning'}`} role="status">
+                        {conflict.badge}
+                      </div>
+                    )}
                   </td>
                   <td className="num">{fmtRatioPct(l.currentShare, 0)}</td>
                   <td className="num">
@@ -165,10 +194,14 @@ export function OptimizerCandidatesTable({
                       type="number"
                       aria-label={`Minimum share % for ${l.cedentName} ${l.layerName}`}
                       min={0}
-                      max={300}
+                      max={100}
+                      step="any"
                       disabled={b.locked}
                       value={b.minPct}
-                      onChange={(e) => onBoundChange(l.layerKey, { ...b, minPct: Number(e.target.value) })}
+                      onChange={(e) =>
+                        onBoundChange(l.layerKey, { ...b, minPct: clampSharePct(Number(e.target.value)) })
+                      }
+                      onBlur={() => onBoundChange(l.layerKey, normalizeLayerBound(b, 'min'))}
                       className={`bound-input${b.minPct > 0 ? ' raised' : ''}`}
                     />
                   </td>
@@ -177,10 +210,14 @@ export function OptimizerCandidatesTable({
                       type="number"
                       aria-label={`Maximum share % for ${l.cedentName} ${l.layerName}`}
                       min={0}
-                      max={300}
+                      max={100}
+                      step="any"
                       disabled={b.locked}
                       value={b.maxPct}
-                      onChange={(e) => onBoundChange(l.layerKey, { ...b, maxPct: Number(e.target.value) })}
+                      onChange={(e) =>
+                        onBoundChange(l.layerKey, { ...b, maxPct: clampSharePct(Number(e.target.value)) })
+                      }
+                      onBlur={() => onBoundChange(l.layerKey, normalizeLayerBound(b, 'max'))}
                       className="bound-input"
                     />
                   </td>

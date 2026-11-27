@@ -47,7 +47,7 @@ export const X_AXIS_OPTIONS: readonly { key: XAxisKey; label: string; shortLabel
   { key: 'tvar500M', label: '1-in-500 TVaR ($M)', shortLabel: 'TVaR 1-in-500' },
   { key: 'tvar1000M', label: '1-in-1000 TVaR ($M)', shortLabel: 'TVaR 1-in-1000' },
   { key: 'stdDevM', label: 'Loss Std Dev ($M)', shortLabel: 'Loss Std Dev' },
-  { key: 'deployedCollateralM', label: 'Deployed Collateral ($M)', shortLabel: 'Collateral' },
+  { key: 'deployedCollateralM', label: 'Deployed Capital ($M)', shortLabel: 'Deployed Cap' },
 ] as const;
 
 export const Y_AXIS_OPTIONS: readonly { key: YAxisKey; label: string; shortLabel: string }[] = [

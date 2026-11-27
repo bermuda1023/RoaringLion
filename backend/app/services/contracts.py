@@ -13,6 +13,7 @@ from sqlalchemy import func, or_
 
 from app.db.database import get_session
 from app.db.models import ContractNoteRecord, ContractRecord, SimSetRecord
+from app.engine.pricing_link import deployed_capital_m
 from app.models.domain import (
     GraphEdgeSpec,
     GraphNodeSpec,
@@ -1034,6 +1035,17 @@ def _roll_up_layers(rec: ContractRecord, graph: GraphSpec, *, clear_rarc_if_empt
     attachments = [l.attachment for l in layers if l.attachment is not None]
     if attachments:
         rec.attachment = min(attachments)
+    rec.collateral_required = round(
+        sum(
+            deployed_capital_m(
+                (l.limit or 0.0) * l.signed_line,
+                l.deposit_premium * l.signed_line,
+                is_hedge=is_hedge_direction(rec.direction),
+            )
+            for l in layers
+        ),
+        6,
+    )
     _sync_profile_rarc_from_layers(rec, layers, clear_if_empty=clear_rarc_if_empty)
 
 
@@ -1245,7 +1257,7 @@ class ContractStore:
                             rol=0.22,
                             brokerage_pct=0.10,
                             fronting_fee_pct=0.02,
-                            collateral_required=80.0,
+                            collateral_required=62.4,
                             currency=prog.currency,
                             sim_set_id=prog.sim_set_id,
                             exposure_eclipse_programme_id=ee_id,
@@ -1492,6 +1504,190 @@ class ContractStore:
                 q = q.filter(ContractRecord.structure.notin_(excluded))
             return {ProgrammeStatus(status): int(n) for status, n in q.group_by(ContractRecord.status).all()}
 
+    def summarize_optimizer_universe(
+        self,
+        *,
+        statuses: Iterable[ProgrammeStatus],
+        link_target_statuses: Iterable[ProgrammeStatus],
+        exclude_structures: Iterable[StructureType] = (StructureType.ILW,),
+    ) -> dict[str, object]:
+        """Lightweight column-only SQL summary of auto-calculated Deployed Capital and max 1x limits.
+
+        Respects selective Pricing Output rollup (including cross-contract links) and currency rules
+        without hydrating full ContractFull / UpliftSet / ProgrammeProfile objects or running YELT.
+        """
+        status_vals = [s.value for s in statuses]
+        if not status_vals:
+            return {
+                "deployed_capital_m": 0.0,
+                "max_layer_limit_1x_m": 0.0,
+                "max_layer_label": "",
+                "max_cedent_limit_1x_m": 0.0,
+                "max_cedent_name": "",
+            }
+        excluded = [s.value for s in exclude_structures]
+        layer_type_vals = {t.value for t in _LAYER_TYPES}
+
+        def _nid(n: dict) -> str:
+            return str(n.get("node_id") or n.get("nodeId") or "")
+
+        def _ntype(n: dict) -> str:
+            return str(n.get("node_type") or n.get("nodeType") or "")
+
+        def _extract_layer_nodes(graph_dict: dict) -> dict[str, dict]:
+            return {
+                _nid(n): n
+                for n in (graph_dict.get("nodes") or [])
+                if _ntype(n) in layer_type_vals
+            }
+
+        def _node_terms_1x(node: dict, fallback_limit: float, fallback_signed: float) -> tuple[float, float, float, str]:
+            ntype = _ntype(node)
+            p = node.get("params") or {}
+            if ntype == NodeType.CASCADING_TOWER.value:
+                subs = p.get("layers") or []
+                lim1x = sum(_opt_float(l.get("occLimit")) or 0.0 for l in subs) or fallback_limit
+                prem1x = sum(_opt_float(l.get("depositPremium")) or 0.0 for l in subs)
+                sub_s = _opt_float(subs[0].get("placedShare")) if subs else None
+                share = fallback_signed if sub_s is None else sub_s
+            else:
+                lim1x = fallback_limit
+                for key in ("occLimit", "aggLimit", "limit", "aggCap"):
+                    v = _opt_float(p.get(key))
+                    if v is not None:
+                        lim1x = v
+                        break
+                prem1x = _opt_float(p.get("depositPremium")) or 0.0
+                sv = _opt_float(p.get("placedShare"))
+                share = fallback_signed if sv is None else sv
+            return float(lim1x), float(prem1x), max(0.0, float(share)), str(node.get("label") or "")
+
+        with get_session() as db:
+            cols = (
+                ContractRecord.programme_id,
+                ContractRecord.cedent_name,
+                ContractRecord.direction,
+                ContractRecord.currency,
+                ContractRecord.signed_line,
+                ContractRecord.limit,
+                ContractRecord.graph_json,
+            )
+            q = db.query(*cols).filter(ContractRecord.status.in_(status_vals))
+            if excluded:
+                q = q.filter(ContractRecord.structure.notin_(excluded))
+            rows = q.all()
+
+            parsed: dict[str, tuple[str, str, str, float, float, dict]] = {}
+            linked_ids: set[str] = set()
+            for pid, ced, direction, currency, signed, limit, gjson in rows:
+                gdict = json.loads(gjson) if gjson else {}
+                parsed[pid] = (ced, direction, currency, float(signed or 0.0), float(limit or 0.0), gdict)
+                for n in gdict.get("nodes") or []:
+                    if _ntype(n) == NodeType.PRICING_OUTPUT.value:
+                        cid = str((n.get("params") or {}).get("contractId") or "").strip()
+                        if cid and cid not in parsed:
+                            linked_ids.add(cid)
+
+            target_map = dict(parsed)
+            missing_ids = linked_ids - set(target_map)
+            if missing_ids:
+                lt_vals = [s.value for s in link_target_statuses]
+                tq = db.query(*cols).filter(ContractRecord.programme_id.in_(missing_ids))
+                if lt_vals:
+                    tq = tq.filter(ContractRecord.status.in_(lt_vals))
+                if excluded:
+                    tq = tq.filter(ContractRecord.structure.notin_(excluded))
+                for pid, ced, direction, currency, signed, limit, gjson in tq.all():
+                    target_map[pid] = (
+                        ced,
+                        direction,
+                        currency,
+                        float(signed or 0.0),
+                        float(limit or 0.0),
+                        json.loads(gjson) if gjson else {},
+                    )
+
+        claimed: set[tuple[str, str]] = set()
+        legacy_pids: list[str] = []
+        rolled_layers: list[tuple[str, str, str, float, float, float]] = []  # (ced, label, currency, lim1x, prem1x, share)
+
+        for pid, (_, _, _, _, _, gdict) in parsed.items():
+            nodes = gdict.get("nodes") or []
+            explicit = any(
+                _ntype(n) == NodeType.PRICING_OUTPUT.value
+                and (str((n.get("params") or {}).get("contractId") or "").strip() or (n.get("params") or {}).get("unlinked") is True)
+                for n in nodes
+            )
+            if not explicit:
+                legacy_pids.append(pid)
+                continue
+            for n in nodes:
+                if _ntype(n) != NodeType.PRICING_OUTPUT.value:
+                    continue
+                p = n.get("params") or {}
+                cid = str(p.get("contractId") or "").strip()
+                if not cid or cid not in target_map:
+                    continue
+                t_ced, t_dir, t_cur, t_signed, t_lim, t_graph = target_map[cid]
+                t_layers = _extract_layer_nodes(t_graph)
+                if not t_layers:
+                    continue
+                wanted = str(p.get("layerNodeId") or "").strip()
+                t_node = t_layers.get(wanted) or next(iter(t_layers.values()))
+                key = (cid, _nid(t_node))
+                if key in claimed:
+                    continue
+                claimed.add(key)
+                if is_hedge_direction(t_dir):
+                    continue
+                lim1x, prem1x, share, lbl = _node_terms_1x(t_node, t_lim, t_signed)
+                rolled_layers.append((t_ced, lbl, t_cur, lim1x, prem1x, share))
+
+        for pid in legacy_pids:
+            ced, direction, cur, signed, lim, gdict = parsed[pid]
+            if is_hedge_direction(direction):
+                continue
+            for lid, node in _extract_layer_nodes(gdict).items():
+                if (pid, lid) in claimed:
+                    continue
+                lim1x, prem1x, share, lbl = _node_terms_1x(node, lim, signed)
+                rolled_layers.append((ced, lbl, cur, lim1x, prem1x, share))
+
+        # Respect currency separation: never silently mix currencies in aggregate sums
+        currencies = {cur for _, _, cur, _, _, _ in rolled_layers}
+        if len(currencies) > 1:
+            return {
+                "deployed_capital_m": 0.0,
+                "max_layer_limit_1x_m": 0.0,
+                "max_layer_label": "",
+                "max_cedent_limit_1x_m": 0.0,
+                "max_cedent_name": "",
+            }
+
+        u_deployed = 0.0
+        u_max_layer = 0.0
+        u_max_layer_label = ""
+        u_cedent_totals: dict[str, float] = {}
+        for ced, lbl, _, lim1x, prem1x, share in rolled_layers:
+            u_deployed += deployed_capital_m(lim1x * share, prem1x * share, is_hedge=False)
+            if lim1x > u_max_layer:
+                u_max_layer = lim1x
+                u_max_layer_label = f"{ced} · {lbl}"
+            u_cedent_totals[ced] = u_cedent_totals.get(ced, 0.0) + lim1x
+
+        if u_cedent_totals:
+            u_max_cedent_name, u_max_cedent = max(u_cedent_totals.items(), key=lambda kv: kv[1])
+        else:
+            u_max_cedent_name, u_max_cedent = "", 0.0
+
+        return {
+            "deployed_capital_m": round(u_deployed, 2),
+            "max_layer_limit_1x_m": round(u_max_layer, 2),
+            "max_layer_label": u_max_layer_label,
+            "max_cedent_limit_1x_m": round(u_max_cedent, 2),
+            "max_cedent_name": u_max_cedent_name,
+        }
+
     def get_contract(self, programme_id: str) -> ContractFull | None:
         with get_session() as db:
             rec = db.get(ContractRecord, programme_id)
@@ -1557,8 +1753,15 @@ class ContractStore:
             ensure_layer_codes(graph, strict=True)
             validate_pricing_links_one_to_one(prog_id, graph, all_existing)
         collateral = (
-            0.0
-            if is_hedge_direction(direction) and "collateral_required" not in payload.model_fields_set
+            round(
+                deployed_capital_m(
+                    normalized_payload.limit * normalized_payload.signed_line,
+                    normalized_payload.deposit_premium * normalized_payload.signed_line,
+                    is_hedge=is_hedge_direction(direction),
+                ),
+                6,
+            )
+            if "collateral_required" not in payload.model_fields_set
             else normalized_payload.collateral_required
         )
         chash = canonical_hash({
@@ -1618,7 +1821,6 @@ class ContractStore:
         )
         if normalized_payload.layers and normalized_payload.graph is None:
             _roll_up_layers(rec, graph)
-            rec.collateral_required = 0.0 if is_hedge_direction(direction) else (rec.limit * rec.signed_line)
         else:
             _sync_profile_rarc_from_layers(rec, _active_rollup_layers(rec, graph))
         with get_session() as db:
@@ -1680,8 +1882,18 @@ class ContractStore:
                 if not rec.portfolio_snapshot_date:
                     rec.portfolio_snapshot_date = rec.inception_date or f"{rec.treaty_year}-01-01"
 
-            if "direction" in data and "collateral_required" not in data:
-                rec.collateral_required = 0.0 if is_hedge_direction(cur_dir) else round(rec.limit * rec.signed_line, 6)
+            if (
+                any(k in data for k in ("direction", "limit", "deposit_premium", "signed_line"))
+                and "collateral_required" not in data
+            ):
+                rec.collateral_required = round(
+                    deployed_capital_m(
+                        rec.limit * rec.signed_line,
+                        rec.deposit_premium * rec.signed_line,
+                        is_hedge=is_hedge_direction(cur_dir),
+                    ),
+                    6,
+                )
 
             if rewire_needed:
                 all_contracts = [_record_to_full(r) for r in db.query(ContractRecord).all()]
@@ -1902,7 +2114,14 @@ class ContractStore:
             attachment=req.trigger_bn,
             deposit_premium=round(req.limit_m * req.rol, 4),
             rol=req.rol,
-            collateral_required=req.limit_m if req.direction == ContractDirection.ASSUMED else 0.0,
+            collateral_required=round(
+                deployed_capital_m(
+                    req.limit_m,
+                    round(req.limit_m * req.rol, 4),
+                    is_hedge=is_hedge_direction(req.direction),
+                ),
+                6,
+            ),
             currency=req.currency,
             sim_set_id=req.industry_sim_set_id,
             region_perils=req.region_perils,
@@ -2144,7 +2363,14 @@ class ContractStore:
                 rol=new_rol,
                 brokerage_pct=src.brokerage_pct,
                 fronting_fee_pct=src.fronting_fee_pct,
-                collateral_required=new_limit,
+                collateral_required=round(
+                    deployed_capital_m(
+                        new_limit * new_signed,
+                        new_prem * new_signed,
+                        is_hedge=is_hedge_direction(src.direction),
+                    ),
+                    6,
+                ),
                 currency=src.currency,
                 sim_set_id=src.sim_set_id,
                 exposure_eclipse_programme_id=src.exposure_eclipse_programme_id,

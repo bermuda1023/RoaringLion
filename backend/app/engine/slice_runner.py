@@ -23,7 +23,13 @@ from typing import Any
 import numpy as np
 import roaring_lion_engine as rle
 
-from app.engine.pricing_link import LAYER_NODE_TYPES, PricingLink, compute_pricing_economics, extract_rollup_layers
+from app.engine.pricing_link import (
+    LAYER_NODE_TYPES,
+    PricingLink,
+    compute_pricing_economics,
+    deployed_capital_m,
+    extract_rollup_layers,
+)
 from app.engine.sim_generator import RP_TO_ID, YeltTable
 from app.models.domain import (
     BreadcrumbStep,
@@ -1060,7 +1066,12 @@ def evaluate_portfolio_rollup(
     gross_premium = sum(r["premium"] for r in layer_rows_meta if not r["is_hedge"])
     hedge_premium = sum(r["premium"] for r in layer_rows_meta if r["is_hedge"])
     net_premium = gross_premium - hedge_premium
-    deployed_collateral = sum(r["limit"] for r in layer_rows_meta if not r["is_hedge"])
+    deployed_collateral = sum(
+        deployed_capital_m(r["limit"], r["premium"], is_hedge=r["is_hedge"]) for r in layer_rows_meta
+    )
+    capital_utilization_pct = (deployed_collateral / total_capital) * 100.0 if total_capital > 0 else 0.0
+    capital_headroom_m = total_capital - deployed_collateral
+    capital_exceeded = deployed_collateral > total_capital + 1e-6
     hedge_count = sum(1 for r in layer_rows_meta if r["is_hedge"])
 
     net_yield_on_capital = total_capital * 0.03
@@ -1180,6 +1191,9 @@ def evaluate_portfolio_rollup(
         hedge_count=hedge_count,
         total_capital=round(total_capital, 4),
         deployed_collateral=round(deployed_collateral, 4),
+        capital_utilization_pct=round(capital_utilization_pct, 2),
+        capital_headroom_m=round(capital_headroom_m, 4),
+        capital_exceeded=capital_exceeded,
         gross_premium=round(gross_premium, 4),
         hedge_premium=round(hedge_premium, 4),
         net_premium=round(net_premium, 4),

@@ -1635,9 +1635,6 @@ def build_synthetic_book_records(
             content_hash="",
         )
         roll_up_layers_fn(rec, graph)
-        rec.collateral_required = (
-            0.0 if is_hedge_direction(spec.direction) else round(rec.limit * rec.signed_line, 6)
-        )
         # Keep offered_line aligned with rolled-up written_line
         prof = ProgrammeProfile(**json.loads(rec.profile_json))
         prof.offered_line = rec.written_line

@@ -263,6 +263,9 @@ class PortfolioRollupResponse(CamelModel):
     hedge_count: int = 0
     total_capital: float
     deployed_collateral: float
+    capital_utilization_pct: float = 0.0
+    capital_headroom_m: float = 0.0
+    capital_exceeded: bool = False
     gross_premium: float
     hedge_premium: float = 0.0
     net_premium: float = 0.0

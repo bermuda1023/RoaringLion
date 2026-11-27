@@ -330,7 +330,18 @@ export function ContractManager({
         attachment: newDealTotals.attachment,
         depositPremium: newDealTotals.premium,
         rol: newDealTotals.limit ? newDealTotals.premium / newDealTotals.limit : 0,
-        collateralRequired: isHedge ? 0 : newDealTotals.limit,
+        collateralRequired: isHedge
+          ? 0
+          : Number(
+              newLayers
+                .reduce((sum, l) => {
+                  const lim = l.limit || 0;
+                  const prem = (lim * (l.rolPct || 0)) / 100;
+                  const share = Math.max(0, (l.signedPct || 0) / 100);
+                  return sum + Math.max(0, (lim - prem) * share);
+                }, 0)
+                .toFixed(4),
+            ),
         layers: newLayers.map((l) => ({
           layerCode: l.layerCode.trim() || undefined,
           name: l.name.trim() || undefined,

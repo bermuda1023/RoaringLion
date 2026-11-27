@@ -65,7 +65,7 @@ const HEDGE: OptimizerLayerCatalogItem = {
   expectedProfit1xM: -4.4,
   rolPct: 20,
   defaultMinShare: 0,
-  defaultMaxShare: 2,
+  defaultMaxShare: 1,
 };
 
 function candidatesPage(url: string): OptimizerCandidatesPage {
@@ -110,7 +110,7 @@ function candidatesPage(url: string): OptimizerCandidatesPage {
       expectedProfit1xM: 2,
       rolPct: 15,
       defaultMinShare: 0,
-      defaultMaxShare: 1.5,
+      defaultMaxShare: 1.0,
     })),
     retroCandidate: HEDGE,
   };
@@ -342,7 +342,7 @@ describe('PortfolioOptimizer deal status selection', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     await waitFor(() => expect(candidateUrls().at(-1)?.get('offset')).toBe('25'));
     expect((await runAndGetPayload()).layerBounds).toEqual([
-      { layerKey: 'prog-farmers::lyr', minShare: 0.1, maxShare: 1.5, locked: false },
+      { layerKey: 'prog-farmers::lyr', minShare: 0.1, maxShare: 1.0, locked: false },
     ]);
   });
 
@@ -362,7 +362,7 @@ describe('PortfolioOptimizer deal status selection', () => {
     const hedge = (await runAndGetPayload()).layerBounds.find((b) => b.layerKey === 'cand-retro-ilw-fl');
     expect(hedge).toEqual({ layerKey: 'cand-retro-ilw-fl', minShare: 0, maxShare: 0, locked: true });
 
-    fireEvent.click(screen.getByRole('button', { name: '0–150% Open' }));
+    fireEvent.click(screen.getByRole('button', { name: '0–100% Open' }));
     expect((await runAndGetPayload()).layerBounds).toEqual([]);
   });
 
@@ -593,5 +593,305 @@ describe('PortfolioOptimizer Return / Risk views and peak jump', () => {
     expect(screen.getByText(/fractional LP\/MILP/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Run Frontier Explorer' }));
     await waitFor(() => expect(lastExplorePayload().objective).toBe('MAX_RETURN_ON_TVAR_250'));
+  });
+});
+
+describe('PortfolioOptimizer capital, relative banding, 100% cap & single-cedent conflicts', () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  function renderBandingAndConflictScenario() {
+    const customLayers: OptimizerLayerCatalogItem[] = [
+      {
+        layerKey: 'prog-bound-10::lyr',
+        programmeId: 'prog-bound-10',
+        layerId: 'lyr',
+        cedentName: 'TenPct Mutual',
+        programmeName: 'Cat XL',
+        layerName: '1st Cat XL',
+        direction: 'ASSUMED',
+        status: 'BOUND',
+        regionPerils: ['US-FL-WS'],
+        currentShare: 0.1,
+        limit1xM: 50,
+        premium1xM: 10,
+        capital1xM: 40,
+        el1xM: 3,
+        expectedProfit1xM: 7,
+        rolPct: 20,
+        defaultMinShare: 0,
+        defaultMaxShare: 1.0,
+      },
+      {
+        layerKey: 'prog-bound-90::lyr',
+        programmeId: 'prog-bound-90',
+        layerId: 'lyr',
+        cedentName: 'NinetyPct Re',
+        programmeName: 'Cat XL',
+        layerName: '2nd Cat XL',
+        direction: 'ASSUMED',
+        status: 'BOUND',
+        regionPerils: ['US-CA-EQ'],
+        currentShare: 0.9,
+        limit1xM: 80,
+        premium1xM: 16,
+        capital1xM: 64,
+        el1xM: 4,
+        expectedProfit1xM: 12,
+        rolPct: 20,
+        defaultMinShare: 0,
+        defaultMaxShare: 1.0,
+      },
+      {
+        layerKey: 'prog-zero::lyr',
+        programmeId: 'prog-zero',
+        layerId: 'lyr',
+        cedentName: 'ZeroLine Prospect',
+        programmeName: 'Cat XL',
+        layerName: 'Open XL',
+        direction: 'ASSUMED',
+        status: 'QUOTED',
+        regionPerils: ['US-TX-WS'],
+        currentShare: 0,
+        limit1xM: 30,
+        premium1xM: 6,
+        capital1xM: 24,
+        el1xM: 2,
+        expectedProfit1xM: 4,
+        rolPct: 20,
+        defaultMinShare: 0,
+        defaultMaxShare: 1.0,
+      },
+    ];
+
+    const customPage: OptimizerCandidatesPage = {
+      mode: 'FORWARD_PLANNING',
+      view: 'ADJUSTED',
+      includedStatuses: defaultStatusesForMode('FORWARD_PLANNING'),
+      defaultStatuses: defaultStatusesForMode('FORWARD_PLANNING'),
+      usesDefaultStatuses: true,
+      statusCounts: PROGRAMME_STATUSES.map((status) => ({
+        status,
+        programmes: status === 'BOUND' ? 2 : status === 'QUOTED' ? 1 : 0,
+        included: defaultStatusesForMode('FORWARD_PLANNING').includes(status),
+        defaultIncluded: defaultStatusesForMode('FORWARD_PLANNING').includes(status),
+      })),
+      universeProgrammes: 3,
+      matchedProgrammes: 3,
+      search: '',
+      limit: 25,
+      offset: 0,
+      programmeIds: ['prog-bound-10', 'prog-bound-90', 'prog-zero'],
+      layers: customLayers,
+      retroCandidate: HEDGE,
+      universeDeployedCapitalM: 61.6,
+      universeMaxLayerLimit1xM: 80,
+      universeMaxLayerLabel: 'NinetyPct Re · 2nd Cat XL',
+      universeMaxCedentLimit1xM: 80,
+      universeMaxCedentName: 'NinetyPct Re',
+    };
+
+    const customResp = {
+      mode: 'FORWARD_PLANNING',
+      granularity: 'LAYER',
+      view: 'ADJUSTED',
+      includedStatuses: defaultStatusesForMode('FORWARD_PLANNING'),
+      fundCapitalM: 450,
+      computeMs: 10,
+      initialPortfolio: {
+        ...METRICS,
+        deployedCollateralM: 61.6,
+        fundCapitalM: 450,
+        capitalUtilizationPct: 13.69,
+        capitalHeadroomM: 388.4,
+        capitalExceeded: false,
+      },
+      initialLayers: customLayers.map((l) => ({
+        layerKey: l.layerKey,
+        programmeId: l.programmeId,
+        layerId: l.layerId,
+        cedentName: l.cedentName,
+        programmeName: l.programmeName,
+        layerName: l.layerName,
+        direction: l.direction,
+        status: l.status,
+        regionPerils: l.regionPerils,
+        currentShare: l.currentShare,
+        optimalShare: l.currentShare,
+        deltaShare: 0,
+        optimalLimitM: l.limit1xM * l.currentShare,
+        optimalPremiumM: l.premium1xM * l.currentShare,
+        optimalCapitalM: (l.capital1xM ?? 0) * l.currentShare,
+        optimalElM: l.el1xM * l.currentShare,
+        optimalExpectedProfitM: l.expectedProfit1xM * l.currentShare,
+        coTvar100M: 5,
+        coTvar250M: 8,
+        coTvar250Pct: 30,
+        coVar250M: 7,
+        coVar250Pct: 30,
+      })),
+      recommendedIndex: 0,
+      frontier: [
+        {
+          pointIndex: 0,
+          targetTvar250M: 115,
+          status: 'Optimal',
+          solver: 'HiGHS LP',
+          metrics: { ...METRICS, deployedCollateralM: 61.6 },
+          layers: [],
+          constraints: [],
+          returnPeriodContributions: [],
+        },
+      ],
+      conflicts: [],
+    };
+
+    fetchMock.mockImplementation(async () => customPage as never);
+    postMock.mockImplementation(async () => customResp as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <PortfolioOptimizer />
+      </QueryClientProvider>,
+    );
+  }
+
+  it('auto-calculates Deployed Capital read-only, warns when Fund Capital < Deployed Capital, and caps solver at Fund Capital', async () => {
+    renderBandingAndConflictScenario();
+    await openConfig();
+    await screen.findByText('TenPct Mutual');
+
+    // Deployed Capital is read-only (no editable Max Deployed Collateral input)
+    expect(screen.queryByLabelText(/Max Deployed Collateral/)).toBeNull();
+    const depBox = screen.getByTestId('optimizer-deployed-capital-readonly');
+    expect(depBox.textContent).toContain('$61.60m');
+    expect(screen.queryByTestId('optimizer-capital-warning')).toBeNull();
+
+    // Lower Fund Capital below Deployed Capital ($50m < $61.60m) -> shows over-deployed warning
+    const fundInput = screen.getByLabelText(/Fund Capital \(\$M\)/) as HTMLInputElement;
+    fireEvent.change(fundInput, { target: { value: '50' } });
+    expect(screen.getByTestId('optimizer-capital-warning').textContent).toContain('exceeds Fund Capital');
+
+    // Payload sends maxDeployedCollateral === totalCapital (50)
+    const payload = (await runAndGetPayload()) as ExplorePayload & {
+      totalCapital?: number;
+      maxDeployedCollateral?: number;
+    };
+    expect(payload.totalCapital).toBe(50);
+    expect(payload.maxDeployedCollateral).toBe(50);
+  });
+
+  it('applies relative ±25% auto banding on bound deals, caps max at 100%, and keeps 0%-line deals open', async () => {
+    renderBandingAndConflictScenario();
+    await openConfig();
+    await screen.findByText('TenPct Mutual');
+
+    fireEvent.click(screen.getByRole('button', { name: '±25% Band' }));
+
+    // 10% ± 25% -> 7.5% to 12.5%
+    const tenMin = screen.getByRole('spinbutton', { name: /Minimum share % for TenPct Mutual/ }) as HTMLInputElement;
+    const tenMax = screen.getByRole('spinbutton', { name: /Maximum share % for TenPct Mutual/ }) as HTMLInputElement;
+    expect(tenMin.value).toBe('7.5');
+    expect(tenMax.value).toBe('12.5');
+
+    // 90% ± 25% -> 67.5% to 100% (hard capped at 100%, never 112.5%)
+    const ninetyMin = screen.getByRole('spinbutton', { name: /Minimum share % for NinetyPct Re/ }) as HTMLInputElement;
+    const ninetyMax = screen.getByRole('spinbutton', { name: /Maximum share % for NinetyPct Re/ }) as HTMLInputElement;
+    expect(ninetyMin.value).toBe('67.5');
+    expect(ninetyMax.value).toBe('100');
+
+    // 0%-line deal stays optimizable at 0%–100%
+    const zeroMin = screen.getByRole('spinbutton', { name: /Minimum share % for ZeroLine Prospect/ }) as HTMLInputElement;
+    const zeroMax = screen.getByRole('spinbutton', { name: /Maximum share % for ZeroLine Prospect/ }) as HTMLInputElement;
+    expect(zeroMin.value).toBe('0');
+    expect(zeroMax.value).toBe('100');
+
+    // Manual input > 100% is hard-capped at 100%
+    fireEvent.change(tenMax, { target: { value: '150' } });
+    expect(tenMax.value).toBe('100');
+  });
+
+  it('detects Single Cedent Max conflicts in real time, shows conflict banner, and highlights offending rows', async () => {
+    renderBandingAndConflictScenario();
+    await openConfig();
+    await screen.findByText('NinetyPct Re');
+
+    // Add Single Cedent constraint (default $85m > largest layer max $80m -> warning highlighting NinetyPct Re)
+    fireEvent.click(screen.getByRole('button', { name: '+ Single Cedent' }));
+    const bannerWarn = screen.getByTestId('optimizer-conflict-banner');
+    expect(bannerWarn.textContent).toContain('NinetyPct Re');
+    expect(bannerWarn.textContent).toContain('$85.0m');
+    expect(rowFor('NinetyPct Re').className).toContain('row-conflict-warn');
+
+    // Now lock NinetyPct Re at 90% ($72m required) and lower Single Cedent Max to $50m -> red CONFLICT error!
+    fireEvent.click(screen.getByRole('checkbox', { name: /Lock NinetyPct Re/ }));
+    const cedCapInputs = screen.getAllByLabelText(/Max Limit \$M/) as HTMLInputElement[];
+    const cedCapInput = cedCapInputs[cedCapInputs.length - 1];
+    fireEvent.change(cedCapInput, { target: { value: '50' } });
+
+    const bannerErr = screen.getByTestId('optimizer-conflict-banner');
+    expect(bannerErr.className).toContain('error');
+    expect(bannerErr.textContent).toContain('CONFLICT');
+    expect(bannerErr.textContent).toContain('NinetyPct Re');
+    expect(bannerErr.textContent).toContain('$72.0m');
+    expect(bannerErr.textContent).toContain('$50.0m');
+
+    const offendingRow = rowFor('NinetyPct Re');
+    expect(offendingRow.className).toContain('row-conflict-error');
+    expect(within(offendingRow).getByText(/Min \$72\.0m > Cedent Max \$50\.0m/)).toBeTruthy();
+    // Non-offending TenPct Mutual (min $0m, max $50m <= $50m cap) is NOT highlighted
+    expect(rowFor('TenPct Mutual').className).not.toContain('row-conflict-error');
+
+    // Run infeasible solve returning server conflicts, then resolve the constraint and verify banner clears immediately
+    postMock.mockResolvedValueOnce({
+      mode: 'FORWARD_PLANNING',
+      granularity: 'LAYER',
+      view: 'ADJUSTED',
+      includedStatuses: defaultStatusesForMode('FORWARD_PLANNING'),
+      fundCapitalM: 450,
+      computeMs: 5,
+      initialPortfolio: { ...METRICS, deployedCollateralM: 61.6 },
+      initialLayers: [],
+      recommendedIndex: 0,
+      frontier: [{ pointIndex: 0, targetTvar250M: 115, status: 'Infeasible', solver: 'HiGHS LP', metrics: METRICS, layers: [], constraints: [], returnPeriodContributions: [] }],
+      conflicts: [
+        {
+          kind: 'SINGLE_CEDENT_MIN_EXCEEDS_CAP',
+          severity: 'ERROR',
+          cedentName: 'NinetyPct Re',
+          capLimitM: 50,
+          requiredMinLimitM: 72,
+          maxPossibleLimitM: 72,
+          excessM: 22,
+          message: 'Server conflict for NinetyPct Re',
+          offendingLayers: [
+            {
+              layerKey: 'prog-bound-90::lyr',
+              programmeId: 'prog-bound-90',
+              layerId: 'lyr',
+              cedentName: 'NinetyPct Re',
+              layerName: '2nd Cat XL',
+              minShare: 0.9,
+              maxShare: 0.9,
+              locked: true,
+              limit1xM: 80,
+              minLimitM: 72,
+              maxLimitM: 72,
+            },
+          ],
+        },
+      ],
+    } as never);
+    fireEvent.click(screen.getByRole('button', { name: 'Run Frontier Explorer' }));
+    expect(await screen.findByTestId('results-conflict-banner')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: '1. Optimization Config' }));
+    // Remove Single Cedent constraint -> stale server conflict banner and red highlight clear immediately!
+    const removeButtons = screen.getAllByRole('button', { name: 'Remove' });
+    fireEvent.click(removeButtons[removeButtons.length - 1]);
+    expect(screen.queryByTestId('optimizer-conflict-banner')).toBeNull();
+    expect(rowFor('NinetyPct Re').className).not.toContain('row-conflict-error');
   });
 });

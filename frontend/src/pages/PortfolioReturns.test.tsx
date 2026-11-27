@@ -212,4 +212,32 @@ describe('PortfolioReturnsView with-hedges vs without-hedges comparison', () => 
     expect(banner.textContent).toContain('Dilutive');
     expect(banner.textContent).toContain('-4.50 pts');
   });
+
+  it('displays auto-calculated Deployed Capital KPI and flags violation when Deployed Capital > Fund Capital', () => {
+    const cmp = makeComparison(true);
+    cmp.withHedges.deployedCollateral = 195.5;
+    cmp.withHedges.capitalUtilizationPct = 122.19;
+    cmp.withHedges.capitalHeadroomM = -35.5;
+    cmp.withHedges.capitalExceeded = true;
+
+    render(
+      <PortfolioReturnsView
+        data={cmp}
+        portfolioView="ADJUSTED"
+        onChangeView={() => {}}
+        totalCapital={160}
+        onChangeCapital={() => {}}
+      />,
+    );
+
+    const kpi = screen.getByTestId('deployed-capital-kpi');
+    expect(kpi.textContent).toContain('$195.50m');
+    expect(kpi.textContent).toContain('122.2%');
+    expect(kpi.textContent).toContain('Over by $35.5m');
+
+    const alert = screen.getByTestId('capital-exceeded-banner');
+    expect(alert.textContent).toContain('Capital Constraint Violation');
+    expect(alert.textContent).toContain('$195.50m');
+    expect(alert.textContent).toContain('$160.00m');
+  });
 });

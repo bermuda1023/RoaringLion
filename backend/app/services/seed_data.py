@@ -144,7 +144,7 @@ def _build_farmers_programme(sim_set_id: str) -> ProgrammeDeal:
         deposit_premium=19.3,
         limit=85.0,
         rol=0.2271,
-        collateral_required=85.0,
+        collateral_required=65.7,
         region_perils=["US-FL-WS", "US-TX-WS", "US-SE-WS"],
         perils=[PerilCode.WS],
     )
@@ -229,7 +229,7 @@ def _build_pacific_eq_programme(sim_set_id: str) -> ProgrammeDeal:
         deposit_premium=7.2,
         limit=45.0,
         rol=0.16,
-        collateral_required=45.0,
+        collateral_required=37.8,
         region_perils=["US-CA-EQ", "JP-KANTO-EQ"],
         perils=[PerilCode.EQ],
     )
@@ -298,7 +298,7 @@ def _build_eurowind_programme(sim_set_id: str) -> ProgrammeDeal:
         deposit_premium=4.9,
         limit=30.0,
         rol=0.1633,
-        collateral_required=30.0,
+        collateral_required=25.1,
         region_perils=["EU-DE-WS"],
         perils=[PerilCode.WS],
     )

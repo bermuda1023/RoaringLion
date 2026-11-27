@@ -221,6 +221,9 @@ export interface PortfolioRollupResponse {
   hedgeCount?: number;
   totalCapital: number;
   deployedCollateral: number;
+  capitalUtilizationPct?: number;
+  capitalHeadroomM?: number;
+  capitalExceeded?: boolean;
   grossPremium: number;
   hedgePremium?: number;
   netPremium?: number;
@@ -430,6 +433,7 @@ export interface OptimizerLayerCatalogItem {
   currentShare: number;
   limit1xM: number;
   premium1xM: number;
+  capital1xM?: number;
   el1xM: number;
   expectedProfit1xM: number;
   rolPct: number;
@@ -460,4 +464,44 @@ export interface OptimizerCandidatesPage {
   programmeIds: string[];
   layers: OptimizerLayerCatalogItem[];
   retroCandidate: OptimizerLayerCatalogItem | null;
+  universeDeployedCapitalM?: number;
+  universeMaxLayerLimit1xM?: number;
+  universeMaxLayerLabel?: string;
+  universeMaxCedentLimit1xM?: number;
+  universeMaxCedentName?: string;
+}
+
+export interface ConflictLayerDetail {
+  layerKey: string;
+  programmeId: string;
+  layerId: string;
+  cedentName: string;
+  layerName: string;
+  minShare: number;
+  maxShare: number;
+  locked: boolean;
+  limit1xM: number;
+  minLimitM: number;
+  maxLimitM: number;
+  capital1xM?: number;
+  minCapitalM?: number;
+}
+
+export type ConstraintConflictKind =
+  | 'SINGLE_CEDENT_MIN_EXCEEDS_CAP'
+  | 'SINGLE_CEDENT_MILP_BLOCKS_LAYER'
+  | 'SINGLE_CEDENT_CLIPS_LAYER_MAX'
+  | 'SINGLE_CEDENT_CAP_EXCEEDS_LARGEST_MAX'
+  | 'FUND_CAPITAL_MIN_EXCEEDS_CAP';
+
+export interface ConstraintConflict {
+  kind: ConstraintConflictKind;
+  severity: 'ERROR' | 'WARNING';
+  cedentName?: string | null;
+  capLimitM: number;
+  requiredMinLimitM: number;
+  maxPossibleLimitM: number;
+  excessM: number;
+  message: string;
+  offendingLayers: ConflictLayerDetail[];
 }
