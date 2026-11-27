@@ -21,6 +21,13 @@ REGION_PERILS: list[str] = [
     "US-CA-EQ",
     "JP-KANTO-EQ",
     "EU-DE-WS",
+    "US-NE-WS",
+    "US-PNW-EQ",
+    "US-MW-CS",
+    "US-CA-WF",
+    "JP-TY-WS",
+    "AU-QLD-WS",
+    "GL-CY-CY",
 ]
 
 RP_TO_ID: dict[str, int] = {k: i for i, k in enumerate(REGION_PERILS)}
@@ -52,6 +59,7 @@ def generate_synthetic_sim_set(
     rng = np.random.default_rng(seed)
 
     # Per region-peril: (annual_freq, pareto_alpha, scale_m, peak_day_mean, peak_day_sd)
+    # Keep the first 6 in exact order so existing golden/parity RNG draws remain invariant.
     specs = [
         ("US-FL-WS", 0.55, 1.95, 22.0, 255, 28),
         ("US-TX-WS", 0.35, 2.05, 16.0, 245, 30),
@@ -59,6 +67,13 @@ def generate_synthetic_sim_set(
         ("US-CA-EQ", 0.18, 1.85, 26.0, 180, 100),
         ("JP-KANTO-EQ", 0.22, 1.90, 20.0, 180, 100),
         ("EU-DE-WS", 0.65, 2.35, 10.0, 35, 40),
+        ("US-NE-WS", 0.26, 2.10, 15.0, 265, 30),
+        ("US-PNW-EQ", 0.12, 1.85, 21.0, 180, 100),
+        ("US-MW-CS", 0.75, 2.45, 9.0, 145, 42),
+        ("US-CA-WF", 0.38, 2.20, 11.5, 280, 32),
+        ("JP-TY-WS", 0.42, 2.15, 13.0, 250, 28),
+        ("AU-QLD-WS", 0.30, 2.25, 11.0, 45, 45),
+        ("GL-CY-CY", 0.22, 2.05, 14.5, 180, 105),
     ]
 
     t_parts: list[np.ndarray] = []
@@ -90,6 +105,7 @@ def generate_synthetic_sim_set(
     day_of_year = np.concatenate(d_parts)
     rp_ids = np.concatenate(r_parts)
     losses = np.concatenate(l_parts)
+    del t_parts, e_parts, d_parts, r_parts, l_parts
 
     # Chronological sort within each trial_id: lexsort uses last key as primary
     order = np.lexsort((event_ids, day_of_year, trial_ids))
@@ -98,6 +114,7 @@ def generate_synthetic_sim_set(
     day_of_year = np.ascontiguousarray(day_of_year[order], dtype=np.uint16)
     rp_ids = np.ascontiguousarray(rp_ids[order], dtype=np.int32)
     losses = np.ascontiguousarray(losses[order], dtype=np.float64)
+    del order
 
     chash = canonical_hash({
         "sim_set_id": sim_set_id,

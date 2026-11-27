@@ -7,3 +7,7 @@ services:
     envVars:
       - key: ROARING_LION_DATA_DIR
         value: /tmp/roaring_lion_data
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+      - key: RAYON_NUM_THREADS
+        value: "2"

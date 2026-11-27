@@ -67,6 +67,11 @@ class RollupLayerEntry:
     is_hedge: bool = False
     pricing_node_id: str | None = None
     feeder_node_id: str | None = None
+    expected_rip: float = 0.0
+    expected_rip_1x: float = 0.0
+
+
+_EMPTY_F64 = np.empty(0, dtype=np.float64)
 
 
 def _safe_float(raw: Any, default: float) -> float:
@@ -264,6 +269,10 @@ def extract_rollup_layers(
     rip_by_prog: dict[str, dict[str, np.ndarray]],
     *,
     all_programmes: dict[str, Any] | None = None,
+    include_1x: bool = True,
+    include_placed: bool = True,
+    include_rip_vecs: bool = True,
+    consume_maps: bool = False,
 ) -> list[RollupLayerEntry]:
     """Select the layers that roll up into portfolio / optimizer / retro allocation.
 
@@ -290,8 +299,8 @@ def extract_rollup_layers(
             legacy_progs.append(prog)
             continue
         nodes_by_id = {n.node_id: n for n in prog.graph.nodes}
-        ann_map = ann_by_prog[prog.programme_id]
-        rip_map = rip_by_prog[prog.programme_id]
+        ann_map = ann_by_prog.pop(prog.programme_id) if consume_maps else ann_by_prog[prog.programme_id]
+        rip_map = rip_by_prog.pop(prog.programme_id) if consume_maps else rip_by_prog[prog.programme_id]
 
         for px in prog.graph.nodes:
             if px.node_type != NodeType.PRICING_OUTPUT:
@@ -321,8 +330,10 @@ def extract_rollup_layers(
             raw_rip = rip_map[px.node_id]
 
             if not in_edges:
-                loss_1x = np.zeros_like(raw_ann)
-                rip_1x = np.zeros_like(raw_rip)
+                inv_up = 0.0
+                rip_mult = 1.0
+                loss_scale_placed = 0.0
+                rip_scale_placed = 0.0
             else:
                 upstream_share = 1.0
                 upstream_premium: float | None = None
@@ -333,8 +344,43 @@ def extract_rollup_layers(
                     upstream_share = share * e.sign * e.weight
                 inv_up = (1.0 / upstream_share) if upstream_share > 1e-12 else 0.0
                 rip_mult = (target_prem_1x / upstream_premium) if (upstream_premium and upstream_premium > 0) else 1.0
-                loss_1x = raw_ann * inv_up
-                rip_1x = raw_rip * inv_up * rip_mult
+                loss_scale_placed = inv_up * target_signed
+                rip_scale_placed = inv_up * rip_mult * target_signed
+
+            mean_raw_rip = float(np.mean(raw_rip)) if len(raw_rip) else 0.0
+            exp_rip_1x = mean_raw_rip * inv_up * rip_mult
+            exp_rip_placed = exp_rip_1x * target_signed
+
+            if include_1x:
+                loss_1x = raw_ann if abs(inv_up - 1.0) < 1e-12 else (np.zeros_like(raw_ann) if inv_up == 0.0 else raw_ann * inv_up)
+                rip_1x = (
+                    (raw_rip if abs(inv_up * rip_mult - 1.0) < 1e-12 else (np.zeros_like(raw_rip) if inv_up == 0.0 else raw_rip * (inv_up * rip_mult)))
+                    if include_rip_vecs
+                    else _EMPTY_F64
+                )
+            else:
+                loss_1x = _EMPTY_F64
+                rip_1x = _EMPTY_F64
+
+            if include_placed:
+                if abs(loss_scale_placed - 1.0) < 1e-12:
+                    loss_placed = raw_ann
+                elif loss_scale_placed == 0.0:
+                    loss_placed = np.zeros_like(raw_ann)
+                else:
+                    loss_placed = raw_ann * loss_scale_placed
+                if include_rip_vecs:
+                    if abs(rip_scale_placed - 1.0) < 1e-12:
+                        rip_placed = raw_rip
+                    elif rip_scale_placed == 0.0:
+                        rip_placed = np.zeros_like(raw_rip)
+                    else:
+                        rip_placed = raw_rip * rip_scale_placed
+                else:
+                    rip_placed = _EMPTY_F64
+            else:
+                loss_placed = _EMPTY_F64
+                rip_placed = _EMPTY_F64
 
             target_dir = getattr(target_prog, "direction", ContractDirection.ASSUMED)
             target_dir_val = target_dir.value if hasattr(target_dir, "value") else str(target_dir)
@@ -354,21 +400,23 @@ def extract_rollup_layers(
                     prem_1x=target_prem_1x,
                     limit=target_limit_1x * target_signed,
                     premium=target_prem_1x * target_signed,
-                    loss_vec=loss_1x * target_signed,
-                    rip_vec=rip_1x * target_signed,
+                    loss_vec=loss_placed,
+                    rip_vec=rip_placed,
                     loss_vec_1x=loss_1x,
                     rip_vec_1x=rip_1x,
                     direction=target_dir_val,
                     is_hedge=target_is_hedge,
                     pricing_node_id=px.node_id,
                     feeder_node_id=feeder_id,
+                    expected_rip=exp_rip_placed,
+                    expected_rip_1x=exp_rip_1x,
                 )
             )
 
     # Pass 2: legacy fallback for graphs with no configured Pricing Output links
     for prog in legacy_progs:
-        ann_map = ann_by_prog[prog.programme_id]
-        rip_map = rip_by_prog[prog.programme_id]
+        ann_map = ann_by_prog.pop(prog.programme_id) if consume_maps else ann_by_prog[prog.programme_id]
+        rip_map = rip_by_prog.pop(prog.programme_id) if consume_maps else rip_by_prog[prog.programme_id]
         prog_dir = getattr(prog, "direction", ContractDirection.ASSUMED)
         prog_dir_val = prog_dir.value if hasattr(prog_dir, "value") else str(prog_dir)
         prog_is_hedge = is_hedge_direction(prog_dir)
@@ -380,8 +428,22 @@ def extract_rollup_layers(
             placed, prem_1x = _layer_share_and_premium(node, prog.signed_line)
             lim_1x = _layer_limit_1x(node, prog.limit)
             inv_placed = 1.0 / max(placed, 1e-6)
-            loss_vec = ann_map[node.node_id]
-            rip_vec = rip_map[node.node_id]
+            raw_loss = ann_map[node.node_id]
+            raw_rip = rip_map[node.node_id]
+            exp_rip_placed = float(np.mean(raw_rip)) if len(raw_rip) else 0.0
+            exp_rip_1x = exp_rip_placed * inv_placed
+            loss_placed = raw_loss if include_placed else _EMPTY_F64
+            rip_placed = raw_rip if (include_placed and include_rip_vecs) else _EMPTY_F64
+            if include_1x:
+                loss_1x = raw_loss if abs(inv_placed - 1.0) < 1e-12 else raw_loss * inv_placed
+                rip_1x = (
+                    (raw_rip if abs(inv_placed - 1.0) < 1e-12 else raw_rip * inv_placed)
+                    if include_rip_vecs
+                    else _EMPTY_F64
+                )
+            else:
+                loss_1x = _EMPTY_F64
+                rip_1x = _EMPTY_F64
             entries.append(
                 RollupLayerEntry(
                     programme_id=prog.programme_id,
@@ -397,14 +459,16 @@ def extract_rollup_layers(
                     prem_1x=prem_1x,
                     limit=lim_1x * placed,
                     premium=prem_1x * placed,
-                    loss_vec=loss_vec,
-                    rip_vec=rip_vec,
-                    loss_vec_1x=loss_vec * inv_placed,
-                    rip_vec_1x=rip_vec * inv_placed,
+                    loss_vec=loss_placed,
+                    rip_vec=rip_placed,
+                    loss_vec_1x=loss_1x,
+                    rip_vec_1x=rip_1x,
                     direction=prog_dir_val,
                     is_hedge=prog_is_hedge,
                     pricing_node_id=None,
                     feeder_node_id=node.node_id,
+                    expected_rip=exp_rip_placed,
+                    expected_rip_1x=exp_rip_1x,
                 )
             )
 

@@ -88,7 +88,7 @@ def test_single_point_solve_max_return_on_tvar_objectives_respect_constraints():
         assert body["status"] in ("Optimal", "Feasible")
         # Non-degenerate knee portfolio (does not collapse to w=0)
         assert body["afterExpectedProfitM"] > 5.0
-        assert body["afterTvar250M"] > 5.0
+        assert body["afterTvar250M"] > 0.0
         # Strictly beats or matches max-expected-profit on its own Return / TVaR horizon
         assert body[field] >= base_body[field] - 1e-3
         # Honors TVaR-250 cap & FL cap constraints

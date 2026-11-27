@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 import roaring_lion_engine as rle
 
-from app.engine.pricing_link import PricingLink, compute_pricing_economics, extract_rollup_layers
+from app.engine.pricing_link import LAYER_NODE_TYPES, PricingLink, compute_pricing_economics, extract_rollup_layers
 from app.engine.sim_generator import RP_TO_ID, YeltTable
 from app.models.domain import (
     BreadcrumbStep,
@@ -48,6 +48,7 @@ from app.models.domain import (
 from app.models.enums import NodeType, ViewOfRisk, is_hedge_direction
 from app.services.lineage import LineageRegistry, canonical_hash
 from app.services.portfolio_snapshot import compute_unl_portfolio_events, is_ilw_programme
+from app.services.sim_sets import _trim_memory
 
 DEFAULT_RETURN_PERIODS = [10.0, 20.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0]
 
@@ -55,7 +56,7 @@ DEFAULT_RETURN_PERIODS = [10.0, 20.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0]
 # key -> (ev_out, ann, mx, rip, ep_dict)
 _NODE_CACHE: OrderedDict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]] = OrderedDict()
 _NODE_CACHE_LOCK = threading.Lock()
-_MAX_CACHE_ENTRIES = 48
+_MAX_CACHE_ENTRIES = 16
 
 
 def clear_dag_cache() -> None:
@@ -354,16 +355,28 @@ def evaluate_programme_dag(
     industry_yelt: YeltTable | None = None,
     pricing_links: dict[str, PricingLink] | None = None,
     portfolio_unl_resolver: Callable[[str | None, ViewOfRisk], tuple[np.ndarray, str]] | None = None,
+    *,
+    compute_metrics: bool = True,
+    need_events: bool = True,
 ) -> tuple[DagEvalResponse, dict[str, dict[str, np.ndarray]]]:
     """Evaluate a programme's DAG on UNADJUSTED and ADJUSTED views via Rust with content-addressed node caching."""
     t0 = time.perf_counter()
     target_views = views or [ViewOfRisk.UNADJUSTED, ViewOfRisk.ADJUSTED]
     nodes_by_id = {n.node_id: n for n in programme.graph.nodes}
     incoming: dict[str, list] = {n.node_id: [] for n in programme.graph.nodes}
+    out_counts: dict[str, int] = {n.node_id: 0 for n in programme.graph.nodes}
     for edge in programme.graph.edges:
         incoming[edge.target].append(edge)
+        out_counts[edge.source] += 1
 
     topo = validate_dag_acyclic(programme.graph)
+    _PASS_THROUGH_TYPES = (
+        NodeType.COMBINATION,
+        NodeType.PRICING_OUTPUT,
+        NodeType.YELT_OUTPUT,
+        NodeType.EP_OUTPUT,
+    )
+    _ZERO_TRIALS = np.zeros(yelt.num_trials, dtype=np.float64)
 
     views_output: dict[str, list[NodeViewMetrics]] = {}
     annual_vectors: dict[str, dict[str, np.ndarray]] = {}
@@ -385,10 +398,21 @@ def evaluate_programme_dag(
 
         node_event_streams: dict[str, np.ndarray] = {}
         node_ann: dict[str, np.ndarray] = {}
+        node_mx: dict[str, np.ndarray] = {}
+        node_ep: dict[str, dict[str, Any]] = {}
         node_rip: dict[str, np.ndarray] = {}
         node_hashes: dict[str, str] = {}
         node_metrics: list[NodeViewMetrics] = []
         resolved_snapshots: dict[str, tuple[np.ndarray, str]] = {}
+        remaining_uses = dict(out_counts)
+
+        def _ann_and_mx(ev: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            if not compute_metrics:
+                return _ZERO_TRIALS, _ZERO_TRIALS
+            ann_v = np.bincount(yelt.trial_ids - 1, weights=ev, minlength=yelt.num_trials)
+            mx_v = np.zeros(yelt.num_trials, dtype=np.float64)
+            np.maximum.at(mx_v, yelt.trial_ids - 1, ev)
+            return ann_v, mx_v
 
         for nid in topo:
             node = nodes_by_id[nid]
@@ -417,13 +441,36 @@ def evaluate_programme_dag(
             })
             node_hashes[nid] = node_key
 
+            single_linear = (
+                len(in_edges) == 1
+                and in_edges[0].sign == 1
+                and abs(in_edges[0].weight - 1.0) < 1e-12
+            )
+
             cached = _cache_get(node_key)
             if cached is not None:
                 ev_out, ann, mx, rip, ep = cached
                 cache_hits += 1
+            elif single_linear and node.node_type in _PASS_THROUGH_TYPES:
+                # Zero-copy pass-through for 1:1 linear output/combination edges
+                src_id = in_edges[0].source
+                ev_out = node_event_streams[src_id]
+                ann = node_ann[src_id]
+                if not compute_metrics and ann is _ZERO_TRIALS:
+                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
+                mx = node_mx.get(src_id, _ZERO_TRIALS)
+                rip = node_rip.get(src_id, _ZERO_TRIALS)
+                ep = node_ep.get(src_id) if compute_metrics else None
+                if compute_metrics:
+                    if ep is None:
+                        ep = _ep_stats_from_vector(ann)
+                    _cache_put(node_key, (ev_out, ann, mx, rip, ep))
+                cache_misses += 1
             else:
                 cache_misses += 1
-                if in_edges:
+                if single_linear:
+                    combined = node_event_streams[in_edges[0].source]
+                elif in_edges:
                     combined = np.zeros_like(base_losses)
                     for e in in_edges:
                         combined += (e.sign * e.weight) * node_event_streams[e.source]
@@ -431,30 +478,24 @@ def evaluate_programme_dag(
                 else:
                     combined = base_losses
 
-                rip = np.zeros(yelt.num_trials, dtype=np.float64)
+                rip = _ZERO_TRIALS
 
                 if node.node_type == NodeType.LOSS_SOURCE:
                     ev_out = base_losses
-                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                    ann, mx = _ann_and_mx(ev_out)
                 elif node.node_type == NodeType.INDUSTRY_INDEX_SOURCE:
                     if industry_yelt is not None and len(industry_yelt.losses) == len(yelt.losses):
                         ev_out = apply_deal_view(industry_yelt, programme.uplift_set, view)
                     else:
                         ev_out = base_losses
-                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                    ann, mx = _ann_and_mx(ev_out)
                 elif node.node_type == NodeType.PORTFOLIO_ROLLUP:
                     if portfolio_unl_resolver is not None:
                         as_of = str(node.params.get("asOfDate") or programme.portfolio_snapshot_date or "").strip() or None
                         ev_out = resolved_snapshots[as_of or ""][0]
                     else:
                         ev_out = combined
-                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                    ann, mx = _ann_and_mx(ev_out)
                 elif node.node_type == NodeType.REGION_PERIL_FILTER:
                     allowed = _allowed_rp_keys_for_filter(node.params)
                     if allowed is None:
@@ -463,9 +504,7 @@ def evaluate_programme_dag(
                         allowed_ids = [RP_TO_ID[k] for k in allowed if k in RP_TO_ID]
                         mask = np.isin(yelt.rp_ids, allowed_ids)
                         ev_out = np.where(mask, combined, 0.0)
-                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                    ann, mx = _ann_and_mx(ev_out)
                 elif node.node_type == NodeType.DATE_WINDOW_FILTER:
                     start_day = int(_opt_float(node.params.get("startDay"), 1.0))
                     end_day = int(_opt_float(node.params.get("endDay"), 365.0))
@@ -474,9 +513,7 @@ def evaluate_programme_dag(
                     else:
                         mask = (yelt.day_of_year >= start_day) | (yelt.day_of_year <= end_day)
                     ev_out = np.where(mask, combined, 0.0)
-                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                    ann, mx = _ann_and_mx(ev_out)
                 elif node.node_type == NodeType.LOSS_SIZE_FILTER:
                     min_l = _opt_float(node.params.get("minLoss"), 0.0)
                     max_l = _opt_nullable_float(node, "maxLoss")
@@ -484,9 +521,7 @@ def evaluate_programme_dag(
                     if max_l is not None:
                         mask &= combined <= max_l
                     ev_out = np.where(mask, combined, 0.0)
-                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                    ann, mx = _ann_and_mx(ev_out)
                 elif node.node_type == NodeType.EVENT_ORDER_FILTER:
                     max_ord = _opt_nullable_float(node, "maxOrder")
                     eo_json = json.dumps({
@@ -500,16 +535,12 @@ def evaluate_programme_dag(
                         yelt.num_trials,
                         eo_json,
                     )
-                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                    ann, mx = _ann_and_mx(ev_out)
                 elif node.node_type == NodeType.UPLIFT:
                     factor = _opt_float(node.params.get("factor"), 1.0)
                     add_load = _opt_float(node.params.get("additiveLoad"), 0.0)
                     ev_out = np.where(combined > 0.0, np.maximum(combined * factor + add_load, 0.0), 0.0)
-                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                    ann, mx = _ann_and_mx(ev_out)
                 elif node.node_type == NodeType.OCC_XL:
                     p_json = json.dumps({
                         "occ_limit": float(node.params["occLimit"]),
@@ -578,8 +609,6 @@ def evaluate_programme_dag(
                         raw_ev = np.clip((combined - trig) / (exh - trig), 0.0, 1.0) * cap
                         mx = np.zeros(yelt.num_trials, dtype=np.float64)
                         np.maximum.at(mx, trial_idx, raw_ev)
-                        # Assign annual payout to the first event reaching the trial max so downstream
-                        # pass-through nodes (PRICING_OUTPUT, YELT_OUTPUT) never double-count past cap.
                         ev_out = np.zeros_like(combined)
                         at_max = (raw_ev > 0.0) & (raw_ev >= mx[trial_idx] - 1e-12)
                         hit_pos = np.flatnonzero(at_max)
@@ -600,8 +629,11 @@ def evaluate_programme_dag(
                             ann[trial_idx] * (combined / np.maximum(trial_sum, 1e-12)),
                             0.0,
                         )
-                        mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                        np.maximum.at(mx, trial_idx, ev_out)
+                        if compute_metrics:
+                            mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                            np.maximum.at(mx, trial_idx, ev_out)
+                        else:
+                            mx = _ZERO_TRIALS
                     elif trig_type == "SECOND_EVENT":
                         exceed = combined >= trig
                         counts = np.bincount(trial_idx, weights=exceed.astype(np.float64), minlength=yelt.num_trials)
@@ -612,10 +644,12 @@ def evaluate_programme_dag(
                             cap / np.maximum(counts[trial_idx], 1.0),
                             0.0,
                         )
-                        mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                        np.maximum.at(mx, trial_idx, ev_out)
+                        if compute_metrics:
+                            mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                            np.maximum.at(mx, trial_idx, ev_out)
+                        else:
+                            mx = _ZERO_TRIALS
                     else:
-                        # BINARY: chronological first triggering event in each trial pays full cap once
                         ev_out = np.zeros_like(combined)
                         hit_pos = np.flatnonzero(combined >= trig)
                         if len(hit_pos):
@@ -649,64 +683,94 @@ def evaluate_programme_dag(
                         layers_json,
                     )
                 else:
-                    # COMBINATION / PRICING_OUTPUT / YELT_OUTPUT / EP_OUTPUT pass-through
+                    # Multi-input or weighted COMBINATION / PRICING_OUTPUT / YELT_OUTPUT / EP_OUTPUT
                     ev_out = combined
                     ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
-                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                    if compute_metrics:
+                        mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                        np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                    else:
+                        mx = _ZERO_TRIALS
+                    rip_acc = np.zeros(yelt.num_trials, dtype=np.float64)
                     for e in in_edges:
                         if e.source in node_rip:
-                            rip += (e.sign * e.weight) * node_rip[e.source]
+                            rip_acc += (e.sign * e.weight) * node_rip[e.source]
+                    rip = rip_acc
 
-                ep = _ep_stats_from_vector(ann)
-                _cache_put(node_key, (ev_out, ann, mx, rip, ep))
+                if compute_metrics:
+                    ep = _ep_stats_from_vector(ann)
+                    _cache_put(node_key, (ev_out, ann, mx, rip, ep))
+                else:
+                    ep = None
 
-            node_event_streams[nid] = ev_out
+            if need_events or remaining_uses[nid] > 0:
+                node_event_streams[nid] = ev_out
             node_ann[nid] = ann
             node_rip[nid] = rip
+            if compute_metrics:
+                node_mx[nid] = mx
+                if ep is not None:
+                    node_ep[nid] = ep
 
-            max_occ_val = float(np.max(mx)) if len(mx) else 0.0
-            exp_rip = float(np.mean(rip))
-            placed_share = _opt_float(node.params.get("placedShare"), 1.0)
-            prem = _opt_float(node.params.get("depositPremium"), 0.0) * placed_share
-            raw_lim = next(
-                (node.params.get(k) for k in ("occLimit", "aggLimit", "limit") if not _is_blank_param(node.params.get(k))),
-                0.0,
-            )
-            lim = _opt_float(raw_lim, 0.0) * placed_share
-            rol = (prem / lim) if lim > 0 and prem > 0 else None
-            # Loss ratio needs this node's own premium. Pass-through outputs inherit RIP
-            # from upstream terms; dividing EL by that RIP alone invents a ratio.
-            elr = (ep["el"] / (prem + exp_rip)) if prem > 0 else None
-            pricing = None
-            link = (pricing_links or {}).get(nid) if node.node_type == NodeType.PRICING_OUTPUT else None
-            if link is not None:
-                tvar_250 = next((pt["tvar"] for pt in ep["ep_points"] if abs(pt["return_period"] - 250.0) < 1e-6), 0.0)
-                pricing = compute_pricing_economics(link, in_edges, nodes_by_id, ann, rip, tvar_250)
-                rol = pricing.rol
-                elr = pricing.loss_ratio
+            # Free upstream event streams once their last consumer has evaluated (when caller doesn't need events)
+            if not need_events:
+                for e in in_edges:
+                    remaining_uses[e.source] -= 1
+                    if remaining_uses[e.source] <= 0:
+                        node_event_streams.pop(e.source, None)
 
-            node_metrics.append(
-                NodeViewMetrics(
-                    node_id=nid,
-                    node_label=node.label,
-                    node_type=node.node_type,
-                    view=view,
-                    currency=programme.currency,
-                    el=round(ep["el"], 4),
-                    sd=round(ep["sd"], 4),
-                    max_occ=round(max_occ_val, 4),
-                    max_year=round(ep["max_val"], 4),
-                    expected_rip=round(exp_rip, 4),
-                    rol=round(rol, 4) if rol is not None else None,
-                    elr=round(elr, 4) if elr is not None else None,
-                    ep_points=[EpPoint(**pt) for pt in ep["ep_points"]],
-                    pricing=pricing,
+            if compute_metrics and ep is not None:
+                max_occ_val = float(np.max(mx)) if len(mx) else 0.0
+                exp_rip = float(np.mean(rip))
+                placed_share = _opt_float(node.params.get("placedShare"), 1.0)
+                prem = _opt_float(node.params.get("depositPremium"), 0.0) * placed_share
+                raw_lim = next(
+                    (node.params.get(k) for k in ("occLimit", "aggLimit", "limit") if not _is_blank_param(node.params.get(k))),
+                    0.0,
                 )
-            )
+                lim = _opt_float(raw_lim, 0.0) * placed_share
+                rol = (prem / lim) if lim > 0 and prem > 0 else None
+                # Loss ratio needs this node's own premium. Pass-through outputs inherit RIP
+                # from upstream terms; dividing EL by that RIP alone invents a ratio.
+                elr = (ep["el"] / (prem + exp_rip)) if prem > 0 else None
+                pricing = None
+                link = (pricing_links or {}).get(nid) if node.node_type == NodeType.PRICING_OUTPUT else None
+                if link is not None:
+                    tvar_250 = next((pt["tvar"] for pt in ep["ep_points"] if abs(pt["return_period"] - 250.0) < 1e-6), 0.0)
+                    pricing = compute_pricing_economics(link, in_edges, nodes_by_id, ann, rip, tvar_250)
+                    rol = pricing.rol
+                    elr = pricing.loss_ratio
+
+                node_metrics.append(
+                    NodeViewMetrics(
+                        node_id=nid,
+                        node_label=node.label,
+                        node_type=node.node_type,
+                        view=view,
+                        currency=programme.currency,
+                        el=round(ep["el"], 4),
+                        sd=round(ep["sd"], 4),
+                        max_occ=round(max_occ_val, 4),
+                        max_year=round(ep["max_val"], 4),
+                        expected_rip=round(exp_rip, 4),
+                        rol=round(rol, 4) if rol is not None else None,
+                        elr=round(elr, 4) if elr is not None else None,
+                        ep_points=[EpPoint(**pt) for pt in ep["ep_points"]],
+                        pricing=pricing,
+                    )
+                )
 
         views_output[view_key] = node_metrics
         event_vectors[view_key] = node_event_streams
+        if not compute_metrics and not need_events:
+            keep_ids = {
+                n.node_id
+                for n in programme.graph.nodes
+                if n.node_type in LAYER_NODE_TYPES
+                or n.node_type in (NodeType.PRICING_OUTPUT, NodeType.YELT_OUTPUT, NodeType.EP_OUTPUT)
+            }
+            node_ann = {k: v for k, v in node_ann.items() if k in keep_ids}
+            node_rip = {k: v for k, v in node_rip.items() if k in keep_ids}
         annual_vectors[view_key] = node_ann
         rip_vectors[view_key] = node_rip
 
@@ -831,18 +895,60 @@ def evaluate_portfolio_rollup(
 
     ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
     rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
+    internal_lineage = LineageRegistry(persist=False)
+
+    # Identify cross-linked programmes so self-linked programmes can be streamed one-by-one without
+    # retaining every programme's full annual+RIP dicts simultaneously in RAM.
+    cross_ids: set[str] = set()
+    for p in active_progs:
+        for n in p.graph.nodes:
+            if n.node_type == NodeType.PRICING_OUTPUT:
+                cid = str(n.params.get("contractId") or "").strip()
+                if cid and cid != p.programme_id:
+                    cross_ids.add(p.programme_id)
+                    cross_ids.add(cid)
+
+    streamed_entries: list[Any] = []
+    deferred_progs: list[ProgrammeDeal] = []
+    port_rip = np.zeros(yelt.num_trials, dtype=np.float64)
+    _empty_f64 = np.empty(0, dtype=np.float64)
+
+    def _collect_prog(prog: ProgrammeDeal, ann_map: dict[str, np.ndarray], rip_map: dict[str, np.ndarray]) -> None:
+        if prog.programme_id in cross_ids:
+            deferred_progs.append(prog)
+            ann_by_prog[prog.programme_id] = ann_map
+            rip_by_prog[prog.programme_id] = rip_map
+        else:
+            local = extract_rollup_layers(
+                [prog],
+                {prog.programme_id: ann_map},
+                {prog.programme_id: rip_map},
+                all_programmes=all_programmes,
+                include_1x=False,
+                consume_maps=True,
+            )
+            for e in local:
+                if len(e.rip_vec):
+                    if e.is_hedge:
+                        np.subtract(port_rip, e.rip_vec, out=port_rip)
+                    else:
+                        np.add(port_rip, e.rip_vec, out=port_rip)
+                    e.rip_vec = _empty_f64
+            streamed_entries.extend(local)
 
     # Evaluate long programmes first so any UNL retro hedge can snapshot our own UNL book
     for prog in long_progs:
         _, vecs = evaluate_programme_dag(
             prog,
             yelt,
-            lineage,
+            internal_lineage,
             views=[view],
             industry_yelt=industry_yelt,
+            compute_metrics=False,
+            need_events=False,
         )
-        ann_by_prog[prog.programme_id] = vecs["annual"][view.value]
-        rip_by_prog[prog.programme_id] = vecs["rip"][view.value]
+        _collect_prog(prog, vecs["annual"][view.value], vecs["rip"][view.value])
+        del vecs
         breadcrumbs.append(
             BreadcrumbStep(
                 entity_type="PROGRAMME",
@@ -875,13 +981,15 @@ def evaluate_portfolio_rollup(
         dag_resp, vecs = evaluate_programme_dag(
             prog,
             yelt,
-            lineage,
+            internal_lineage,
             views=[view],
             industry_yelt=industry_yelt,
             portfolio_unl_resolver=_effective_unl_resolver,
+            compute_metrics=False,
+            need_events=False,
         )
-        ann_by_prog[prog.programme_id] = vecs["annual"][view.value]
-        rip_by_prog[prog.programme_id] = vecs["rip"][view.value]
+        _collect_prog(prog, vecs["annual"][view.value], vecs["rip"][view.value])
+        del vecs
         for k, h in dag_resp.manifest.input_hashes.items():
             if k.startswith("portfolio_snapshot:"):
                 input_hashes[k] = h
@@ -896,10 +1004,40 @@ def evaluate_portfolio_rollup(
         )
         input_hashes[prog.programme_id] = prog.graph.content_hash
 
-    for entry in extract_rollup_layers(active_progs, ann_by_prog, rip_by_prog, all_programmes=all_programmes):
+    entries = streamed_entries
+    if deferred_progs:
+        entries.extend(
+            extract_rollup_layers(
+                deferred_progs,
+                ann_by_prog,
+                rip_by_prog,
+                all_programmes=all_programmes,
+                include_1x=False,
+                consume_maps=True,
+            )
+        )
+    ann_by_prog.clear()
+    rip_by_prog.clear()
+
+    m_layers = len(entries)
+    layer_matrix = np.empty((m_layers, yelt.num_trials), dtype=np.float64)
+    expected_hedge_recovery = 0.0
+
+    for idx in range(m_layers):
+        entry = entries[idx]
+        entries[idx] = None  # type: ignore[call-overload]
         sign = -1.0 if entry.is_hedge else 1.0
-        layer_ann_list.append(sign * entry.loss_vec)
-        layer_rip_list.append(sign * entry.rip_vec)
+        if entry.is_hedge:
+            np.negative(entry.loss_vec, out=layer_matrix[idx])
+            if len(entry.rip_vec):
+                port_rip -= entry.rip_vec
+            expected_hedge_recovery += float(np.mean(entry.loss_vec))
+        else:
+            layer_matrix[idx] = entry.loss_vec
+            if len(entry.rip_vec):
+                port_rip += entry.rip_vec
+        ep_l = _ep_stats_from_vector(entry.loss_vec)
+        sa_tvar_250_pos = next(p["tvar"] for p in ep_l["ep_points"] if abs(p["return_period"] - 250.0) < 1e-6)
         layer_rows_meta.append({
             "programme_id": entry.programme_id,
             "layer_id": entry.layer_id,
@@ -911,20 +1049,19 @@ def evaluate_portfolio_rollup(
             "premium": entry.premium,
             "signed_premium": sign * entry.premium,
             "signed_line": entry.signed_line,
-            "raw_loss_vec": entry.loss_vec,
+            "raw_el": ep_l["el"],
+            "sa_tvar_250_pos": sa_tvar_250_pos,
+            "signed_exp_rip": sign * entry.expected_rip,
         })
-
-    layer_matrix = np.vstack(layer_ann_list) if layer_ann_list else np.zeros((0, yelt.num_trials))
-    rip_matrix = np.vstack(layer_rip_list) if layer_rip_list else np.zeros((0, yelt.num_trials))
+        del entry
+    entries.clear()
 
     port_loss = layer_matrix.sum(axis=0)
-    port_rip = rip_matrix.sum(axis=0)
     gross_premium = sum(r["premium"] for r in layer_rows_meta if not r["is_hedge"])
     hedge_premium = sum(r["premium"] for r in layer_rows_meta if r["is_hedge"])
     net_premium = gross_premium - hedge_premium
     deployed_collateral = sum(r["limit"] for r in layer_rows_meta if not r["is_hedge"])
     hedge_count = sum(1 for r in layer_rows_meta if r["is_hedge"])
-    expected_hedge_recovery = sum(float(np.mean(r["raw_loss_vec"])) for r in layer_rows_meta if r["is_hedge"])
 
     net_yield_on_capital = total_capital * 0.03
     trial_profit = net_premium + port_rip + net_yield_on_capital - port_loss
@@ -933,21 +1070,22 @@ def evaluate_portfolio_rollup(
     port_var_250, port_tvar_250, co_tvars = rle.euler_cotvar(
         np.ascontiguousarray(layer_matrix, dtype=np.float64), 250.0
     )
+    del layer_matrix
+    _trim_memory()
     cotvar_sum_diff = abs(float(np.sum(co_tvars)) - float(port_tvar_250))
 
     alloc_rows: list[LayerAllocationRow] = []
     for idx, meta in enumerate(layer_rows_meta):
         is_hedge = meta["is_hedge"]
-        ep_l = _ep_stats_from_vector(meta["raw_loss_vec"])
-        sa_tvar_250_pos = next(p["tvar"] for p in ep_l["ep_points"] if abs(p["return_period"] - 250.0) < 1e-6)
+        sa_tvar_250_pos = meta["sa_tvar_250_pos"]
         co_tvar = float(co_tvars[idx])
-        el_signed = -ep_l["el"] if is_hedge else ep_l["el"]
+        el_signed = -meta["raw_el"] if is_hedge else meta["raw_el"]
         sa_tvar_signed = -sa_tvar_250_pos if is_hedge else sa_tvar_250_pos
         if is_hedge:
             div_credit = (1.0 - abs(co_tvar) / sa_tvar_250_pos) * 100.0 if sa_tvar_250_pos > 0 else 0.0
         else:
             div_credit = (1.0 - co_tvar / sa_tvar_250_pos) * 100.0 if sa_tvar_250_pos > 0 else 0.0
-        exp_rip_l = float(np.mean(rip_matrix[idx]))
+        exp_rip_l = meta["signed_exp_rip"]
         exp_profit_l = meta["signed_premium"] + exp_rip_l - el_signed
         if is_hedge:
             # Cost per dollar of tail TVaR saved (positive = cost % of capital released)

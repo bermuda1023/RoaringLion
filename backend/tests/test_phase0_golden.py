@@ -151,11 +151,13 @@ def test_api_first_slice_end_to_end():
     pbody = r_port.json()
     assert pbody["cotvarSumCheckDiff"] < 1e-9
     assert len(pbody["cdfCurve"]) > 20
-    assert len([r for r in pbody["layerAllocations"] if not r["isHedge"]]) == 4
+    assert len([r for r in pbody["layerAllocations"] if not r["isHedge"]]) >= 4
+    core_ids = {r["programmeId"] for r in pbody["layerAllocations"] if not r["isHedge"]}
+    assert {"prog-farmers-us-27", "prog-pacific-eq-27", "prog-eurowind-27"} <= core_ids
 
     r_gross = client.get("/api/portfolio/rollup?view=ADJUSTED&totalCapital=160&includeHedges=false")
     assert r_gross.status_code == 200
-    assert len(r_gross.json()["layerAllocations"]) == 4
+    assert len(r_gross.json()["layerAllocations"]) >= 4
 
     # Deterministic run
     r_det = client.post(

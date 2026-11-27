@@ -139,7 +139,14 @@ def _compute_bound_gross_loss_vector(view: ViewOfRisk) -> np.ndarray:
     ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
     rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
     for prog in bound:
-        _, vecs = evaluate_programme_dag(prog, yelt, LineageRegistry(persist=False), views=[view])
+        _, vecs = evaluate_programme_dag(
+            prog,
+            yelt,
+            LineageRegistry(persist=False),
+            views=[view],
+            compute_metrics=False,
+            need_events=False,
+        )
         ann_by_prog[prog.programme_id] = vecs["annual"][view.value]
         rip_by_prog[prog.programme_id] = vecs["rip"][view.value]
     total = np.zeros(yelt.num_trials, dtype=np.float64)

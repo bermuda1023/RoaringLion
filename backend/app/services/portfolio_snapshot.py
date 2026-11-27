@@ -189,7 +189,14 @@ def compute_unl_portfolio_events(
     total = np.zeros_like(yelt.losses, dtype=np.float64)
     sig_parts: list[dict[str, Any]] = []
     for prog in sorted(deals, key=lambda p: p.programme_id):
-        _, vecs = evaluate_programme_dag(prog, yelt, LineageRegistry(persist=False), views=[view])
+        _, vecs = evaluate_programme_dag(
+            prog,
+            yelt,
+            LineageRegistry(persist=False),
+            views=[view],
+            compute_metrics=False,
+            need_events=True,
+        )
         ev_map = vecs["events"][view.value]
         contrib = _rolled_up_programme_events(prog, ev_map, catalog)
         if contrib is not None:

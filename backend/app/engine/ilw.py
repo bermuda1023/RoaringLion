@@ -23,7 +23,7 @@ def evaluate_ilw_trial_payouts(ind_yelt: YeltTable, req: IlwPriceRequest) -> tup
     allowed = set(req.region_perils)
     if not allowed or "ALL" in allowed or "US-ALL-WS" in allowed:
         if "US-ALL-WS" in allowed:
-            allowed_ids = [RP_TO_ID[k] for k in ("US-FL-WS", "US-TX-WS", "US-SE-WS")]
+            allowed_ids = [RP_TO_ID[k] for k in ("US-FL-WS", "US-TX-WS", "US-SE-WS", "US-NE-WS") if k in RP_TO_ID]
             mask = np.isin(ind_yelt.rp_ids, allowed_ids)
         else:
             mask = np.ones(len(ind_yelt.losses), dtype=bool)
