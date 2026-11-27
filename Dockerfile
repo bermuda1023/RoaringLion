@@ -40,7 +40,9 @@ RUN pip install --no-cache-dir /tmp/wheels/*.whl \
 
 ENV PYTHONPATH=/app/backend \
     ROARING_LION_DATA_DIR=/data \
-    PORT=8000
+    PORT=8000 \
+    MALLOC_ARENA_MAX=2 \
+    RAYON_NUM_THREADS=2
 
 RUN mkdir -p /data
 

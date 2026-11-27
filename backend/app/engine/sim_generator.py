@@ -105,6 +105,7 @@ def generate_synthetic_sim_set(
     day_of_year = np.concatenate(d_parts)
     rp_ids = np.concatenate(r_parts)
     losses = np.concatenate(l_parts)
+    del t_parts, e_parts, d_parts, r_parts, l_parts
 
     # Chronological sort within each trial_id: lexsort uses last key as primary
     order = np.lexsort((event_ids, day_of_year, trial_ids))
@@ -113,6 +114,7 @@ def generate_synthetic_sim_set(
     day_of_year = np.ascontiguousarray(day_of_year[order], dtype=np.uint16)
     rp_ids = np.ascontiguousarray(rp_ids[order], dtype=np.int32)
     losses = np.ascontiguousarray(losses[order], dtype=np.float64)
+    del order
 
     chash = canonical_hash({
         "sim_set_id": sim_set_id,

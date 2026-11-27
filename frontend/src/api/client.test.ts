@@ -39,6 +39,18 @@ describe('fetchJson', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
+  it('retries once on transient HTTP 502/503/504 for GET and optimizer requests', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('Bad Gateway', { status: 502 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([{ programmeId: 'p1' }]), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      );
+    const out = await fetchJson<{ programmeId: string }[]>('/api/contracts');
+    expect(out).toHaveLength(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
   it('surfaces an informative message when backend stays unreachable after retry', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
     await expect(fetchJson('/api/optimizer/candidates')).rejects.toThrow(/Could not reach backend API/);

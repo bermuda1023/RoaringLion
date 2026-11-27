@@ -218,6 +218,10 @@ export async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> 
     try {
       res = await fetch(target, reqInit);
       lastErr = null;
+      if (attempt < maxAttempts && (res.status === 502 || res.status === 503 || res.status === 504)) {
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        continue;
+      }
       break;
     } catch (err) {
       if (reqInit.signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) {

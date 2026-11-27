@@ -283,3 +283,58 @@ def test_ilw_us_all_ws_includes_northeast_wind():
     p_three, _, _ = evaluate_ilw_trial_payouts(ind_yelt, req_three)
     assert float(p_all.mean()) > float(p_three.mean())
 
+
+def test_health_programmes_and_contracts_counts_agree():
+    health = client.get("/api/health").json()
+    programmes = client.get("/api/programmes").json()
+    contracts = client.get("/api/contracts").json()
+    assert health["programmesLoaded"] == len(programmes) == len(contracts)
+    assert {p["programmeId"] for p in programmes} == {c["programmeId"] for c in contracts}
+
+
+def test_peak_rss_stays_within_512mb_render_budget():
+    """Verify full startup + contracts + portfolio comparison + 12-point optimizer explore stays well under 400MB RSS."""
+    import os
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    if not Path("/proc/self/status").exists():
+        return
+
+    backend_dir = Path(__file__).resolve().parents[1]
+    script = (
+        "import json, os, tempfile\n"
+        "os.environ['ROARING_LION_DATA_DIR'] = tempfile.mkdtemp(prefix='rl_rss_test_')\n"
+        "from fastapi.testclient import TestClient\n"
+        "from app.main import app\n"
+        "c = TestClient(app)\n"
+        "assert c.get('/api/health').json()['programmesLoaded'] == 48\n"
+        "assert len(c.get('/api/contracts').json()) == 48\n"
+        "assert c.get('/api/portfolio/comparison?view=ADJUSTED&totalCapital=160').status_code == 200\n"
+        "assert c.get('/api/optimizer/candidates?view=ADJUSTED&mode=FORWARD_PLANNING&limit=25&offset=0').status_code == 200\n"
+        "r = c.post('/api/optimizer/explore?num_points=12', json={'mode':'FORWARD_PLANNING','granularity':'LAYER','totalCapital':160,'maxDeployedCollateral':160,'maxTvar100M':95,'maxTvar250M':115})\n"
+        "assert r.status_code == 200\n"
+        "hwm = rss = 0.0\n"
+        "for line in open('/proc/self/status'):\n"
+        "    if line.startswith('VmHWM:'): hwm = int(line.split()[1]) / 1024.0\n"
+        "    elif line.startswith('VmRSS:'): rss = int(line.split()[1]) / 1024.0\n"
+        "print(json.dumps({'peak_mb': round(hwm, 1), 'rss_mb': round(rss, 1)}))\n"
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(backend_dir),
+        "MALLOC_ARENA_MAX": "2",
+        "RAYON_NUM_THREADS": "2",
+    }
+    proc = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, check=True, timeout=60)
+    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip().startswith("{")]
+    assert lines, f"Unexpected stdout: {proc.stdout}\nstderr: {proc.stderr}"
+    import json
+
+    stats = json.loads(lines[-1])
+    assert stats["peak_mb"] < 400.0, f"Peak RSS {stats['peak_mb']} MB exceeds 400 MB safety budget for 512 MB Render"
+    assert stats["rss_mb"] < 300.0, f"Steady RSS {stats['rss_mb']} MB exceeds 300 MB steady budget"
+
+
