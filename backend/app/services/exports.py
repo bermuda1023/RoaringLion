@@ -44,6 +44,13 @@ def build_portfolio_csv(rollup: PortfolioRollupResponse) -> str:
     w.writerow(["Euler Co-TVaR Conservation Diff", rollup.cotvar_sum_check_diff])
     w.writerow([])
 
+    if rollup.ep_curve:
+        w.writerow(["Exceedance Probability Curve (OEP / AEP / TVaR, $M)"])
+        w.writerow(["Return Period (yr)", "Exceedance Prob (%)", "OEP ($M)", "OEP TVaR ($M)", "AEP ($M)", "AEP TVaR ($M)"])
+        for pt in rollup.ep_curve:
+            w.writerow([int(pt.return_period), round(pt.probability * 100.0, 2), pt.oep, pt.oep_tvar, pt.aep, pt.aep_tvar])
+        w.writerow([])
+
     w.writerow(["Risk Appetite Guidelines"])
     w.writerow(["Percentile", "Threshold ROC (%)", "Actual ROC (%)", "Status"])
     for g in rollup.guidelines:
@@ -94,11 +101,11 @@ def build_portfolio_csv(rollup: PortfolioRollupResponse) -> str:
 def build_portfolio_tearsheet_html(rollup: PortfolioRollupResponse) -> str:
     """Render a self-contained, print-to-PDF institutional portfolio tear-sheet."""
     esc = html.escape
-    guideline_rows = "".join(
-        f"<tr><td>{esc(g.label)}</td><td class='num'>{g.threshold_roc_pct:.1f}%</td>"
-        f"<td class='num'>{g.actual_roc_pct:.2f}%</td>"
-        f"<td class='num {'pass' if g.passed else 'fail'}'>{'PASS' if g.passed else 'BREACH'}</td></tr>"
-        for g in rollup.guidelines
+    ep_rows = "".join(
+        f"<tr><td>1-in-{int(pt.return_period)}</td><td class='num'>{pt.probability * 100.0:.2f}%</td>"
+        f"<td class='num'>${pt.oep:.2f}m</td><td class='num'>${pt.oep_tvar:.2f}m</td>"
+        f"<td class='num'><b>${pt.aep:.2f}m</b></td><td class='num'><b>${pt.aep_tvar:.2f}m</b></td></tr>"
+        for pt in rollup.ep_curve
     )
     alloc_rows = "".join(
         f"<tr><td>{esc(r.cedent_name)}</td><td>{esc(r.layer_name)}</td>"
@@ -150,8 +157,8 @@ def build_portfolio_tearsheet_html(rollup: PortfolioRollupResponse) -> str:
   <div class="kpi"><div class="lbl">1-in-250 TVaR</div><div class="val">${rollup.portfolio_tvar_250:.2f}m</div></div>
   <div class="kpi"><div class="lbl">Total Capital</div><div class="val">${rollup.total_capital:.0f}m</div></div>
 </div>
-<h2>Risk Appetite Guidelines</h2>
-<table><thead><tr><th>Percentile</th><th class="num">Threshold</th><th class="num">Actual</th><th class="num">Status</th></tr></thead><tbody>{guideline_rows}</tbody></table>
+<h2>Computed Return Period Losses (OEP / AEP / TVaR)</h2>
+<table><thead><tr><th>Return Period</th><th class="num">Exceedance Prob</th><th class="num">OEP</th><th class="num">OEP TVaR</th><th class="num">AEP</th><th class="num">AEP TVaR</th></tr></thead><tbody>{ep_rows}</tbody></table>
 <h2>Euler Co-TVaR Marginal Capital Allocation (1-in-250 / 99.6th%)</h2>
 <table><thead><tr><th>Cedent</th><th>Layer</th><th>Dir</th><th class="num">Limit</th><th class="num">Premium</th><th class="num">EL</th><th class="num">Standalone TVaR</th><th class="num">Euler Co-TVaR</th><th class="num">Div Credit</th><th class="num">Marginal ROC</th></tr></thead><tbody>{alloc_rows}</tbody></table>
 <div class="crumb"><b>Breadcrumb Provenance:</b> {crumbs}</div>

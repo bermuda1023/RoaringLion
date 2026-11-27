@@ -11,7 +11,6 @@ import '@xyflow/react/dist/style.css';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { api, apiUrl } from '../api/client';
-import { BreadcrumbBar } from '../components/BreadcrumbBar';
 import { CMS_LAYER_DRAG_TYPE, CmsSuggestionCard } from '../components/CmsSuggestionCard';
 import { RelatedProgrammeSelect } from '../components/RelatedProgrammeSelect';
 import { PricingOutputPanel, YeltOutputPanel } from '../components/OutputNodePanels';
@@ -1090,10 +1089,6 @@ export function StructuringStudio({
                 ))}
             </div>
           </div>
-        </div>
-
-        <div style={{ marginTop: 10 }}>
-          <BreadcrumbBar manifest={dagEvalQ.data?.manifest ?? null} />
         </div>
       </div>
 
