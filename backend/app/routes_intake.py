@@ -23,7 +23,7 @@ from app.models.intake import (
 )
 from app.models.phase1 import ContractFull
 from app.services.contracts import ContractStore
-from app.services.intake import SubmissionIntakeService
+from app.services.intake import DraftValidationError, SubmissionIntakeService
 from app.services.intake_parsers import MAX_UPLOAD_BYTES, MAX_UPLOAD_MB
 from app.services.lineage import LineageRegistry
 from app.services.sim_sets import SimSetStore
@@ -166,6 +166,8 @@ def create_intake_router(
             return svc.confirm_draft(draft_id, req)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except DraftValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 

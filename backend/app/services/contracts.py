@@ -1998,6 +1998,18 @@ class ContractStore:
 
         return self._edit_layers(programme_id, edit)
 
+    def add_layers(self, programme_id: str, specs: list[ContractLayerSpec]) -> ContractFull | None:
+        """Atomically append multiple layers in a single DB transaction (no partial commits on error)."""
+        if not specs:
+            return self.get_contract(programme_id)
+
+        def edit(graph: GraphSpec, rec: ContractRecord) -> GraphSpec:
+            for spec in specs:
+                add_layer_to_graph(graph, spec, rec.written_line, rec.signed_line, programme_id=programme_id)
+            return graph
+
+        return self._edit_layers(programme_id, edit)
+
     def remove_layer(self, programme_id: str, node_id: str) -> ContractFull | None:
         def edit(graph: GraphSpec, rec: ContractRecord) -> GraphSpec:
             remove_layer_from_graph(graph, node_id, programme_id=programme_id)

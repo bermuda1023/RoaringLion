@@ -128,11 +128,16 @@ describe('SubmissionReviewCard', () => {
     expect(screen.getByText('Hurricane Ian')).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText('Programme Name'), { target: { value: 'Updated Programme' } });
+    // Edit deposit premium from 4.5 -> 6.25; ROL must update from 0.18 -> 0.25 so edited premium wins
+    const premInput = screen.getByDisplayValue('4.5');
+    fireEvent.change(premInput, { target: { value: '6.25' } });
     fireEvent.click(screen.getByTestId('confirm-draft-btn'));
 
     await waitFor(() => expect(confirmSpy).toHaveBeenCalledTimes(1));
     expect(confirmSpy.mock.calls[0][0]).toBe('sub-test-001');
     expect(confirmSpy.mock.calls[0][1]?.extracted?.programmeName).toBe('Updated Programme');
+    expect(confirmSpy.mock.calls[0][1]?.extracted?.layers[0]?.depositPremium).toBe(6.25);
+    expect(confirmSpy.mock.calls[0][1]?.extracted?.layers[0]?.rol).toBe(0.25);
     expect(onConfirmed).toHaveBeenCalledWith(confirmRes);
   });
 

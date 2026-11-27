@@ -47,7 +47,11 @@ export function SubmissionReviewCard({
   const updateLayer = (idx: number, patch: Partial<IntakeLayerDraft>) => {
     setExtracted((prev) => {
       const next = [...prev.layers];
-      next[idx] = { ...next[idx], ...patch };
+      const merged = { ...next[idx], ...patch };
+      if ('depositPremium' in patch || 'limit' in patch) {
+        merged.rol = merged.limit > 0 ? Number((merged.depositPremium / merged.limit).toFixed(6)) : null;
+      }
+      next[idx] = merged;
       return { ...prev, layers: next };
     });
   };

@@ -13,12 +13,15 @@ import gc
 import hashlib
 import imaplib
 import json
+import logging
 import os
 import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+from sqlalchemy.exc import IntegrityError
 
 from app.db.database import get_data_dir, get_session
 from app.db.models import ContractNoteRecord, SubmissionDraftRecord, WatchedIngestionRecord
@@ -57,6 +60,47 @@ from app.services.lineage import LineageRegistry, canonical_hash
 from app.services.sim_sets import SimSetStore
 
 SUPPORTED_INTAKE_EXTS = {".pdf", ".xlsx", ".xlsm", ".csv", ".parquet", ".txt"}
+
+logger = logging.getLogger(__name__)
+
+
+class DraftValidationError(ValueError):
+    """Raised when a draft fails validation on confirm (maps to HTTP 422)."""
+
+
+def _layer_spec_from_draft(
+    lyr: IntakeLayerDraft,
+    *,
+    layer_code: str | None,
+    fallback_name: str,
+) -> ContractLayerSpec:
+    """Build a ContractLayerSpec where confirmed deposit_premium wins over stale ROL."""
+    if lyr.deposit_premium > 0:
+        # Omit rol so _layer_node keeps deposit_premium exact and derives ROL = deposit_premium / limit.
+        return ContractLayerSpec(
+            layer_code=layer_code,
+            name=lyr.name or fallback_name,
+            layer_type=lyr.layer_type,
+            limit=lyr.limit,
+            attachment=lyr.attachment,
+            deposit_premium=lyr.deposit_premium,
+            rol=None,
+            reinstatements=lyr.reinstatements,
+            written_line=lyr.written_line,
+            signed_line=lyr.signed_line,
+        )
+    return ContractLayerSpec(
+        layer_code=layer_code,
+        name=lyr.name or fallback_name,
+        layer_type=lyr.layer_type,
+        limit=lyr.limit,
+        attachment=lyr.attachment,
+        deposit_premium=0.0,
+        rol=lyr.rol,
+        reinstatements=lyr.reinstatements,
+        written_line=lyr.written_line,
+        signed_line=lyr.signed_line,
+    )
 
 
 def _utcnow() -> datetime:
@@ -350,6 +394,18 @@ class SubmissionIntakeService:
 
     # ─────────────────────────── Core Single Pipeline ───────────────────────────
 
+    def _get_draft_by_dedup_key(self, external_key: str) -> SubmissionDraftOut | None:
+        with get_session() as db:
+            watch = (
+                db.query(WatchedIngestionRecord)
+                .filter(WatchedIngestionRecord.external_key == external_key)
+                .first()
+            )
+            if not watch:
+                return None
+            rec = db.get(SubmissionDraftRecord, watch.draft_id)
+            return self._record_to_out(rec) if rec else None
+
     def ingest_file(
         self,
         *,
@@ -360,8 +416,19 @@ class SubmissionIntakeService:
         target_programme_id: str | None = None,
         hint_subject: str = "",
         attach_sim_set_id: str | None = None,
+        dedup_key: str | None = None,
     ) -> SubmissionDraftOut:
-        """Process one submission file through the unified pipeline and save a PENDING_REVIEW draft."""
+        """Process one submission file through the unified pipeline and save a PENDING_REVIEW draft.
+
+        When `dedup_key` is supplied, the dedup marker and draft are committed in the same
+        database transaction; retrying the same key returns the existing draft without
+        creating duplicates.
+        """
+        if dedup_key:
+            existing = self._get_draft_by_dedup_key(dedup_key)
+            if existing is not None:
+                return existing
+
         if len(raw_bytes) > MAX_UPLOAD_BYTES:
             raise ValueError(f"File '{filename}' exceeds the {MAX_UPLOAD_MB} MB intake limit.")
 
@@ -462,6 +529,14 @@ class SubmissionIntakeService:
         if not loss_files:
             _, loss_files = self._sim_set_metadata(sim_set_id)
 
+        available_rps = {lf.region_peril for lf in loss_files}
+        missing_rps = [rp for rp in extracted.region_perils if available_rps and rp not in available_rps]
+        if missing_rps:
+            extracted.warnings.append(
+                f"Region/peril key(s) {', '.join(missing_rps)} are not in loss source '{sim_set_id}' "
+                f"(available: {', '.join(sorted(available_rps))})."
+            )
+
         graph = self.sketch_draft_graph(
             draft_id=draft_id,
             extracted=extracted,
@@ -486,9 +561,26 @@ class SubmissionIntakeService:
             graph_json=graph.model_dump_json(),
         )
         with get_session() as db:
-            db.add(rec)
-            db.commit()
-            db.refresh(rec)
+            try:
+                db.add(rec)
+                if dedup_key:
+                    db.add(
+                        WatchedIngestionRecord(
+                            door=door.value,
+                            programme_id=target_programme_id,
+                            external_key=dedup_key,
+                            draft_id=draft_id,
+                        )
+                    )
+                db.commit()
+                db.refresh(rec)
+            except IntegrityError:
+                db.rollback()
+                if dedup_key:
+                    existing = self._get_draft_by_dedup_key(dedup_key)
+                    if existing is not None:
+                        return existing
+                raise
 
         gc.collect()
         return self._record_to_out(rec)
@@ -520,14 +612,12 @@ class SubmissionIntakeService:
         )
 
     def ingest_email_message(self, msg: EmailMessageInput) -> list[SubmissionDraftOut]:
-        """Process one email message (live or fixture): match programme and file drafts."""
-        ext_key = f"email:{msg.message_id}" if msg.message_id else None
-        if ext_key:
-            with get_session() as db:
-                existing = db.query(WatchedIngestionRecord).filter(WatchedIngestionRecord.external_key == ext_key).first()
-                if existing:
-                    return []
+        """Process one email message (live or fixture): match programme and file drafts.
 
+        Each attachment/body draft commits its dedup key in the same transaction as the draft,
+        so retrying the same `messageId` (even after a partial failure) returns the existing
+        draft(s) without creating duplicates.
+        """
         attachment_names = " ".join(a.filename for a in msg.attachments)
         matched = self.match_existing_programme(msg.subject, msg.body_text, attachment_names)
         target_prog_id = matched.programme_id if matched else None
@@ -536,19 +626,20 @@ class SubmissionIntakeService:
         drafts: list[SubmissionDraftOut] = []
 
         if msg.attachments:
-            decoded: list[tuple[EmailAttachmentInput, bytes]] = []
-            for att in msg.attachments:
+            decoded: list[tuple[int, EmailAttachmentInput, bytes]] = []
+            for idx, att in enumerate(msg.attachments):
                 raw = base64.b64decode(att.content_base64)
-                decoded.append((att, raw))
+                decoded.append((idx, att, raw))
 
             # First ingest any modelling attachments so their sim_set_id can attach to sibling PDF/Excel drafts
             modelling_exts = {".csv", ".parquet"}
             attached_sim_id: str | None = None
-            doc_items: list[tuple[EmailAttachmentInput, bytes]] = []
+            doc_items: list[tuple[int, EmailAttachmentInput, bytes]] = []
             modelling_drafts: list[SubmissionDraftOut] = []
 
-            for att, raw in decoded:
+            for idx, att, raw in decoded:
                 ext = Path(att.filename).suffix.lower()
+                item_key = f"email:{msg.message_id}:att:{idx}:{att.filename}" if msg.message_id else None
                 if ext in modelling_exts:
                     d = self.ingest_file(
                         raw_bytes=raw,
@@ -557,14 +648,16 @@ class SubmissionIntakeService:
                         source_ref=source_ref,
                         target_programme_id=target_prog_id,
                         hint_subject=f"{msg.subject}\n{msg.body_text}",
+                        dedup_key=item_key,
                     )
                     if d.sim_set_id:
                         attached_sim_id = d.sim_set_id
                     modelling_drafts.append(d)
                 else:
-                    doc_items.append((att, raw))
+                    doc_items.append((idx, att, raw))
 
-            for att, raw in doc_items:
+            for idx, att, raw in doc_items:
+                item_key = f"email:{msg.message_id}:att:{idx}:{att.filename}" if msg.message_id else None
                 d = self.ingest_file(
                     raw_bytes=raw,
                     filename=att.filename,
@@ -573,6 +666,7 @@ class SubmissionIntakeService:
                     target_programme_id=target_prog_id,
                     hint_subject=f"{msg.subject}\n{msg.body_text}",
                     attach_sim_set_id=attached_sim_id,
+                    dedup_key=item_key,
                 )
                 drafts.append(d)
 
@@ -582,6 +676,7 @@ class SubmissionIntakeService:
                 drafts = modelling_drafts + drafts
         else:
             raw_body = (msg.body_text or msg.subject).encode("utf-8")
+            body_key = f"email:{msg.message_id}:body" if msg.message_id else None
             d = self.ingest_file(
                 raw_bytes=raw_body,
                 filename="email_body.txt",
@@ -589,25 +684,18 @@ class SubmissionIntakeService:
                 source_ref=source_ref,
                 target_programme_id=target_prog_id,
                 hint_subject=msg.subject,
+                dedup_key=body_key,
             )
             drafts.append(d)
-
-        if ext_key and drafts:
-            with get_session() as db:
-                db.add(
-                    WatchedIngestionRecord(
-                        door=IntakeDoor.EMAIL.value,
-                        programme_id=target_prog_id,
-                        external_key=ext_key,
-                        draft_id=drafts[0].draft_id,
-                    )
-                )
-                db.commit()
 
         return drafts
 
     def poll_email_inbox(self, max_messages: int = 20) -> EmailPollResult:
-        """Poll configured IMAP inbox if credentials exist; otherwise report disconnected cleanly."""
+        """Poll configured IMAP inbox if credentials exist; otherwise report disconnected cleanly.
+
+        Fetches messages with BODY.PEEK[] so \\Seen is NOT set prematurely. Marks \\Seen only
+        after ingest succeeds; any parse, size, or ingest error leaves the message UNSEEN for retry.
+        """
         status = self.get_email_status()
         if not status.connected:
             return EmailPollResult(
@@ -633,22 +721,29 @@ class SubmissionIntakeService:
             _, msg_nums = imap.search(None, "UNSEEN")
             ids = (msg_nums[0].split() if msg_nums and msg_nums[0] else [])[:max_messages]
             for num in ids:
-                _, data = imap.fetch(num, "(RFC822)")
-                if not data or not isinstance(data[0], tuple):
-                    continue
-                parsed_mail = email.message_from_bytes(data[0][1])
-                msg_id = str(parsed_mail.get("Message-ID") or num.decode("utf-8", errors="ignore"))
-                sender = str(parsed_mail.get("From") or "unknown")
-                subject = str(parsed_mail.get("Subject") or "(No Subject)")
-                body_parts: list[str] = []
-                attachments: list[EmailAttachmentInput] = []
+                try:
+                    _, data = imap.fetch(num, "(BODY.PEEK[])")
+                    if not data or not isinstance(data[0], tuple):
+                        skipped += 1
+                        continue
+                    parsed_mail = email.message_from_bytes(data[0][1])
+                    msg_id = str(parsed_mail.get("Message-ID") or num.decode("utf-8", errors="ignore"))
+                    sender = str(parsed_mail.get("From") or "unknown")
+                    subject = str(parsed_mail.get("Subject") or "(No Subject)")
+                    body_parts: list[str] = []
+                    attachments: list[EmailAttachmentInput] = []
 
-                for part in parsed_mail.walk():
-                    disp = str(part.get("Content-Disposition") or "")
-                    fname = part.get_filename()
-                    if fname or "attachment" in disp.lower():
-                        payload = part.get_payload(decode=True)
-                        if payload and len(payload) <= MAX_UPLOAD_BYTES:
+                    for part in parsed_mail.walk():
+                        disp = str(part.get("Content-Disposition") or "")
+                        fname = part.get_filename()
+                        if fname or "attachment" in disp.lower():
+                            payload = part.get_payload(decode=True)
+                            if payload is None:
+                                continue
+                            if len(payload) > MAX_UPLOAD_BYTES:
+                                raise ValueError(
+                                    f"Attachment '{fname or 'attachment.bin'}' exceeds {MAX_UPLOAD_MB} MB limit."
+                                )
                             attachments.append(
                                 EmailAttachmentInput(
                                     filename=fname or "attachment.bin",
@@ -656,20 +751,28 @@ class SubmissionIntakeService:
                                     content_type=part.get_content_type(),
                                 )
                             )
-                    elif part.get_content_type() == "text/plain":
-                        payload = part.get_payload(decode=True)
-                        if payload:
-                            body_parts.append(payload.decode("utf-8", errors="replace"))
+                        elif part.get_content_type() == "text/plain":
+                            payload = part.get_payload(decode=True)
+                            if payload:
+                                body_parts.append(payload.decode("utf-8", errors="replace"))
 
-                created = self.ingest_email_message(
-                    EmailMessageInput(
-                        message_id=msg_id,
-                        sender=sender,
-                        subject=subject,
-                        body_text="\n".join(body_parts),
-                        attachments=attachments,
+                    created = self.ingest_email_message(
+                        EmailMessageInput(
+                            message_id=msg_id,
+                            sender=sender,
+                            subject=subject,
+                            body_text="\n".join(body_parts),
+                            attachments=attachments,
+                        )
                     )
-                )
+                except Exception as exc:
+                    # Leave message UNSEEN so the next poll retries it.
+                    logger.warning("Failed to ingest IMAP message %s; leaving UNSEEN for retry: %s", num, exc)
+                    skipped += 1
+                    continue
+
+                # Only mark \Seen after ingest succeeded.
+                imap.store(num, "+FLAGS", "\\Seen")
                 if created:
                     processed += 1
                     drafts.extend(created)
@@ -790,17 +893,8 @@ class SubmissionIntakeService:
                     door=IntakeDoor.FOLDER,
                     source_ref=f"{cleaned}/{p.name}",
                     target_programme_id=c.programme_id,
+                    dedup_key=ext_key,
                 )
-                with get_session() as db:
-                    db.add(
-                        WatchedIngestionRecord(
-                            door=IntakeDoor.FOLDER.value,
-                            programme_id=c.programme_id,
-                            external_key=ext_key,
-                            draft_id=draft.draft_id,
-                        )
-                    )
-                    db.commit()
                 ingested_keys.add(ext_key)
                 picked_up += 1
                 drafts.append(draft)
@@ -941,51 +1035,57 @@ class SubmissionIntakeService:
                     if updated:
                         contract = updated
 
-                for lyr in extracted.layers:
-                    spec = ContractLayerSpec(
-                        layer_code=None,
-                        name=lyr.name or lyr.layer_code,
-                        layer_type=lyr.layer_type,
-                        limit=lyr.limit,
-                        attachment=lyr.attachment,
-                        deposit_premium=lyr.deposit_premium,
-                        rol=lyr.rol,
-                        reinstatements=lyr.reinstatements,
-                        written_line=lyr.written_line,
-                        signed_line=lyr.signed_line,
-                    )
-                    contract, _ = self.contract_store.add_layer(contract.programme_id, spec)
+                if extracted.layers:
+                    layer_specs = [
+                        _layer_spec_from_draft(
+                            lyr,
+                            layer_code=None,
+                            fallback_name=lyr.layer_code or f"Layer {i + 1}",
+                        )
+                        for i, lyr in enumerate(extracted.layers)
+                    ]
+                    updated = self.contract_store.add_layers(contract.programme_id, layer_specs)
+                    if updated is None:
+                        raise KeyError(f"Programme not found: {contract.programme_id}")
+                    contract = updated
 
                 action: str = "UPDATED_PROGRAMME"
             else:
                 # Create a brand new SUBMISSION draft programme in CMS (never BOUND)
+                _, loss_files = self._sim_set_metadata(sim_id)
+                available_rps = {lf.region_peril for lf in loss_files}
+                reviewed_rps = [rp for rp in extracted.region_perils if rp and rp != "ALL"]
+                missing_rps = [rp for rp in reviewed_rps if available_rps and rp not in available_rps]
+                if missing_rps:
+                    avail_str = ", ".join(sorted(available_rps))
+                    raise DraftValidationError(
+                        f"Cannot confirm draft: region/peril key(s) {', '.join(missing_rps)} are not present in "
+                        f"attached loss source '{sim_id}'. Available: {avail_str}. "
+                        f"Update the reviewed region/perils or attach a matching loss file."
+                    )
+                final_rps = reviewed_rps or (["US-FL-WS"] if (not available_rps or "US-FL-WS" in available_rps) else [sorted(available_rps)[0]])
+
                 layer_specs = [
-                    ContractLayerSpec(
+                    _layer_spec_from_draft(
+                        lyr,
                         layer_code=lyr.layer_code or f"L{i + 1}",
-                        name=lyr.name or f"Layer {i + 1}",
-                        layer_type=lyr.layer_type,
-                        limit=lyr.limit,
-                        attachment=lyr.attachment,
-                        deposit_premium=lyr.deposit_premium,
-                        rol=lyr.rol,
-                        reinstatements=lyr.reinstatements,
-                        written_line=lyr.written_line,
-                        signed_line=lyr.signed_line,
+                        fallback_name=f"Layer {i + 1}",
                     )
                     for i, lyr in enumerate(extracted.layers)
                 ]
                 total_limit = sum(l.limit for l in extracted.layers) if extracted.layers else 25.0
                 min_att = min(l.attachment for l in extracted.layers) if extracted.layers else 50.0
-                total_prem = sum(l.deposit_premium for l in extracted.layers) if extracted.layers else 4.0
-                eff_rol = round(total_prem / total_limit, 4) if total_limit > 0 else 0.16
+                total_prem = (
+                    sum(
+                        l.deposit_premium if l.deposit_premium > 0 else round(l.limit * (l.rol or 0.0), 4)
+                        for l in extracted.layers
+                    )
+                    if extracted.layers
+                    else 4.0
+                )
+                eff_rol = round(total_prem / total_limit, 6) if total_limit > 0 else 0.16
                 signed_line = extracted.layers[0].signed_line if extracted.layers else 1.0
                 written_line = extracted.layers[0].written_line if extracted.layers else 1.0
-
-                _, loss_files = self._sim_set_metadata(sim_id)
-                available_rps = {lf.region_peril for lf in loss_files}
-                valid_rps = [rp for rp in extracted.region_perils if (not available_rps or rp in available_rps)]
-                if not valid_rps and available_rps:
-                    valid_rps = [sorted(available_rps)[0]]
 
                 payload = ContractCreate(
                     cedent_name=extracted.cedent_name or "Draft Cedent",
@@ -1004,8 +1104,8 @@ class SubmissionIntakeService:
                     rol=eff_rol,
                     currency=extracted.currency or "USD",
                     sim_set_id=sim_id,
-                    region_perils=valid_rps or ["US-FL-WS"],
-                    perils=_valid_peril_codes(extracted.perils, valid_rps or ["US-FL-WS"]),
+                    region_perils=final_rps,
+                    perils=_valid_peril_codes(extracted.perils, final_rps),
                     layers=layer_specs,
                     custom_tags=["INTAKE_DRAFT", f"DOOR_{rec.door}"],
                 )

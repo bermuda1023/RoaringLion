@@ -118,6 +118,8 @@ def _find_col(col_map: dict[str, str], candidates: set[str]) -> str | None:
 
 
 def _detect_parquet_yelt(raw_bytes: bytes) -> DetectedYeltSpec:
+    import pyarrow as pa
+    import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
     pf = pq.ParquetFile(io.BytesIO(raw_bytes))
@@ -128,13 +130,45 @@ def _detect_parquet_yelt(raw_bytes: bytes) -> DetectedYeltSpec:
     loss_col = _find_col(col_map, _LOSS_COLS) or "loss_amount"
     day_col = _find_col(col_map, _DAY_COLS)
     rp_col = _find_col(col_map, _RP_COLS)
+
+    max_trial = 0
+    if trial_col in names:
+        trial_idx = names.index(trial_col)
+        stats_found = False
+        for rg_i in range(pf.metadata.num_row_groups):
+            col_meta = pf.metadata.row_group(rg_i).column(trial_idx)
+            if col_meta.is_stats_set and col_meta.statistics is not None and col_meta.statistics.has_min_max:
+                rg_max = col_meta.statistics.max
+                if rg_max is not None:
+                    stats_found = True
+                    if int(rg_max) > max_trial:
+                        max_trial = int(rg_max)
+        if not stats_found and pf.metadata.num_rows > 0:
+            tbl = pf.read(columns=[trial_col])
+            col_max = pc.max(tbl[trial_col]).as_py()
+            if col_max is not None:
+                max_trial = int(col_max)
+            del tbl
+            pa.default_memory_pool().release_unused()
+
+    default_rp = "US-FL-WS"
+    if rp_col and rp_col in names and pf.metadata.num_rows > 0:
+        first_batch = next(pf.iter_batches(batch_size=1, columns=[rp_col]), None)
+        if first_batch is not None and first_batch.num_rows > 0:
+            rp_val = first_batch.column(0)[0].as_py()
+            if rp_val:
+                default_rp = str(rp_val).strip()
+        pa.default_memory_pool().release_unused()
+
+    num_trials = max_trial if max_trial > 0 else 10_000
     return DetectedYeltSpec(
         trial_col=trial_col,
         event_col=event_col,
         loss_col=loss_col,
         day_col=day_col,
         region_peril_col=rp_col,
-        num_trials=10_000,
+        default_region_peril=default_rp,
+        num_trials=num_trials,
     )
 
 
