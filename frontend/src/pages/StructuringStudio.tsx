@@ -947,18 +947,18 @@ export function StructuringStudio({
             {dagEvalQ.data?.cacheMisses ?? 0} misses
           </span>
         </div>
-        <div className="table-wrap table-fit"><table>
+        <div className="table-wrap"><table className="dense-table">
           <thead>
             <tr>
               <th>Node</th>
               <th>Type</th>
-              <th className="num">Unadj EL</th>
-              <th className="num">Adj EL</th>
-              <th className="num">Uplift Δ</th>
-              <th className="num">Adj SD</th>
-              <th className="num">Adj Exp RIP</th>
-              <th className="num">Adj 1-in-250 TVaR</th>
-              <th className="num">Adj ELR</th>
+              <th className="num" title="Unadjusted expected loss">EL U</th>
+              <th className="num" title="Adjusted expected loss">EL A</th>
+              <th className="num" title="Uplift from unadjusted to adjusted">Δ</th>
+              <th className="num" title="Adjusted standard deviation">SD</th>
+              <th className="num" title="Adjusted expected reinstatement premium">RIP</th>
+              <th className="num" title="Adjusted 1-in-250 tail value at risk">TVaR</th>
+              <th className="num" title="Adjusted expected loss ratio">ELR</th>
             </tr>
           </thead>
           <tbody>
