@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from enum import Enum
 from typing import Literal
@@ -11,6 +12,10 @@ from pydantic import Field
 from .common import CamelModel
 from .domain import GraphSpec, RunManifest
 from .phase1 import ContractFull, LossFileRecord
+
+_SCHEMA_MAX_UPLOAD_BYTES = int(os.getenv("ROARING_LION_INTAKE_MAX_MB", "25")) * 1024 * 1024
+_SCHEMA_MAX_BASE64_CHARS = ((_SCHEMA_MAX_UPLOAD_BYTES + 2) // 3) * 4 + 4096
+_SCHEMA_MAX_ATTACHMENTS = int(os.getenv("ROARING_LION_INTAKE_MAX_ATTACHMENTS", "10"))
 
 
 class IntakeDoor(str, Enum):
@@ -119,17 +124,17 @@ class SubmissionConfirmResponse(CamelModel):
 
 
 class EmailAttachmentInput(CamelModel):
-    filename: str
-    content_base64: str
-    content_type: str | None = None
+    filename: str = Field(max_length=260)
+    content_base64: str = Field(max_length=_SCHEMA_MAX_BASE64_CHARS)
+    content_type: str | None = Field(default=None, max_length=120)
 
 
 class EmailMessageInput(CamelModel):
-    message_id: str | None = None
-    sender: str
-    subject: str
-    body_text: str = ""
-    attachments: list[EmailAttachmentInput] = []
+    message_id: str | None = Field(default=None, max_length=256)
+    sender: str = Field(max_length=256)
+    subject: str = Field(max_length=512)
+    body_text: str = Field(default="", max_length=250_000)
+    attachments: list[EmailAttachmentInput] = Field(default_factory=list, max_length=_SCHEMA_MAX_ATTACHMENTS)
 
 
 class EmailDoorStatus(CamelModel):

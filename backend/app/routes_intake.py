@@ -6,7 +6,8 @@ import hmac
 import os
 from typing import Callable
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile
+from pydantic import ValidationError
 
 from app.models.intake import (
     EmailDoorStatus,
@@ -25,12 +26,45 @@ from app.models.intake import (
 )
 from app.models.phase1 import ContractFull
 from app.services.contracts import ContractStore
-from app.services.intake import DraftValidationError, PayloadTooLargeError, SubmissionIntakeService
+from app.services.intake import (
+    DraftValidationError,
+    PayloadTooLargeError,
+    SubmissionIntakeService,
+    _max_base64_chars,
+)
+import app.services.intake as intake_service_mod
 from app.services.intake_parsers import MAX_UPLOAD_BYTES, MAX_UPLOAD_MB
 from app.services.lineage import LineageRegistry
 from app.services.sim_sets import SimSetStore
 
 CHUNK_SIZE = 256 * 1024  # 256 KB bounded streaming chunks
+
+
+async def _read_request_body_bounded(request: Request, max_bytes: int) -> bytes:
+    """Reject oversized JSON bodies on Content-Length or while streaming before Pydantic parses them."""
+    cl_header = request.headers.get("content-length")
+    if cl_header is not None:
+        try:
+            if int(cl_header) > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Email ingest payload exceeds the {max_bytes} byte request limit.",
+                )
+        except ValueError:
+            pass
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Email ingest payload exceeds the {max_bytes} byte request limit.",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 async def _read_upload_bounded(upload: UploadFile) -> bytes:
@@ -102,8 +136,16 @@ def create_intake_router(
         return svc.get_email_status()
 
     @router.post("/email/ingest", response_model=list[SubmissionDraftOut])
-    def email_ingest_message(msg: EmailMessageInput) -> list[SubmissionDraftOut]:
+    async def email_ingest_message(request: Request) -> list[SubmissionDraftOut]:
         """Ingest an email message (live webhook or fixture test message) through the unified pipeline."""
+        max_req_bytes = _max_base64_chars(intake_service_mod.MAX_UPLOAD_BYTES) + 256 * 1024
+        raw_body = await _read_request_body_bounded(request, max_req_bytes)
+        try:
+            msg = EmailMessageInput.model_validate_json(raw_body)
+        except ValidationError as exc:
+            if any(err.get("type") == "too_long" for err in exc.errors()):
+                raise HTTPException(status_code=413, detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
         try:
             return svc.ingest_email_message(msg)
         except PayloadTooLargeError as exc:

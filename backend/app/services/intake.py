@@ -78,6 +78,23 @@ def _max_base64_chars(max_bytes: int) -> int:
     return ((max_bytes + 2) // 3) * 4
 
 
+def _max_imap_message_bytes() -> int:
+    """Maximum raw RFC822 message size to download via IMAP (base64 overhead + MIME headers)."""
+    return _max_base64_chars(MAX_UPLOAD_BYTES) + 256 * 1024
+
+
+def _parse_rfc822_size(size_data: object) -> int | None:
+    if not isinstance(size_data, list):
+        return None
+    for item in size_data:
+        raw = item[0] if isinstance(item, tuple) else item
+        text = raw.decode("ascii", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        m = re.search(r"RFC822\.SIZE\s+(\d+)", text, re.I)
+        if m:
+            return int(m.group(1))
+    return None
+
+
 def _layer_spec_from_draft(
     lyr: IntakeLayerDraft,
     *,
@@ -621,6 +638,24 @@ class SubmissionIntakeService:
             ),
         )
 
+    def _existing_email_attachment_drafts(self, message_id: str | None) -> list[SubmissionDraftRecord]:
+        if not message_id:
+            return []
+        with get_session() as db:
+            watch_rows = (
+                db.query(WatchedIngestionRecord)
+                .filter(WatchedIngestionRecord.external_key.like(f"email:{message_id}:att:%"))
+                .all()
+            )
+            draft_ids = [w.draft_id for w in watch_rows]
+            if not draft_ids:
+                return []
+            return (
+                db.query(SubmissionDraftRecord)
+                .filter(SubmissionDraftRecord.draft_id.in_(draft_ids))
+                .all()
+            )
+
     def _ingest_email_parts(
         self,
         *,
@@ -630,6 +665,7 @@ class SubmissionIntakeService:
         body_text: str,
         raw_attachments: list[tuple[int, str, bytes]],
         rejected_attachments: list[str] | None = None,
+        has_existing_attachments: bool = False,
     ) -> list[SubmissionDraftOut]:
         """Ingest decoded email attachments (or body text) through the unified pipeline."""
         attachment_names = " ".join(fname for _, fname, _ in raw_attachments)
@@ -640,9 +676,18 @@ class SubmissionIntakeService:
         drafts: list[SubmissionDraftOut] = []
 
         if raw_attachments:
-            # First ingest any modelling attachments so their sim_set_id can attach to sibling PDF/Excel drafts
+            # First ingest any modelling attachments so their sim_set_id can attach to sibling PDF/Excel drafts.
+            # Also inspect already-stored sibling drafts from earlier polls of the same message_id.
             modelling_exts = {".csv", ".parquet"}
-            attached_sim_id: str | None = None
+            existing_siblings = self._existing_email_attachment_drafts(message_id)
+            attached_sim_id: str | None = next(
+                (
+                    s.sim_set_id
+                    for s in existing_siblings
+                    if s.source_file_type in (IntakeFileKind.YELT.value, IntakeFileKind.ELT.value) and s.sim_set_id
+                ),
+                None,
+            )
             doc_items: list[tuple[int, str, bytes]] = []
             modelling_drafts: list[SubmissionDraftOut] = []
 
@@ -665,6 +710,32 @@ class SubmissionIntakeService:
                 else:
                     doc_items.append((idx, fname, raw))
 
+            # Reverse cross-poll link: if a slip landed on an earlier poll and its YELT/ELT arrived now,
+            # attach the new sim_set_id and re-sketch the earlier pending slip draft's graph.
+            if attached_sim_id and existing_siblings:
+                _, loss_files = self._sim_set_metadata(attached_sim_id)
+                with get_session() as db:
+                    for sib in existing_siblings:
+                        if (
+                            sib.status == IntakeDraftStatus.PENDING_REVIEW.value
+                            and sib.source_file_type not in (IntakeFileKind.YELT.value, IntakeFileKind.ELT.value)
+                            and sib.sim_set_id != attached_sim_id
+                        ):
+                            rec = db.get(SubmissionDraftRecord, sib.draft_id)
+                            if rec is not None:
+                                ext_data = IntakeExtractedData(**json.loads(rec.extracted_json or "{}"))
+                                rec.sim_set_id = attached_sim_id
+                                graph = self.sketch_draft_graph(
+                                    draft_id=rec.draft_id,
+                                    extracted=ext_data,
+                                    sim_set_id=attached_sim_id,
+                                    loss_files=loss_files,
+                                    target_programme_id=rec.target_programme_id,
+                                )
+                                rec.graph_json = graph.model_dump_json()
+                                rec.updated_at = _utcnow()
+                    db.commit()
+
             for idx, fname, raw in doc_items:
                 item_key = f"email:{message_id}:att:{idx}:{fname}" if message_id else None
                 d = self.ingest_file(
@@ -683,7 +754,7 @@ class SubmissionIntakeService:
                 drafts.extend(modelling_drafts)
             else:
                 drafts = modelling_drafts + drafts
-        else:
+        elif not has_existing_attachments:
             effective_body = body_text or subject
             if rejected_attachments:
                 effective_body = (
@@ -800,6 +871,21 @@ class SubmissionIntakeService:
             ids = (msg_nums[0].split() if msg_nums and msg_nums[0] else [])[:max_messages]
             for num in ids:
                 try:
+                    # Check RFC822.SIZE before downloading the full message body
+                    _, size_data = imap.fetch(num, "(RFC822.SIZE)")
+                    msg_size = _parse_rfc822_size(size_data)
+                    max_msg_bytes = _max_imap_message_bytes()
+                    if msg_size is not None and msg_size > max_msg_bytes:
+                        logger.warning(
+                            "Skipping oversized IMAP message %s (%d bytes > %d byte cap) without downloading body",
+                            num,
+                            msg_size,
+                            max_msg_bytes,
+                        )
+                        imap.store(num, "+FLAGS", "\\Seen")
+                        skipped += 1
+                        continue
+
                     _, data = imap.fetch(num, "(BODY.PEEK[])")
                     if not data or not isinstance(data[0], tuple):
                         skipped += 1
@@ -812,6 +898,7 @@ class SubmissionIntakeService:
                     raw_attachments: list[tuple[int, str, bytes]] = []
                     rejected_attachments: list[str] = []
                     has_deferred_in_limit = False
+                    already_stored_attachments = 0
                     total_bytes = 0
                     att_idx = 0
 
@@ -830,6 +917,7 @@ class SubmissionIntakeService:
                             safe_name = fname or f"attachment_{att_idx}.bin"
                             item_key = f"email:{msg_id}:att:{att_idx}:{safe_name}"
                             if item_key in already_ingested_keys:
+                                already_stored_attachments += 1
                                 att_idx += 1
                                 continue
                             # Check per-file encoded length before decoding to avoid allocating oversized buffers
@@ -867,14 +955,21 @@ class SubmissionIntakeService:
                             if payload:
                                 body_parts.append(payload.decode("utf-8", errors="replace"))
 
-                    created = self._ingest_email_parts(
-                        message_id=msg_id,
-                        sender=sender,
-                        subject=subject,
-                        body_text="\n".join(body_parts),
-                        raw_attachments=raw_attachments,
-                        rejected_attachments=rejected_attachments,
-                    )
+                    if not raw_attachments and already_stored_attachments > 0:
+                        # All attachments on this message are already stored (or deferred); never create a body draft.
+                        created = []
+                    elif not raw_attachments and f"email:{msg_id}:body" in already_ingested_keys:
+                        created = []
+                    else:
+                        created = self._ingest_email_parts(
+                            message_id=msg_id,
+                            sender=sender,
+                            subject=subject,
+                            body_text="\n".join(body_parts),
+                            raw_attachments=raw_attachments,
+                            rejected_attachments=rejected_attachments,
+                            has_existing_attachments=already_stored_attachments > 0,
+                        )
                 except Exception as exc:
                     # Leave message UNSEEN so transient failures are retried on the next poll.
                     logger.warning("Failed to ingest IMAP message %s; leaving UNSEEN for retry: %s", num, exc)

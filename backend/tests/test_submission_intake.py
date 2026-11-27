@@ -476,6 +476,8 @@ def test_poll_email_inbox_uses_body_peek_verified_tls_and_handles_oversized_and_
 
         def fetch(self, num: bytes, cmd: str):
             fetch_commands.append(cmd)
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [f"{num.decode()} (RFC822.SIZE {len(raw_by_num[num])})".encode("ascii")])
             return ("OK", [(b"1 (BODY[] {100})", raw_by_num[num])])
 
         def store(self, num: bytes, op: str, flags: str):
@@ -509,8 +511,12 @@ def test_poll_email_inbox_uses_body_peek_verified_tls_and_handles_oversized_and_
     assert captured_ssl[0].verify_mode == ssl.CERT_REQUIRED
     assert captured_ssl[0].check_hostname is True
 
-    # Must use BODY.PEEK[] (never RFC822)
-    assert fetch_commands == ["(BODY.PEEK[])", "(BODY.PEEK[])", "(BODY.PEEK[])"]
+    # Must check RFC822.SIZE before BODY.PEEK[] (never RFC822)
+    assert fetch_commands == [
+        "(RFC822.SIZE)", "(BODY.PEEK[])",
+        "(RFC822.SIZE)", "(BODY.PEEK[])",
+        "(RFC822.SIZE)", "(BODY.PEEK[])",
+    ]
     # Message 1 (transient error) remains UNSEEN; Messages 2 & 3 are marked \Seen
     assert marked_seen == [b"2", b"3"]
 
@@ -650,6 +656,8 @@ def test_imap_poll_defers_in_limit_attachments_across_polls_without_marking_seen
             return ("OK", [b" ".join(unseen)])
 
         def fetch(self, num: bytes, cmd: str):
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [f"{num.decode()} (RFC822.SIZE {len(raw_msg)})".encode("ascii")])
             assert cmd == "(BODY.PEEK[])"
             return ("OK", [(b"1 (BODY[] {100})", raw_msg)])
 
@@ -680,6 +688,283 @@ def test_imap_poll_defers_in_limit_attachments_across_polls_without_marking_seen
 
     for d in d1 + d2:
         client.post(f"/api/intake/drafts/{d['draftId']}/discard")
+
+
+def test_imap_second_poll_of_fully_ingested_unseen_message_creates_no_body_draft(monkeypatch):
+    """Bugbot #11: Re-polling an already-ingested UNSEEN message must not create a spurious email_body.txt draft."""
+    from email.message import EmailMessage
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "repoll-secret")
+
+    msg = EmailMessage()
+    msg["Message-ID"] = "<imap-already-ingested-001@test>"
+    msg["From"] = "broker@example.com"
+    msg["Subject"] = "Already ingested submission"
+    msg.set_content("Cover email body text")
+    msg.add_attachment(
+        b"trial_id,event_id,loss_amount\n1,3001,15.0\n",
+        maintype="text",
+        subtype="csv",
+        filename="already_stored.csv",
+    )
+    raw_msg = msg.as_bytes()
+
+    # First ingest via webhook so the attachment is already in watched_ingestions
+    yelt_b64 = base64.b64encode(b"trial_id,event_id,loss_amount\n1,3001,15.0\n").decode("ascii")
+    w = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "<imap-already-ingested-001@test>",
+            "sender": "broker@example.com",
+            "subject": "Already ingested submission",
+            "bodyText": "Cover email body text",
+            "attachments": [{"filename": "already_stored.csv", "contentBase64": yelt_b64}],
+        },
+    )
+    assert w.status_code == 200
+    before_drafts = client.get("/api/intake/drafts").json()
+    seen_flags: set[bytes] = set()
+
+    class FakeRepollIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            return ("OK", [b"1"])
+
+        def fetch(self, num: bytes, cmd: str):
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [f"{num.decode()} (RFC822.SIZE {len(raw_msg)})".encode("ascii")])
+            return ("OK", [(b"1 (BODY[] {100})", raw_msg)])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                seen_flags.add(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeRepollIMAP)
+    poll = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "repoll-secret"})
+    assert poll.status_code == 200
+    assert poll.json()["drafts"] == []
+    assert b"1" in seen_flags
+
+    after_drafts = client.get("/api/intake/drafts").json()
+    assert len(after_drafts) == len(before_drafts)
+    assert not any(
+        d["sourceFilename"] == "email_body.txt" and "Already ingested submission" in d["sourceRef"]
+        for d in after_drafts
+    )
+
+    for d in w.json():
+        client.post(f"/api/intake/drafts/{d['draftId']}/discard")
+
+
+def test_imap_split_polls_link_yelt_sim_set_to_pdf_slip_in_both_orders(monkeypatch):
+    """Bugbot #12: When YELT and PDF are split across polls, the PDF draft still receives the YELT simSetId."""
+    from email.message import EmailMessage
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "split-secret")
+
+    pdf_bytes = _make_minimal_pdf([
+        "Cedent: Split Poll Assurance",
+        "Programme: Split Poll Wind XL 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $20M xs $40M | Premium $3.6M",
+    ])
+    yelt_bytes = _make_yelt_csv()
+
+    # Case A: YELT lands in poll 1, PDF lands in poll 2
+    msg_a = EmailMessage()
+    msg_a["Message-ID"] = "<imap-split-yelt-first@test>"
+    msg_a["From"] = "broker@example.com"
+    msg_a["Subject"] = "Split Poll YELT First"
+    msg_a.set_content("YELT then PDF")
+    msg_a.add_attachment(yelt_bytes, maintype="text", subtype="csv", filename="split_yelt.csv")
+    msg_a.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename="split_slip.pdf")
+
+    # Case B (reverse): PDF lands in poll 1, YELT lands in poll 2
+    msg_b = EmailMessage()
+    msg_b["Message-ID"] = "<imap-split-pdf-first@test>"
+    msg_b["From"] = "broker@example.com"
+    msg_b["Subject"] = "Split Poll PDF First"
+    msg_b.set_content("PDF then YELT")
+    msg_b.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename="rev_slip.pdf")
+    msg_b.add_attachment(yelt_bytes, maintype="text", subtype="csv", filename="rev_yelt.csv")
+
+    raw_by_num = {b"1": msg_a.as_bytes(), b"2": msg_b.as_bytes()}
+    seen_flags: set[bytes] = set()
+
+    class FakeSplitIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"2"])
+
+        def search(self, charset, criterion: str):
+            unseen = [n for n in (b"1", b"2") if n not in seen_flags]
+            return ("OK", [b" ".join(unseen)])
+
+        def fetch(self, num: bytes, cmd: str):
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [f"{num.decode()} (RFC822.SIZE {len(raw_by_num[num])})".encode("ascii")])
+            return ("OK", [(b"1 (BODY[] {100})", raw_by_num[num])])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                seen_flags.add(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeSplitIMAP)
+    # Force 1 attachment per poll so YELT and PDF always land on separate polls
+    monkeypatch.setattr(intake_mod, "MAX_EMAIL_ATTACHMENTS", 1)
+
+    p1 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "split-secret"})
+    assert p1.status_code == 200, p1.text
+    d1 = p1.json()["drafts"]
+    assert len(d1) == 2
+    assert seen_flags == set()
+
+    p2 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "split-secret"})
+    assert p2.status_code == 200, p2.text
+    d2 = p2.json()["drafts"]
+    assert len(d2) == 2
+    assert seen_flags == {b"1", b"2"}
+
+    # Verify Case A: split_slip.pdf received split_yelt.csv's simSetId
+    yelt_a = next(d for d in d1 if d["sourceFilename"] == "split_yelt.csv")
+    slip_a = next(d for d in d2 if d["sourceFilename"] == "split_slip.pdf")
+    assert slip_a["simSetId"] == yelt_a["simSetId"]
+
+    # Verify Case B (reverse): rev_slip.pdf (from poll 1) was updated with rev_yelt.csv's simSetId (from poll 2)
+    slip_b_id = next(d["draftId"] for d in d1 if d["sourceFilename"] == "rev_slip.pdf")
+    yelt_b = next(d for d in d2 if d["sourceFilename"] == "rev_yelt.csv")
+    slip_b_refreshed = client.get(f"/api/intake/drafts/{slip_b_id}").json()
+    assert slip_b_refreshed["simSetId"] == yelt_b["simSetId"]
+    loss_src_b = next(n for n in slip_b_refreshed["graph"]["nodes"] if n["nodeType"] == "LOSS_SOURCE")
+    assert loss_src_b["params"]["simSetId"] == yelt_b["simSetId"]
+
+    for d in d1 + d2:
+        client.post(f"/api/intake/drafts/{d['draftId']}/discard")
+
+
+def test_imap_poll_checks_rfc822_size_and_skips_oversized_message_without_fetching_body(monkeypatch):
+    """Finding #3: poll_email_inbox checks RFC822.SIZE first and never downloads BODY.PEEK[] for oversized mail."""
+    from email.message import EmailMessage
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "size-secret")
+
+    msg_ok = EmailMessage()
+    msg_ok["Message-ID"] = "<imap-small-002@test>"
+    msg_ok["From"] = "broker@example.com"
+    msg_ok["Subject"] = "Small valid email"
+    msg_ok.set_content("Cedent: Small Re\nProgramme: Small Cat XL 2027\nInception: 2027-01-01\nRegion: US-FL-WS\nLayer 1: $10M xs $20M | Premium $2.0M")
+    raw_ok = msg_ok.as_bytes()
+
+    body_fetched_nums: list[bytes] = []
+    marked_seen: list[bytes] = []
+
+    class FakeSizeIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"2"])
+
+        def search(self, charset, criterion: str):
+            return ("OK", [b"1 2"])
+
+        def fetch(self, num: bytes, cmd: str):
+            if "RFC822.SIZE" in cmd:
+                if num == b"1":
+                    return ("OK", [b"1 (RFC822.SIZE 999999999)"])
+                return ("OK", [f"2 (RFC822.SIZE {len(raw_ok)})".encode("ascii")])
+            body_fetched_nums.append(num)
+            assert num == b"2", "Must NOT fetch BODY.PEEK[] for oversized message 1"
+            return ("OK", [(b"2 (BODY[] {100})", raw_ok)])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                marked_seen.append(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeSizeIMAP)
+    res = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "size-secret"})
+    assert res.status_code == 200, res.text
+    assert body_fetched_nums == [b"2"]
+    assert marked_seen == [b"1", b"2"]
+    assert res.json()["processedCount"] == 1
+    assert res.json()["skippedCount"] == 1
+
+    for d in res.json()["drafts"]:
+        client.post(f"/api/intake/drafts/{d['draftId']}/discard")
+
+
+def test_email_ingest_rejects_oversized_raw_body_before_pydantic_parses(monkeypatch):
+    """Finding #4: POST /api/intake/email/ingest rejects oversized JSON bodies with 413 before Pydantic parses."""
+    import app.routes_intake as routes_mod
+    import app.services.intake as intake_mod
+
+    monkeypatch.setattr(intake_mod, "MAX_UPLOAD_BYTES", 64)
+    parse_calls = {"n": 0}
+    orig_validate = routes_mod.EmailMessageInput.model_validate_json
+
+    def spy_validate(*args, **kwargs):
+        parse_calls["n"] += 1
+        return orig_validate(*args, **kwargs)
+
+    monkeypatch.setattr(routes_mod.EmailMessageInput, "model_validate_json", spy_validate)
+
+    huge_json = ('{"sender":"a@b.com","subject":"big","bodyText":"' + ("x" * 300_000) + '"}').encode("utf-8")
+    res = client.post("/api/intake/email/ingest", content=huge_json, headers={"Content-Type": "application/json"})
+    assert res.status_code == 413
+    assert parse_calls["n"] == 0
 
 
 def test_parquet_yelt_reads_actual_trial_count():
