@@ -166,8 +166,18 @@ def test_zone_and_peril_filter_combinations():
     from app.engine.slice_runner import _allowed_rp_keys_for_filter
 
     assert _allowed_rp_keys_for_filter({}) is None
-    assert _allowed_rp_keys_for_filter({"perils": ["EQ"]}) == {"US-CA-EQ", "JP-KANTO-EQ"}
+    assert _allowed_rp_keys_for_filter({"perils": ["EQ"]}) == {"US-CA-EQ", "US-PNW-EQ", "JP-KANTO-EQ"}
     assert _allowed_rp_keys_for_filter({"zones": ["US-FL", "US-TX"]}) == {"US-FL-WS", "US-TX-WS"}
-    assert _allowed_rp_keys_for_filter({"zones": ["US"], "perils": ["WS"]}) == {"US-FL-WS", "US-TX-WS", "US-SE-WS"}
-    assert _allowed_rp_keys_for_filter({"zones": ["US"], "perils": ["EQ"]}) == {"US-CA-EQ"}
-    assert _allowed_rp_keys_for_filter({"regionPerils": ["EU-DE-WS"], "perils": ["EQ"]}) == {"EU-DE-WS", "US-CA-EQ", "JP-KANTO-EQ"}
+    assert _allowed_rp_keys_for_filter({"zones": ["US"], "perils": ["WS"]}) == {
+        "US-FL-WS",
+        "US-TX-WS",
+        "US-SE-WS",
+        "US-NE-WS",
+    }
+    assert _allowed_rp_keys_for_filter({"zones": ["US"], "perils": ["EQ"]}) == {"US-CA-EQ", "US-PNW-EQ"}
+    assert _allowed_rp_keys_for_filter({"regionPerils": ["EU-DE-WS"], "perils": ["EQ"]}) == {
+        "EU-DE-WS",
+        "US-CA-EQ",
+        "US-PNW-EQ",
+        "JP-KANTO-EQ",
+    }

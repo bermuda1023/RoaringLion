@@ -60,9 +60,18 @@ from app.services.portfolio_snapshot import (
     snapshot_loss_files,
 )
 from app.services.pricing_bind import validate_pricing_output_single_connection
+from app.services.seed_book import build_synthetic_book_records
 from app.services.seed_data import _build_eurowind_programme, _build_farmers_programme, _build_pacific_eq_programme
 
 DEFAULT_INDUSTRY_SIM_SET_ID = "ind-synth-cat-v1-100k"
+_LEGACY_CORE_SEED_IDS = frozenset({
+    "prog-farmers-us-27",
+    "prog-farmers-us-26",
+    "prog-pacific-eq-27",
+    "prog-eurowind-27",
+    "prog-ilw-fl-wind-27",
+    "prog-retro-unl-27",
+})
 _SOURCE_NODE_TYPES = (NodeType.LOSS_SOURCE, NodeType.INDUSTRY_INDEX_SOURCE, NodeType.PORTFOLIO_ROLLUP)
 
 
@@ -1033,7 +1042,52 @@ class ContractStore:
 
     def ensure_seeded(self, default_sim_set_id: str) -> None:
         with get_session() as db:
-            if db.query(ContractRecord).count() > 0:
+            existing_ids = {r[0] for r in db.query(ContractRecord.programme_id).all()}
+            if existing_ids:
+                # Top up legacy 6-contract dev databases once without overriding user-modified books.
+                if existing_ids.issubset(_LEGACY_CORE_SEED_IDS):
+                    sim_files = _sim_loss_files(db)
+                    existing_recs = db.query(ContractRecord).all()
+                    existing_full = [_record_to_full(r) for r in existing_recs]
+                    syn_recs, syn_notes = build_synthetic_book_records(
+                        default_sim_set_id=default_sim_set_id,
+                        base_loss_files=sim_files.get(default_sim_set_id, []),
+                        ind_loss_files=sim_files.get(DEFAULT_INDUSTRY_SIM_SET_ID, []),
+                        existing_contracts=existing_full,
+                        roll_up_layers_fn=_roll_up_layers,
+                    )
+                    db.add_all(syn_recs)
+                    for note in syn_notes:
+                        db.merge(note)
+                    db.flush()
+                    # Refresh source lossFiles on legacy core ILW/UNL-retro graphs for expanded region-perils.
+                    all_full = [_record_to_full(r) for r in db.query(ContractRecord).all()]
+                    for rec in existing_recs:
+                        if rec.programme_id not in ("prog-ilw-fl-wind-27", "prog-retro-unl-27"):
+                            continue
+                        graph = GraphSpec(**json.loads(rec.graph_json))
+                        changed = False
+                        for node in graph.nodes:
+                            if node.node_type == NodeType.INDUSTRY_INDEX_SOURCE:
+                                ind_id = str(node.params.get("simSetId") or DEFAULT_INDUSTRY_SIM_SET_ID).strip()
+                                if ind_id in sim_files:
+                                    node.params = {**node.params, "lossFiles": sim_files[ind_id]}
+                                    changed = True
+                            elif node.node_type == NodeType.PORTFOLIO_ROLLUP:
+                                as_of = str(node.params.get("asOfDate") or rec.portfolio_snapshot_date or "2027-01-01").strip()
+                                snap = select_unl_snapshot_contracts(all_full, as_of_date=as_of, exclude_programme_id=rec.programme_id)
+                                node.params = {
+                                    **node.params,
+                                    "lossFiles": snapshot_loss_files(snap, as_of_date=as_of, fallback_sim_set_id=default_sim_set_id),
+                                }
+                                changed = True
+                        if changed:
+                            graph.content_hash = canonical_hash({
+                                "nodes": [n.model_dump() for n in graph.nodes],
+                                "edges": [e.model_dump() for e in graph.edges],
+                            })
+                            rec.graph_json = graph.model_dump_json()
+                    db.commit()
                 return
             for idx, prog in enumerate((
                 _build_farmers_programme(default_sim_set_id),
@@ -1215,6 +1269,20 @@ class ContractStore:
                             body="FL Wind house uplift +10% applied (Adjusted view). Attachment raised +5m YoY; risk-adjusted rate change +6.1% meets fund hurdle.",
                         )
                     )
+            db.flush()
+
+            # Seed the ~42 realistic synthetic clients/programmes in the same transaction
+            sim_files = _sim_loss_files(db)
+            core_full = [_record_to_full(r) for r in db.query(ContractRecord).all()]
+            syn_recs, syn_notes = build_synthetic_book_records(
+                default_sim_set_id=default_sim_set_id,
+                base_loss_files=sim_files.get(default_sim_set_id, []),
+                ind_loss_files=sim_files.get(DEFAULT_INDUSTRY_SIM_SET_ID, []),
+                existing_contracts=core_full,
+                roll_up_layers_fn=_roll_up_layers,
+            )
+            db.add_all(syn_recs)
+            db.add_all(syn_notes)
             db.commit()
 
         # Seed a bound ILW hedge (auto-wired to Industry Loss Run) and a quoted UNL retro hedge

@@ -308,7 +308,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
           rarcPct: l.rarcPct.trim() === '' ? undefined : Number(l.rarcPct),
         })),
         regionPerils: rps,
-        perils: rps.length ? [rps[0].endsWith('EQ') ? 'EQ' : 'WS'] : ['WS', 'EQ'],
+        perils: rps.length ? [rps[0].split('-').pop() || 'WS'] : ['WS', 'EQ'],
         ilwSpec: isIlw
           ? {
               industrySimSetId: 'ind-synth-cat-v1-100k',
@@ -548,9 +548,16 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               <option value="US-FL-WS">US-FL-WS</option>
               <option value="US-TX-WS">US-TX-WS</option>
               <option value="US-SE-WS">US-SE-WS</option>
+              <option value="US-NE-WS">US-NE-WS</option>
               <option value="US-CA-EQ">US-CA-EQ</option>
-              <option value="JP-KANTO-EQ">JP-KANTO-EQ</option>
+              <option value="US-PNW-EQ">US-PNW-EQ</option>
+              <option value="US-MW-CS">US-MW-CS</option>
+              <option value="US-CA-WF">US-CA-WF</option>
               <option value="EU-DE-WS">EU-DE-WS</option>
+              <option value="JP-TY-WS">JP-TY-WS</option>
+              <option value="JP-KANTO-EQ">JP-KANTO-EQ</option>
+              <option value="AU-QLD-WS">AU-QLD-WS</option>
+              <option value="GL-CY-CY">GL-CY-CY</option>
             </select>
             <div style={{ width: '100%', fontSize: 11, color: 'var(--teal)' }}>
               {newDealBasis === 'ILW'
