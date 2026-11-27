@@ -69,23 +69,28 @@ export function computeAutoBandBound(
   };
 }
 
-/** 100%-share collateralized capital needed for one layer: max(0, limit - deposit_premium) for assumed, 0 for hedges. */
+/**
+ * 100%-share deployed capital needed for one layer:
+ * - Assumed (Long): max(0, limit - deposit_premium) (collateral posted net of premium received).
+ * - Hedge (Ceded/Retro): max(0, deposit_premium) (upfront hedge purchase cost consuming deployable capital).
+ */
 export function computeLayerCapital1xM(
   layer: Pick<OptimizerLayerCatalogItem, 'limit1xM' | 'premium1xM' | 'capital1xM' | 'direction'>,
 ): number {
-  if (isHedgeDirection(layer.direction)) return 0;
   if (typeof layer.capital1xM === 'number' && Number.isFinite(layer.capital1xM)) {
     return Math.max(0, layer.capital1xM);
+  }
+  if (isHedgeDirection(layer.direction)) {
+    return Math.max(0, layer.premium1xM);
   }
   return Math.max(0, layer.limit1xM - layer.premium1xM);
 }
 
-/** Deployed capital needed for a layer at a given line share (0..1): max(0, (limit - premium) * share). */
+/** Deployed capital needed for a layer at a given line share (0..1). */
 export function computeLayerDeployedCapitalM(
   layer: Pick<OptimizerLayerCatalogItem, 'limit1xM' | 'premium1xM' | 'capital1xM' | 'direction'>,
   share: number,
 ): number {
-  if (isHedgeDirection(layer.direction)) return 0;
   const s = Math.max(0, Number.isFinite(share) ? share : 0);
   return computeLayerCapital1xM(layer) * s;
 }
@@ -180,38 +185,38 @@ export function detectOptimizerConflicts({
   const conflicts: ConstraintConflict[] = [];
   const rowMap: Record<string, RowConflictHighlight> = {};
 
-  const assumed = layers
-    .filter((l) => !isHedgeDirection(l.direction))
-    .map((layer) => {
-      const { minShare, maxShare, locked } = effectiveBoundsForLayer(layer, bounds);
-      const cap1x = computeLayerCapital1xM(layer);
-      const minLimitM = minShare * layer.limit1xM;
-      const maxLimitM = maxShare * layer.limit1xM;
-      const minCapitalM = minShare * cap1x;
-      const detail: ConflictLayerDetail = {
-        layerKey: layer.layerKey,
-        programmeId: layer.programmeId,
-        layerId: layer.layerId,
-        cedentName: layer.cedentName,
-        layerName: layer.layerName,
-        minShare: Number(minShare.toFixed(4)),
-        maxShare: Number(maxShare.toFixed(4)),
-        locked,
-        limit1xM: layer.limit1xM,
-        minLimitM: round2(minLimitM),
-        maxLimitM: round2(maxLimitM),
-        capital1xM: round2(cap1x),
-        minCapitalM: round2(minCapitalM),
-      };
-      return { layer, minShare, maxShare, locked, cap1x, minLimitM, maxLimitM, minCapitalM, detail };
-    });
+  const allRows = layers.map((layer) => {
+    const { minShare, maxShare, locked } = effectiveBoundsForLayer(layer, bounds);
+    const cap1x = computeLayerCapital1xM(layer);
+    const isHedge = isHedgeDirection(layer.direction);
+    const minLimitM = isHedge ? 0 : minShare * layer.limit1xM;
+    const maxLimitM = isHedge ? 0 : maxShare * layer.limit1xM;
+    const minCapitalM = minShare * cap1x;
+    const detail: ConflictLayerDetail = {
+      layerKey: layer.layerKey,
+      programmeId: layer.programmeId,
+      layerId: layer.layerId,
+      cedentName: layer.cedentName,
+      layerName: layer.layerName,
+      minShare: Number(minShare.toFixed(4)),
+      maxShare: Number(maxShare.toFixed(4)),
+      locked,
+      limit1xM: layer.limit1xM,
+      minLimitM: round2(minLimitM),
+      maxLimitM: round2(maxLimitM),
+      capital1xM: round2(cap1x),
+      minCapitalM: round2(minCapitalM),
+    };
+    return { layer, isHedge, minShare, maxShare, locked, cap1x, minLimitM, maxLimitM, minCapitalM, detail };
+  });
+  const assumed = allRows.filter((r) => !r.isHedge);
 
-  const minRequiredCapitalM = round2(assumed.reduce((sum, r) => sum + r.minCapitalM, 0));
-  const maxPossibleCapitalM = round2(assumed.reduce((sum, r) => sum + r.maxShare * r.cap1x, 0));
+  const minRequiredCapitalM = round2(allRows.reduce((sum, r) => sum + r.minCapitalM, 0));
+  const maxPossibleCapitalM = round2(allRows.reduce((sum, r) => sum + r.maxShare * r.cap1x, 0));
 
-  // 1. Fund Capital vs minimum required Deployed Capital from layer min/locked bounds
+  // 1. Fund Capital vs minimum required Deployed Capital from layer min/locked bounds (assumed collateral + hedge premium cost)
   if (Number.isFinite(fundCapitalM) && fundCapitalM > 0 && minRequiredCapitalM > fundCapitalM + EPS) {
-    const offending = assumed.filter((r) => r.minCapitalM > EPS);
+    const offending = allRows.filter((r) => r.minCapitalM > EPS);
     const excessM = round2(minRequiredCapitalM - fundCapitalM);
     const message = `Minimum required Deployed Capital from layer min/locked bounds ($${minRequiredCapitalM.toFixed(1)}m) exceeds Fund Capital ($${fundCapitalM.toFixed(1)}m) by $${excessM.toFixed(1)}m. Raise Fund Capital or lower highlighted layer Min % bounds.`;
     conflicts.push({

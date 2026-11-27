@@ -88,6 +88,13 @@ export function PortfolioReturnsView({
     good: boolean | null;
   }[] = [
     {
+      label: 'Deployed Capital',
+      gross: fmtMoneyM(withoutHedges.deployedCollateral, 2),
+      net: fmtMoneyM(withHedges.deployedCollateral, 2),
+      delta: fmtMoneyM(withHedges.deployedCollateral - withoutHedges.deployedCollateral, 2, { signed: true }),
+      good: withHedges.deployedCollateral <= withoutHedges.deployedCollateral,
+    },
+    {
       label: 'Net Premium',
       gross: fmtMoneyM(withoutHedges.grossPremium, 2),
       net: fmtMoneyM(withHedges.netPremium ?? withHedges.grossPremium, 2),
@@ -317,7 +324,7 @@ export function PortfolioReturnsView({
             {capitalExceeded && (
               <div className="error-banner" role="alert" data-testid="capital-exceeded-banner">
                 <strong>Capital Constraint Violation:</strong> Auto-calculated Deployed Capital (
-                <strong>{fmtMoneyM(deployedCapitalM, 2)}</strong>, Σ (Limit − Premium) × Line) exceeds Fund Capital (
+                <strong>{fmtMoneyM(deployedCapitalM, 2)}</strong>, Σ (Limit − Premium) × Line + Hedge Cost) exceeds Fund Capital (
                 <strong>{fmtMoneyM(totalCapital, 2)}</strong>) by{' '}
                 <strong>{fmtMoneyM(Math.abs(capitalHeadroomM), 2)}</strong> ({fmtPct(capitalUtilPct, 1)} utilization).
                 Increase Fund Capital or reduce bound lines.
@@ -336,7 +343,7 @@ export function PortfolioReturnsView({
               <div
                 className="kpi"
                 data-testid="deployed-capital-kpi"
-                title="Auto-calculated: sum of max(0, (Limit − Deposit Premium) × Signed Line) across assumed layers"
+                title="Auto-calculated: Σ max(0, (Limit − Deposit Premium) × Signed Line) for assumed layers + Σ Hedge Premium × Signed Line for hedge positions"
               >
                 <div className="kpi-label">Deployed Capital (Auto)</div>
                 <div className="kpi-val" style={{ color: capitalExceeded ? 'var(--negative)' : 'var(--text-strong)' }}>

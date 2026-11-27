@@ -717,7 +717,7 @@ def _build_vectors(
                 "current_share": 0.0 if no_line_held else p.signed_line,
                 "limit_1x": 0.0 if p_is_hedge else lim_1x,
                 "prem_1x": prem_1x,
-                "capital_1x": 0.0 if p_is_hedge else cap_1x,
+                "capital_1x": cap_1x,
                 "el_1x": el_1x,
                 "profit_1x": (el_1x - prem_1x - rip_1x) if p_is_hedge else (prem_1x + rip_1x - el_1x),
                 "region_perils": p.region_perils,
@@ -758,7 +758,7 @@ def _build_vectors(
             "current_share": 0.0,
             "limit_1x": 0.0,
             "prem_1x": prem_ilw,
-            "capital_1x": 0.0,
+            "capital_1x": deployed_capital_m(0.0, prem_ilw, is_hedge=True),
             "el_1x": el_ilw,
             "profit_1x": el_ilw - prem_ilw,
             "region_perils": ["US-FL-WS"],
@@ -829,7 +829,7 @@ def list_optimizable_layers(
 
 
 def _item_capital_1x(it: dict[str, Any]) -> float:
-    """Per-100%-share deployed capital needed for an optimizer item: max(0, limit - premium) for assumed, 0 for hedges."""
+    """Per-100%-share deployed capital needed for an optimizer item: max(0, limit - premium) for assumed, max(0, premium) for hedges."""
     if "capital_1x" in it:
         return float(it["capital_1x"])
     return deployed_capital_m(
@@ -900,14 +900,15 @@ def detect_constraint_conflicts(req: OptimizerRequest, items: list[dict[str, Any
             min_capital_m=round(lb * cap1x, 4),
         )
 
-    # 1. Fund Capital vs minimum required Deployed Capital from layer min/locked bounds
+    # 1. Fund Capital vs minimum required Deployed Capital from layer min/locked bounds (assumed collateral + hedge premium cost)
     eff_cap = req.effective_max_deployed_capital()
-    min_cap_total = sum(lb * _item_capital_1x(it) for _, it, (lb, _, _) in assumed)
-    max_cap_total = sum(ub * _item_capital_1x(it) for _, it, (_, ub, _) in assumed)
+    all_entries = [(i, it, var_bounds[i]) for i, it in enumerate(items)]
+    min_cap_total = sum(lb * _item_capital_1x(it) for _, it, (lb, _, _) in all_entries)
+    max_cap_total = sum(ub * _item_capital_1x(it) for _, it, (_, ub, _) in all_entries)
     if min_cap_total > eff_cap + 1e-6:
         offending = [
             _detail(it, lb, ub, locked)
-            for _, it, (lb, ub, locked) in assumed
+            for _, it, (lb, ub, locked) in all_entries
             if lb * _item_capital_1x(it) > 1e-6
         ]
         excess = min_cap_total - eff_cap
@@ -1120,9 +1121,7 @@ def _compute_portfolio_snapshot(
     profit_m = float(sum(weights[i] * items[i]["profit_1x"] for i in range(m)))
     yield_m = total_capital * 0.03
     mean_roc = ((profit_m + yield_m) / total_capital) * 100.0
-    deployed = float(
-        sum(weights[i] * _item_capital_1x(items[i]) for i in range(m) if not is_hedge_direction(items[i]["direction"]))
-    )
+    deployed = float(sum(weights[i] * _item_capital_1x(items[i]) for i in range(m)))
     cap_util_pct = (deployed / total_capital) * 100.0 if total_capital > 0 else 0.0
     cap_headroom = total_capital - deployed
     cap_exceeded = deployed > total_capital + 1e-6
@@ -1460,17 +1459,18 @@ def _build_highs_model(
                 h.addRow(-highspy.kHighsInf, 0.0, 2, [i, y_start + i], [-1.0, float(req.min_line_size_share)])
                 row_cursor += 1
 
-    # 1. Total Deployed Capital constraint: sum((limit - premium) * share) <= Fund Capital
+    # 1. Total Deployed Capital constraint: sum(assumed (limit - premium) * share + hedge premium * share) <= Fund Capital
     assumed_idxs = [i for i, it in enumerate(items) if not is_hedge_direction(it["direction"])]
-    assumed_caps = [_item_capital_1x(items[i]) for i in assumed_idxs]
+    cap_idxs = [i for i in range(m) if _item_capital_1x(items[i]) > 1e-12]
+    cap_coeffs = [_item_capital_1x(items[i]) for i in cap_idxs]
     eff_max_cap = req.effective_max_deployed_capital()
-    if assumed_idxs:
+    if cap_idxs:
         add_named_row(
             "Deployed Capital <= Fund Capital ($M)",
             float(req.min_deployed_collateral),
             eff_max_cap,
-            assumed_idxs,
-            assumed_caps,
+            cap_idxs,
+            cap_coeffs,
             tag="deployed_capital",
         )
 
@@ -1978,9 +1978,7 @@ def solve_portfolio_optimization(
     base_tvar_250 = float(base_multi[1][1])
     base_tvar_1000 = float(base_multi[2][1])
     base_profit = float(sum(cur_w[i] * items[i]["profit_1x"] for i in range(m)))
-    base_deployed = float(
-        sum(cur_w[i] * _item_capital_1x(items[i]) for i in range(m) if not is_hedge_direction(items[i]["direction"]))
-    )
+    base_deployed = float(sum(cur_w[i] * _item_capital_1x(items[i]) for i in range(m)))
     yield_m = req.total_capital * 0.03
     base_roc = ((base_profit + yield_m) / req.total_capital) * 100.0
 
@@ -2007,9 +2005,7 @@ def solve_portfolio_optimization(
     del w_mat_buf, mat
     _trim_memory()
     opt_profit = float(sum(opt_w[i] * items[i]["profit_1x"] for i in range(m)))
-    opt_deployed = float(
-        sum(opt_w[i] * _item_capital_1x(items[i]) for i in range(m) if not is_hedge_direction(items[i]["direction"]))
-    )
+    opt_deployed = float(sum(opt_w[i] * _item_capital_1x(items[i]) for i in range(m)))
     opt_roc = ((opt_profit + yield_m) / req.total_capital) * 100.0
 
     def _safe_ratio(p: float, tv: float) -> float:
@@ -2146,9 +2142,7 @@ def compute_efficient_frontier(
         _, opt_tvar_250, _ = rle.euler_cotvar(_weighted_mat(mat, opt_w, w_mat_buf), 250.0)
         opt_profit = float(sum(opt_w[i] * items[i]["profit_1x"] for i in range(m)))
         opt_roc = ((opt_profit + yield_m) / req.total_capital) * 100.0
-        dep = float(
-            sum(opt_w[i] * _item_capital_1x(items[i]) for i in range(m) if not is_hedge_direction(items[i]["direction"]))
-        )
+        dep = float(sum(opt_w[i] * _item_capital_1x(items[i]) for i in range(m)))
         ret_tv250 = (opt_profit / float(opt_tvar_250)) if float(opt_tvar_250) > 1e-6 else 0.0
         points.append(
             FrontierPoint(

@@ -19,10 +19,11 @@ client = TestClient(app)
 def test_deployed_capital_formula_unit_and_floors_at_zero():
     assert deployed_capital_m(50.0, 11.5) == pytest.approx(38.5)
     assert deployed_capital_m(50.0 * 0.25, 11.5 * 0.25) == pytest.approx(38.5 * 0.25)
-    # Floored at 0 when premium exceeds limit
+    # Floored at 0 when premium exceeds limit on an assumed deal
     assert deployed_capital_m(10.0, 15.0) == 0.0
-    # Hedges never require posted collateral
-    assert deployed_capital_m(50.0, 5.0, is_hedge=True) == 0.0
+    # Hedge positions cost their upfront purchase premium, reducing deployable capital
+    assert deployed_capital_m(50.0, 5.0, is_hedge=True) == pytest.approx(5.0)
+    assert deployed_capital_m(50.0, 0.0, is_hedge=True) == 0.0
 
 
 def test_portfolio_rollup_auto_calculates_deployed_capital_and_flags_capital_violation():
@@ -30,18 +31,33 @@ def test_portfolio_rollup_auto_calculates_deployed_capital_and_flags_capital_vio
     assert r_ok.status_code == 200, r_ok.text
     ok = r_ok.json()
 
-    expected_deployed = sum(
+    expected_assumed_cap = sum(
         max(0.0, row["limit"] - row["premium"])
         for row in ok["layerAllocations"]
         if not row["isHedge"]
     )
+    # In layerAllocations, hedge rows store signed_premium (negative = cost paid)
+    expected_hedge_cost = sum(
+        max(0.0, abs(row["premium"]))
+        for row in ok["layerAllocations"]
+        if row["isHedge"]
+    )
+    expected_deployed = expected_assumed_cap + expected_hedge_cost
     gross_limit = sum(row["limit"] for row in ok["layerAllocations"] if not row["isHedge"])
-    assert expected_deployed > 0.0
+    assert expected_assumed_cap > 0.0
+    assert expected_hedge_cost > 0.0
     assert expected_deployed < gross_limit
     assert ok["deployedCollateral"] == pytest.approx(expected_deployed, abs=1e-2)
     assert ok["capitalExceeded"] is False
     assert ok["capitalHeadroomM"] == pytest.approx(500.0 - expected_deployed, abs=1e-2)
     assert ok["capitalUtilizationPct"] == pytest.approx((expected_deployed / 500.0) * 100.0, abs=0.05)
+
+    # Without Hedges excludes hedge purchase cost, leaving more deployable headroom
+    r_no_hedge = client.get("/api/portfolio/rollup?view=ADJUSTED&totalCapital=500&includeHedges=false")
+    assert r_no_hedge.status_code == 200, r_no_hedge.text
+    no_hedge = r_no_hedge.json()
+    assert no_hedge["deployedCollateral"] == pytest.approx(expected_assumed_cap, abs=1e-2)
+    assert ok["deployedCollateral"] == pytest.approx(no_hedge["deployedCollateral"] + expected_hedge_cost, abs=1e-2)
 
     # When Fund Capital < Deployed Capital, capitalExceeded is True and headroom is negative
     low_cap = round(expected_deployed * 0.5, 2)
@@ -75,17 +91,54 @@ def test_optimizer_enforces_fund_capital_ceiling_using_limit_minus_premium():
     assert body["fundCapitalM"] == pytest.approx(120.0)
     assert body["afterDeployedCapitalM"] <= 120.05
 
-    # Verify deployed capital equals sum(max(0, optimalLimit - optimalPremium)) across assumed layers
+    # Verify deployed capital equals sum(max(0, optimalLimit - optimalPremium)) for assumed + sum(optimalPremium) for hedges
     recomputed = sum(
         max(0.0, d["optimalLimitM"] - d["optimalPremiumM"])
-        for d in body["deals"]
         if d["direction"] == "ASSUMED"
+        else max(0.0, d["optimalPremiumM"])
+        for d in body["deals"]
     )
     assert body["afterDeployedCapitalM"] == pytest.approx(recomputed, abs=0.05)
     # Every optimal share is hard-capped at 100% (1.0)
     assert all(0.0 <= d["optimalShare"] <= 1.0001 for d in body["deals"])
 
-    # Candidates catalog exposes capital1xM = max(0, limit1xM - premium1xM) and defaultMaxShare == 1.0
+    # Candidate retro ILW hedge consumes its purchase premium (limit * rol = 25 * 0.20 = $5m) from Fund Capital
+    r_with_hedge = client.post(
+        "/api/optimizer/solve",
+        json={
+            "mode": "CURRENT",
+            "granularity": "LAYER",
+            "objective": "MAX_EXPECTED_PROFIT",
+            "totalCapital": 120.0,
+            "maxTvar100M": 200.0,
+            "maxTvar250M": 250.0,
+            "includeRetroIlwCandidate": True,
+            "retroIlwLimitM": 25.0,
+            "retroIlwRol": 0.20,
+            "layerBounds": [
+                {"layerKey": "cand-retro-ilw-fl", "minShare": 1.0, "maxShare": 1.0, "locked": False}
+            ],
+        },
+    )
+    assert r_with_hedge.status_code == 200, r_with_hedge.text
+    hb = r_with_hedge.json()
+    assert hb["status"] in ("Optimal", "Feasible")
+    assert hb["afterDeployedCapitalM"] <= 120.05
+    assumed_cap = sum(
+        max(0.0, d["optimalLimitM"] - d["optimalPremiumM"])
+        for d in hb["deals"]
+        if d["direction"] == "ASSUMED"
+    )
+    hedge_cap = sum(
+        max(0.0, d["optimalPremiumM"])
+        for d in hb["deals"]
+        if d["direction"] != "ASSUMED"
+    )
+    assert hedge_cap >= 5.0 - 1e-3
+    assert hb["afterDeployedCapitalM"] == pytest.approx(assumed_cap + hedge_cap, abs=0.05)
+    assert assumed_cap <= 120.0 - hedge_cap + 0.05
+
+    # Candidates catalog exposes capital1xM = max(0, limit1xM - premium1xM) for assumed and premium1xM for hedges
     cand = client.get("/api/optimizer/candidates?view=ADJUSTED&mode=FORWARD_PLANNING&limit=25&offset=0").json()
     assert cand["universeDeployedCapitalM"] > 0.0
     assert cand["universeMaxLayerLimit1xM"] > 0.0
@@ -95,7 +148,7 @@ def test_optimizer_enforces_fund_capital_ceiling_using_limit_minus_premium():
         assert lyr["capital1xM"] == pytest.approx(max(0.0, lyr["limit1xM"] - lyr["premium1xM"]), abs=1e-3)
     if cand["retroCandidate"]:
         assert cand["retroCandidate"]["defaultMaxShare"] == 1.0
-        assert cand["retroCandidate"]["capital1xM"] == 0.0
+        assert cand["retroCandidate"]["capital1xM"] == pytest.approx(cand["retroCandidate"]["premium1xM"], abs=1e-3)
 
 
 def test_optimizer_hard_caps_shares_at_100_percent_validation():

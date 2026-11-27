@@ -87,15 +87,17 @@ describe('optimizerConstraints — relative auto banding & 100% hard cap', () =>
 });
 
 describe('optimizerConstraints — auto deployed capital formula', () => {
-  it('computes max(0, (limit - premium) * share) for assumed layers and 0 for hedges', () => {
+  it('computes max(0, (limit - premium) * share) for assumed layers and max(0, premium * share) for hedges', () => {
     const l = makeLayer({ limit1xM: 50, premium1xM: 11.5, capital1xM: undefined });
     expect(computeLayerDeployedCapitalM(l, 0.5)).toBeCloseTo(19.25, 6);
 
     const negCap = makeLayer({ limit1xM: 10, premium1xM: 12, capital1xM: undefined });
     expect(computeLayerDeployedCapitalM(negCap, 1.0)).toBe(0);
 
-    const hedge = makeLayer({ direction: 'EXTERNAL_RETRO', limit1xM: 25, premium1xM: 5 });
-    expect(computeLayerDeployedCapitalM(hedge, 1.0)).toBe(0);
+    // Buying a hedge costs its upfront purchase premium, reducing deployable capital
+    const hedge = makeLayer({ direction: 'EXTERNAL_RETRO', limit1xM: 25, premium1xM: 5, capital1xM: undefined });
+    expect(computeLayerDeployedCapitalM(hedge, 1.0)).toBeCloseTo(5.0, 6);
+    expect(computeLayerDeployedCapitalM(hedge, 0.5)).toBeCloseTo(2.5, 6);
   });
 });
 
@@ -163,21 +165,34 @@ describe('optimizerConstraints — Single Cedent Max & Fund Capital conflict det
     expect(res.rowConflictsByLayerKey['b::1']).toBeUndefined();
   });
 
-  it('flags Fund Capital conflict when locked/min layer deployed capital exceeds Fund Capital', () => {
+  it('flags Fund Capital conflict when locked/min layer deployed capital (including hedge purchase cost) exceeds Fund Capital', () => {
     const l1 = makeLayer({ layerKey: 'a::1', currentShare: 1.0, limit1xM: 100, premium1xM: 20, capital1xM: 80 });
+    const hedge = makeLayer({
+      layerKey: 'h::1',
+      direction: 'EXTERNAL_RETRO',
+      cedentName: 'ILW Market Hedge',
+      currentShare: 1.0,
+      limit1xM: 25,
+      premium1xM: 5,
+      capital1xM: 5,
+    });
     const res = detectOptimizerConflicts({
-      layers: [l1],
-      bounds: { 'a::1': { minPct: 100, maxPct: 100, locked: true } },
+      layers: [l1, hedge],
+      bounds: {
+        'a::1': { minPct: 100, maxPct: 100, locked: true },
+        'h::1': { minPct: 100, maxPct: 100, locked: true },
+      },
       maxSingleCedentLimitM: null,
-      fundCapitalM: 50,
+      fundCapitalM: 82, // 80m assumed + 5m hedge cost = 85m > 82m!
       hasAllUniverseLayers: true,
     });
 
     expect(res.hasBlockingError).toBe(true);
     const err = res.conflicts.find((c) => c.kind === 'FUND_CAPITAL_MIN_EXCEEDS_CAP');
     expect(err).toBeTruthy();
-    expect(err?.requiredMinLimitM).toBe(80);
-    expect(err?.excessM).toBe(30);
+    expect(err?.requiredMinLimitM).toBe(85);
+    expect(err?.excessM).toBe(3);
     expect(res.rowConflictsByLayerKey['a::1']?.severity).toBe('ERROR');
+    expect(res.rowConflictsByLayerKey['h::1']?.severity).toBe('ERROR');
   });
 });

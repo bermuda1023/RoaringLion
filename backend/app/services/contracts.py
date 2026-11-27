@@ -1035,16 +1035,20 @@ def _roll_up_layers(rec: ContractRecord, graph: GraphSpec, *, clear_rarc_if_empt
     attachments = [l.attachment for l in layers if l.attachment is not None]
     if attachments:
         rec.attachment = min(attachments)
-    rec.collateral_required = round(
-        sum(
-            deployed_capital_m(
-                (l.limit or 0.0) * l.signed_line,
-                l.deposit_premium * l.signed_line,
-                is_hedge=is_hedge_direction(rec.direction),
-            )
-            for l in layers
-        ),
-        6,
+    rec.collateral_required = (
+        0.0
+        if is_hedge_direction(rec.direction)
+        else round(
+            sum(
+                deployed_capital_m(
+                    (l.limit or 0.0) * l.signed_line,
+                    l.deposit_premium * l.signed_line,
+                    is_hedge=False,
+                )
+                for l in layers
+            ),
+            6,
+        )
     )
     _sync_profile_rarc_from_layers(rec, layers, clear_if_empty=clear_rarc_if_empty)
 
@@ -1609,7 +1613,8 @@ class ContractStore:
 
         claimed: set[tuple[str, str]] = set()
         legacy_pids: list[str] = []
-        rolled_layers: list[tuple[str, str, str, float, float, float]] = []  # (ced, label, currency, lim1x, prem1x, share)
+        # (ced, label, currency, lim1x, prem1x, share, is_hedge)
+        rolled_layers: list[tuple[str, str, str, float, float, float, bool]] = []
 
         for pid, (_, _, _, _, _, gdict) in parsed.items():
             nodes = gdict.get("nodes") or []
@@ -1638,23 +1643,20 @@ class ContractStore:
                 if key in claimed:
                     continue
                 claimed.add(key)
-                if is_hedge_direction(t_dir):
-                    continue
                 lim1x, prem1x, share, lbl = _node_terms_1x(t_node, t_lim, t_signed)
-                rolled_layers.append((t_ced, lbl, t_cur, lim1x, prem1x, share))
+                rolled_layers.append((t_ced, lbl, t_cur, lim1x, prem1x, share, is_hedge_direction(t_dir)))
 
         for pid in legacy_pids:
             ced, direction, cur, signed, lim, gdict = parsed[pid]
-            if is_hedge_direction(direction):
-                continue
+            h_flag = is_hedge_direction(direction)
             for lid, node in _extract_layer_nodes(gdict).items():
                 if (pid, lid) in claimed:
                     continue
                 lim1x, prem1x, share, lbl = _node_terms_1x(node, lim, signed)
-                rolled_layers.append((ced, lbl, cur, lim1x, prem1x, share))
+                rolled_layers.append((ced, lbl, cur, lim1x, prem1x, share, h_flag))
 
         # Respect currency separation: never silently mix currencies in aggregate sums
-        currencies = {cur for _, _, cur, _, _, _ in rolled_layers}
+        currencies = {cur for _, _, cur, _, _, _, _ in rolled_layers}
         if len(currencies) > 1:
             return {
                 "deployed_capital_m": 0.0,
@@ -1668,12 +1670,13 @@ class ContractStore:
         u_max_layer = 0.0
         u_max_layer_label = ""
         u_cedent_totals: dict[str, float] = {}
-        for ced, lbl, _, lim1x, prem1x, share in rolled_layers:
-            u_deployed += deployed_capital_m(lim1x * share, prem1x * share, is_hedge=False)
-            if lim1x > u_max_layer:
-                u_max_layer = lim1x
-                u_max_layer_label = f"{ced} · {lbl}"
-            u_cedent_totals[ced] = u_cedent_totals.get(ced, 0.0) + lim1x
+        for ced, lbl, _, lim1x, prem1x, share, h_flag in rolled_layers:
+            u_deployed += deployed_capital_m(lim1x * share, prem1x * share, is_hedge=h_flag)
+            if not h_flag:
+                if lim1x > u_max_layer:
+                    u_max_layer = lim1x
+                    u_max_layer_label = f"{ced} · {lbl}"
+                u_cedent_totals[ced] = u_cedent_totals.get(ced, 0.0) + lim1x
 
         if u_cedent_totals:
             u_max_cedent_name, u_max_cedent = max(u_cedent_totals.items(), key=lambda kv: kv[1])
@@ -1753,13 +1756,17 @@ class ContractStore:
             ensure_layer_codes(graph, strict=True)
             validate_pricing_links_one_to_one(prog_id, graph, all_existing)
         collateral = (
-            round(
-                deployed_capital_m(
-                    normalized_payload.limit * normalized_payload.signed_line,
-                    normalized_payload.deposit_premium * normalized_payload.signed_line,
-                    is_hedge=is_hedge_direction(direction),
-                ),
-                6,
+            (
+                0.0
+                if is_hedge_direction(direction)
+                else round(
+                    deployed_capital_m(
+                        normalized_payload.limit * normalized_payload.signed_line,
+                        normalized_payload.deposit_premium * normalized_payload.signed_line,
+                        is_hedge=False,
+                    ),
+                    6,
+                )
             )
             if "collateral_required" not in payload.model_fields_set
             else normalized_payload.collateral_required
@@ -1886,13 +1893,17 @@ class ContractStore:
                 any(k in data for k in ("direction", "limit", "deposit_premium", "signed_line"))
                 and "collateral_required" not in data
             ):
-                rec.collateral_required = round(
-                    deployed_capital_m(
-                        rec.limit * rec.signed_line,
-                        rec.deposit_premium * rec.signed_line,
-                        is_hedge=is_hedge_direction(cur_dir),
-                    ),
-                    6,
+                rec.collateral_required = (
+                    0.0
+                    if is_hedge_direction(cur_dir)
+                    else round(
+                        deployed_capital_m(
+                            rec.limit * rec.signed_line,
+                            rec.deposit_premium * rec.signed_line,
+                            is_hedge=False,
+                        ),
+                        6,
+                    )
                 )
 
             if rewire_needed:
@@ -2114,13 +2125,17 @@ class ContractStore:
             attachment=req.trigger_bn,
             deposit_premium=round(req.limit_m * req.rol, 4),
             rol=req.rol,
-            collateral_required=round(
-                deployed_capital_m(
-                    req.limit_m,
-                    round(req.limit_m * req.rol, 4),
-                    is_hedge=is_hedge_direction(req.direction),
-                ),
-                6,
+            collateral_required=(
+                0.0
+                if is_hedge_direction(req.direction)
+                else round(
+                    deployed_capital_m(
+                        req.limit_m,
+                        round(req.limit_m * req.rol, 4),
+                        is_hedge=False,
+                    ),
+                    6,
+                )
             ),
             currency=req.currency,
             sim_set_id=req.industry_sim_set_id,
@@ -2373,13 +2388,17 @@ class ContractStore:
                 rol=new_rol,
                 brokerage_pct=src.brokerage_pct,
                 fronting_fee_pct=src.fronting_fee_pct,
-                collateral_required=round(
-                    deployed_capital_m(
-                        new_limit * new_signed,
-                        new_prem * new_signed,
-                        is_hedge=is_hedge_direction(src.direction),
-                    ),
-                    6,
+                collateral_required=(
+                    0.0
+                    if is_hedge_direction(src.direction)
+                    else round(
+                        deployed_capital_m(
+                            new_limit * new_signed,
+                            new_prem * new_signed,
+                            is_hedge=False,
+                        ),
+                        6,
+                    )
                 ),
                 currency=src.currency,
                 sim_set_id=src.sim_set_id,

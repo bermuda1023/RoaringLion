@@ -512,12 +512,12 @@ export function PortfolioOptimizer({
   const capitalHeadroomM = totalCapital - currentDeployedCapitalM;
   const currentCapitalExceeded = currentDeployedCapitalM > totalCapital + 1e-6;
 
-  // Merge listed page layers with any full-portfolio initialLayers (same statuses), preserving 0%-line deals via limit1xM
+  // Merge listed page layers (plus retro hedge candidate) with full-portfolio initialLayers (same statuses), preserving 0%-line deals via limit1xM/premium1xM
   const conflictUniverseLayers = useMemo<OptimizerLayerCatalogItem[]>(() => {
     const byKey = new Map<string, OptimizerLayerCatalogItem>();
     if (data && !resultIsStale) {
       for (const l of data.initialLayers) {
-        if (isHedgeDirection(l.direction)) continue;
+        const hedge = isHedgeDirection(l.direction);
         const share = l.currentShare > 1e-6 ? l.currentShare : 0;
         const lim1x =
           typeof l.limit1xM === 'number' && l.limit1xM > 0
@@ -534,8 +534,11 @@ export function PortfolioOptimizer({
         const cap1x =
           share > 1e-6 && typeof l.optimalCapitalM === 'number'
             ? l.optimalCapitalM / share
-            : Math.max(0, lim1x - prem1x);
-        if (lim1x <= 0) continue;
+            : hedge
+              ? Math.max(0, prem1x)
+              : Math.max(0, lim1x - prem1x);
+        if (!hedge && lim1x <= 0) continue;
+        if (hedge && prem1x <= 0) continue;
         byKey.set(l.layerKey, {
           layerKey: l.layerKey,
           programmeId: l.programmeId,
@@ -561,8 +564,11 @@ export function PortfolioOptimizer({
     for (const l of candidates?.layers ?? []) {
       byKey.set(l.layerKey, l);
     }
+    if (candidates?.retroCandidate) {
+      byKey.set(candidates.retroCandidate.layerKey, candidates.retroCandidate);
+    }
     return [...byKey.values()];
-  }, [candidates?.layers, data, resultIsStale]);
+  }, [candidates?.layers, candidates?.retroCandidate, data, resultIsStale]);
 
   const serverConflictsMatchCurrent =
     !resultIsStale && lastSolvedConstraintSig !== null && lastSolvedConstraintSig === currentConstraintSig;
@@ -738,7 +744,7 @@ export function PortfolioOptimizer({
                   <div
                     className={`capital-readonly-box${currentCapitalExceeded ? ' exceeded' : ''}`}
                     data-testid="optimizer-deployed-capital-readonly"
-                    title="Auto-calculated read-only: Σ max(0, (Limit − Deposit Premium) × Line Share) across assumed layers. Solver enforces Deployed Capital ≤ Fund Capital."
+                    title="Auto-calculated read-only: Σ max(0, (Limit − Deposit Premium) × Line) for assumed layers + Σ Hedge Premium × Line for hedge positions. Solver enforces Deployed Capital ≤ Fund Capital."
                   >
                     <div className="capital-readonly-label">
                       Deployed Capital (Auto)
@@ -754,7 +760,7 @@ export function PortfolioOptimizer({
                           : `${fmtMoneyM(capitalHeadroomM, 1)} headroom`}
                       </span>
                     </div>
-                    <div className="capital-readonly-formula">Σ (Limit − Prem) × Line · Cap ≤ Fund Capital</div>
+                    <div className="capital-readonly-formula">Σ (Limit − Prem) × Line + Hedge Prem ≤ Fund Cap</div>
                   </div>
                   <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     Target 1-in-250 TVaR ($M)
