@@ -118,6 +118,8 @@ function ThemeCard({
 function RangeBar({ row }: { row: DealStabilityRow }) {
   const minPct = Math.max(0, Math.min(100, row.minShare * 100));
   const maxPct = Math.max(minPct, Math.min(100, row.maxShare * 100));
+  const fillWidth = Math.max(2, maxPct - minPct);
+  const fillLeft = Math.min(minPct, 100 - fillWidth);
   const medPct = Math.max(0, Math.min(100, row.medianShare * 100));
   const curPct = Math.max(0, Math.min(100, row.currentShare * 100));
   const meta = BUCKET_META[row.classification];
@@ -137,10 +139,11 @@ function RangeBar({ row }: { row: DealStabilityRow }) {
         title={`Current: ${curPct.toFixed(1)}% · Min: ${minPct.toFixed(1)}% · Median: ${medPct.toFixed(1)}% · Max: ${maxPct.toFixed(1)}% (Bounds ${(row.boundMinShare * 100).toFixed(0)}–${(row.boundMaxShare * 100).toFixed(0)}%)`}
       >
         <div
+          data-testid={`range-fill-${row.layerKey}`}
           style={{
             position: 'absolute',
-            left: `${minPct}%`,
-            width: `${Math.max(2, maxPct - minPct)}%`,
+            left: `${fillLeft}%`,
+            width: `${fillWidth}%`,
             top: 1,
             bottom: 1,
             borderRadius: 2,

@@ -273,6 +273,69 @@ def test_deal_stability_narrow_band_disjoint_tolerances():
     assert by_key["shrink-narrow"].classification == "CONSISTENT_SHRINK"
 
 
+def test_deal_stability_negative_total_return_preserves_signed_share():
+    """When total portfolio expected return is negative (e.g. hedge-heavy book), shareOfExpectedReturnPct uses the signed denominator."""
+    # Hand-computed fixture:
+    #   G-pos: cur=0.20, opt=[1.0]*6, cap_1x=20, prof_1x=+2.0 -> cur_ret=+0.4, mean_opt_ret=+2.0 (CONSISTENT_GROW)
+    #   H-neg: cur=0.50, opt=[0.5]*6, cap_1x=10, prof_1x=-20.0, locked -> cur_ret=-10.0, mean_opt_ret=-10.0 (UNSTABLE / locked hedge)
+    #   S-neg: cur=0.40, opt=[0.0]*6, cap_1x=25, prof_1x=-5.0 -> cur_ret=-2.0, mean_opt_ret=0.0 (CONSISTENT_SHRINK)
+    # Totals:
+    #   total_mean_opt_ret = +2.0 + (-10.0) + 0.0 = -8.0
+    #     grow_themes: expected_return_m = +2.0 -> share = (+2.0 / -8.0) * 100 = -25.0%
+    #   total_cur_ret = +0.4 + (-10.0) + (-2.0) = -11.6
+    #     shrink_themes: expected_return_m = -2.0 -> share = (-2.0 / -11.6) * 100 = +17.24%
+    specs = [
+        ("G-pos", "Alpha Re", ["US-MW-CS"], 0.20, [1.0] * 6, 20.0, 2.0, (0.0, 1.0, False)),
+        ("H-neg", "Retro Hedge", ["US-FL-WS"], 0.50, [0.5] * 6, 10.0, -20.0, (0.5, 0.5, True)),
+        ("S-neg", "Beta Ins", ["US-CA-EQ"], 0.40, [0.0] * 6, 25.0, -5.0, (0.0, 1.0, False)),
+    ]
+    init = [
+        _layer_row(key=k, cedent=c, region_perils=rps, cur_share=cur, opt_share=cur, capital_1x=cap1x, profit_1x=p1x)
+        for k, c, rps, cur, _, cap1x, p1x, _ in specs
+    ]
+    pts = [
+        FrontierExplorerPoint(
+            point_index=i,
+            target_tvar_250_m=50.0 + i * 5.0,
+            status="Optimal",
+            solver="HiGHS LP",
+            metrics=_dummy_metrics(),
+            layers=[
+                _layer_row(
+                    key=k,
+                    cedent=c,
+                    region_perils=rps,
+                    cur_share=cur,
+                    opt_share=ws[i],
+                    capital_1x=cap1x,
+                    profit_1x=p1x,
+                )
+                for k, c, rps, cur, ws, cap1x, p1x, _ in specs
+            ],
+            constraints=[],
+            return_period_contributions=[],
+        )
+        for i in range(6)
+    ]
+    bounds = {k: b for k, _, _, _, _, _, _, b in specs}
+    summary = compute_deal_stability(initial_layers=init, frontier_pts=pts, resolved_bounds_by_key=bounds)
+
+    # Frontier-mean total return = -8.0; Always Grow bucket return = +2.0 -> -25.0% (NOT +25.0%)
+    assert math.isclose(summary.grow_themes.expected_return_m, 2.0, abs_tol=1e-4)
+    assert math.isclose(summary.grow_themes.share_of_expected_return_pct, -25.0, abs_tol=1e-2)
+    assert math.isclose(summary.grow_themes.top_cedents[0].share_of_expected_return_pct, -25.0, abs_tol=1e-2)
+    assert math.isclose(summary.grow_themes.top_regions[0].share_of_expected_return_pct, -25.0, abs_tol=1e-2)
+    assert math.isclose(summary.grow_themes.top_perils[0].share_of_expected_return_pct, -25.0, abs_tol=1e-2)
+
+    # Current-book total return = -11.6; Always Shrink bucket return = -2.0 -> +17.24% (NOT -17.24%)
+    expected_shrink_pct = round((-2.0 / -11.6) * 100.0, 2)
+    assert math.isclose(summary.shrink_themes.expected_return_m, -2.0, abs_tol=1e-4)
+    assert math.isclose(summary.shrink_themes.share_of_expected_return_pct, expected_shrink_pct, abs_tol=1e-2)
+    assert math.isclose(summary.shrink_themes.top_cedents[0].share_of_expected_return_pct, expected_shrink_pct, abs_tol=1e-2)
+    assert math.isclose(summary.shrink_themes.top_regions[0].share_of_expected_return_pct, expected_shrink_pct, abs_tol=1e-2)
+    assert math.isclose(summary.shrink_themes.top_perils[0].share_of_expected_return_pct, expected_shrink_pct, abs_tol=1e-2)
+
+
 def test_explore_endpoint_returns_exact_deal_stability():
     """End-to-end /api/optimizer/explore returns dealStability matching the solver's participation vectors."""
     resp = client.post(

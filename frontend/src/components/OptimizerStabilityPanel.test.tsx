@@ -226,6 +226,15 @@ describe('OptimizerStabilityPanel', () => {
     expect(screen.getByText('SCS Agg XL · US-MW-CS')).toBeTruthy();
     expect(screen.getByText('FL 2nd XL · US-FL-WS')).toBeTruthy();
     expect(screen.getByText('CA EQ XL · US-CA-EQ')).toBeTruthy();
+
+    // Deals pinned at 100% clamp range fill so left + width stays <= 100% inside the track
+    const maxFill = screen.getByTestId('range-fill-A-max') as HTMLElement;
+    expect(maxFill.style.left).toBe('98%');
+    expect(maxFill.style.width).toBe('2%');
+
+    const minFill = screen.getByTestId('range-fill-B-min') as HTMLElement;
+    expect(minFill.style.left).toBe('0%');
+    expect(minFill.style.width).toBe('2%');
   });
 
   it('filters table rows by stability bucket', () => {

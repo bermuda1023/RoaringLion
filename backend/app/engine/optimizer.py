@@ -2331,7 +2331,7 @@ def _build_bucket_themes(
     bucket_cap = sum(cap_fn(r) for r in bucket_rows)
     bucket_ret = sum(ret_fn(r) for r in bucket_rows)
     cap_denom = total_capital_denom if abs(total_capital_denom) > 1e-9 else 0.0
-    ret_denom = abs(total_return_denom) if abs(total_return_denom) > 1e-9 else 0.0
+    ret_denom = total_return_denom if abs(total_return_denom) > 1e-9 else 0.0
 
     ced_acc: dict[str, list[float]] = {}
     reg_acc: dict[str, list[float]] = {}
