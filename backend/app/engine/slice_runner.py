@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -34,15 +35,18 @@ from app.models.domain import (
     EpPoint,
     GraphSpec,
     GuidelineCheck,
+    HedgeAccretionSummary,
     LayerAllocationRow,
     LayerStateSnapshot,
     NodeViewMetrics,
+    PortfolioHedgeComparisonResponse,
     PortfolioRollupResponse,
     ProgrammeDeal,
     UpliftSet,
 )
-from app.models.enums import NodeType, ViewOfRisk
+from app.models.enums import NodeType, ViewOfRisk, is_hedge_direction
 from app.services.lineage import LineageRegistry, canonical_hash
+from app.services.portfolio_snapshot import compute_unl_portfolio_events, is_ilw_programme
 
 DEFAULT_RETURN_PERIODS = [10.0, 20.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0]
 
@@ -204,10 +208,14 @@ def _validate_node_params(node: Any) -> None:
         if not 0.0 < lines <= 100.0:
             raise ValueError(f"Node {node.node_id} numLines must be between 0 and 100")
     elif t == NodeType.ILW_OPTION:
-        if _num(node, "trigger", 40.0) < 0:
+        trig = _num(node, "trigger", 40.0)
+        if trig < 0:
             raise ValueError(f"Node {node.node_id} trigger must be >= 0")
         if _num(node, "limit", 25.0) <= 0:
             raise ValueError(f"Node {node.node_id} limit must be > 0")
+        exh = node.params.get("exhaustion")
+        if exh is not None and exh != "" and float(exh) < trig:
+            raise ValueError(f"Node {node.node_id} exhaustion must be >= trigger")
     elif t == NodeType.CASCADING_TOWER:
         layers = node.params.get("layers") or []
         if not layers:
@@ -303,6 +311,7 @@ def evaluate_programme_dag(
     views: list[ViewOfRisk] | None = None,
     industry_yelt: YeltTable | None = None,
     pricing_links: dict[str, PricingLink] | None = None,
+    portfolio_unl_resolver: Callable[[str | None, ViewOfRisk], tuple[np.ndarray, str]] | None = None,
 ) -> tuple[DagEvalResponse, dict[str, dict[str, np.ndarray]]]:
     """Evaluate a programme's DAG on UNADJUSTED and ADJUSTED views via Rust with content-addressed node caching."""
     t0 = time.perf_counter()
@@ -320,6 +329,8 @@ def evaluate_programme_dag(
     event_vectors: dict[str, dict[str, np.ndarray]] = {}
     cache_hits = 0
     cache_misses = 0
+    used_industry_yelt = False
+    used_snapshots: dict[str, str] = {}
 
     for view in target_views:
         view_key = view.value
@@ -335,6 +346,7 @@ def evaluate_programme_dag(
         node_rip: dict[str, np.ndarray] = {}
         node_hashes: dict[str, str] = {}
         node_metrics: list[NodeViewMetrics] = []
+        resolved_snapshots: dict[str, tuple[np.ndarray, str]] = {}
 
         for nid in topo:
             node = nodes_by_id[nid]
@@ -343,9 +355,20 @@ def evaluate_programme_dag(
                 (node_hashes[e.source], e.sign, e.weight)
                 for e in sorted(in_edges, key=lambda x: (x.source, x.edge_id))
             ]
+            snap_hash = ""
+            if node.node_type == NodeType.INDUSTRY_INDEX_SOURCE and industry_yelt is not None:
+                used_industry_yelt = True
+            if node.node_type == NodeType.PORTFOLIO_ROLLUP and portfolio_unl_resolver is not None:
+                as_of = str(node.params.get("asOfDate") or programme.portfolio_snapshot_date or "").strip() or None
+                snap_cache_key = as_of or ""
+                if snap_cache_key not in resolved_snapshots:
+                    resolved_snapshots[snap_cache_key] = portfolio_unl_resolver(as_of, view)
+                snap_hash = resolved_snapshots[snap_cache_key][1]
+                used_snapshots[as_of or "current"] = snap_hash
             node_key = canonical_hash({
                 "src": view_source_hash if not in_edges else "",
                 "ind": industry_yelt.content_hash if (industry_yelt and node.node_type == NodeType.INDUSTRY_INDEX_SOURCE) else "",
+                "snap": snap_hash,
                 "upstream": upstream_sig,
                 "type": node.node_type.value,
                 "params": node.params,
@@ -374,7 +397,19 @@ def evaluate_programme_dag(
                     mx = np.zeros(yelt.num_trials, dtype=np.float64)
                     np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
                 elif node.node_type == NodeType.INDUSTRY_INDEX_SOURCE:
-                    ev_out = industry_yelt.losses if industry_yelt is not None else base_losses
+                    if industry_yelt is not None and len(industry_yelt.losses) == len(yelt.losses):
+                        ev_out = apply_deal_view(industry_yelt, programme.uplift_set, view)
+                    else:
+                        ev_out = base_losses
+                    ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
+                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
+                elif node.node_type == NodeType.PORTFOLIO_ROLLUP:
+                    if portfolio_unl_resolver is not None:
+                        as_of = str(node.params.get("asOfDate") or programme.portfolio_snapshot_date or "").strip() or None
+                        ev_out = resolved_snapshots[as_of or ""][0]
+                    else:
+                        ev_out = combined
                     ann = np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials)
                     mx = np.zeros(yelt.num_trials, dtype=np.float64)
                     np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
@@ -491,13 +526,61 @@ def evaluate_programme_dag(
                     trig = float(node.params.get("trigger", 40.0))
                     lim = float(node.params.get("limit", 25.0))
                     placed = float(node.params.get("placedShare", 1.0))
-                    ev_out = np.where(combined >= trig, lim * placed, 0.0)
-                    mx = np.zeros(yelt.num_trials, dtype=np.float64)
-                    np.maximum.at(mx, yelt.trial_ids - 1, ev_out)
-                    ann = np.minimum(
-                        np.bincount(yelt.trial_ids - 1, weights=ev_out, minlength=yelt.num_trials),
-                        lim * placed,
-                    )
+                    raw_exh = node.params.get("exhaustion")
+                    exh = float(raw_exh) if (raw_exh is not None and raw_exh != "" and float(raw_exh) > trig) else trig
+                    trig_type = str(node.params.get("triggerType") or "BINARY").upper()
+                    cap = lim * placed
+                    trial_idx = yelt.trial_ids - 1
+                    if trig_type == "PRO_RATA" and exh > trig:
+                        raw_ev = np.clip((combined - trig) / (exh - trig), 0.0, 1.0) * cap
+                        mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                        np.maximum.at(mx, trial_idx, raw_ev)
+                        # Assign annual payout to the first event reaching the trial max so downstream
+                        # pass-through nodes (PRICING_OUTPUT, YELT_OUTPUT) never double-count past cap.
+                        ev_out = np.zeros_like(combined)
+                        at_max = (raw_ev > 0.0) & (raw_ev >= mx[trial_idx] - 1e-12)
+                        hit_pos = np.flatnonzero(at_max)
+                        if len(hit_pos):
+                            _, first_idx = np.unique(trial_idx[hit_pos], return_index=True)
+                            first_pos = hit_pos[first_idx]
+                            ev_out[first_pos] = mx[trial_idx[first_pos]]
+                        ann = mx.copy()
+                    elif trig_type == "AGGREGATE":
+                        ann_ind = np.bincount(trial_idx, weights=combined, minlength=yelt.num_trials)
+                        if exh > trig:
+                            ann = np.clip((ann_ind - trig) / (exh - trig), 0.0, 1.0) * cap
+                        else:
+                            ann = np.where(ann_ind >= trig, cap, 0.0)
+                        trial_sum = ann_ind[trial_idx]
+                        ev_out = np.where(
+                            trial_sum > 1e-12,
+                            ann[trial_idx] * (combined / np.maximum(trial_sum, 1e-12)),
+                            0.0,
+                        )
+                        mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                        np.maximum.at(mx, trial_idx, ev_out)
+                    elif trig_type == "SECOND_EVENT":
+                        exceed = combined >= trig
+                        counts = np.bincount(trial_idx, weights=exceed.astype(np.float64), minlength=yelt.num_trials)
+                        hit_trial = counts >= 2.0
+                        ann = np.where(hit_trial, cap, 0.0)
+                        ev_out = np.where(
+                            exceed & hit_trial[trial_idx],
+                            cap / np.maximum(counts[trial_idx], 1.0),
+                            0.0,
+                        )
+                        mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                        np.maximum.at(mx, trial_idx, ev_out)
+                    else:
+                        # BINARY: chronological first triggering event in each trial pays full cap once
+                        ev_out = np.zeros_like(combined)
+                        hit_pos = np.flatnonzero(combined >= trig)
+                        if len(hit_pos):
+                            _, first_idx = np.unique(trial_idx[hit_pos], return_index=True)
+                            ev_out[hit_pos[first_idx]] = cap
+                        mx = np.zeros(yelt.num_trials, dtype=np.float64)
+                        np.maximum.at(mx, trial_idx, ev_out)
+                        ann = mx.copy()
                 elif node.node_type == NodeType.CASCADING_TOWER:
                     raw_layers = node.params.get("layers", [])
                     layers_json = json.dumps([
@@ -578,6 +661,33 @@ def evaluate_programme_dag(
     compute_ms = round((time.perf_counter() - t0) * 1000.0, 2)
     breadcrumb = [
         BreadcrumbStep(entity_type="SIM_SET", entity_id=yelt.sim_set_id, label=yelt.name, content_hash=yelt.content_hash),
+    ]
+    input_hashes: dict[str, str] = {
+        "sim_set": yelt.content_hash,
+        "uplift_set": programme.uplift_set.content_hash,
+        "graph": programme.graph.content_hash,
+    }
+    if used_industry_yelt and industry_yelt is not None:
+        breadcrumb.append(
+            BreadcrumbStep(
+                entity_type="INDUSTRY_SIM_SET",
+                entity_id=industry_yelt.sim_set_id,
+                label=industry_yelt.name,
+                content_hash=industry_yelt.content_hash,
+            )
+        )
+        input_hashes["industry_sim_set"] = industry_yelt.content_hash
+    for snap_date, snap_hash in sorted(used_snapshots.items()):
+        breadcrumb.append(
+            BreadcrumbStep(
+                entity_type="PORTFOLIO_SNAPSHOT",
+                entity_id=f"unl-snapshot-{snap_date}",
+                label=f"UNL Portfolio Snapshot ({snap_date})",
+                content_hash=snap_hash,
+            )
+        )
+        input_hashes[f"portfolio_snapshot:{snap_date}"] = snap_hash
+    breadcrumb.extend([
         BreadcrumbStep(
             entity_type="UPLIFT_SET",
             entity_id=programme.uplift_set.uplift_set_id,
@@ -597,14 +707,10 @@ def evaluate_programme_dag(
             version=f"v{programme.graph.version}",
             content_hash=programme.graph.content_hash,
         ),
-    ]
+    ])
     manifest = lineage.record_manifest(
         run_type="DAG_EVAL",
-        input_hashes={
-            "sim_set": yelt.content_hash,
-            "uplift_set": programme.uplift_set.content_hash,
-            "graph": programme.graph.content_hash,
-        },
+        input_hashes=input_hashes,
         parameters={"programme_id": programme.programme_id, "views": [v.value for v in target_views]},
         output_payload={k: [m.model_dump(by_alias=True) for m in v] for k, v in views_output.items()},
         breadcrumb=breadcrumb,
@@ -634,9 +740,25 @@ def evaluate_portfolio_rollup(
     total_capital: float,
     lineage: LineageRegistry,
     all_programmes: dict[str, ProgrammeDeal] | None = None,
+    industry_yelt: YeltTable | None = None,
+    portfolio_unl_resolver: Callable[[str | None, ViewOfRisk], tuple[np.ndarray, str]] | None = None,
+    include_hedges: bool = True,
 ) -> PortfolioRollupResponse:
-    """Roll up bound programmes/layers into a fund portfolio with ROC/IRR CDF and Euler Co-TVaR."""
+    """Roll up bound programmes/layers into a fund portfolio with ROC/IRR CDF and Euler Co-TVaR.
+
+    Long (assumed) layers contribute positive loss, premium, RIP, and collateral.
+    Hedge (ceded/retro) layers contribute negative loss (recoveries), negative premium (cost),
+    negative RIP, and negative Euler Co-TVaR (tail capital relief).
+    """
     t0 = time.perf_counter()
+    active_progs = [p for p in programmes if include_hedges or not is_hedge_direction(p.direction)]
+    currencies = {p.currency for p in active_progs}
+    if len(currencies) > 1:
+        raise ValueError(f"Cannot silently mix currencies in portfolio rollup without FX_CONVERSION: {sorted(currencies)}")
+    portfolio_currency = next(iter(currencies), yelt.currency)
+    long_progs = [p for p in active_progs if not is_hedge_direction(p.direction)]
+    hedge_progs = [p for p in active_progs if is_hedge_direction(p.direction)]
+
     layer_rows_meta: list[dict[str, Any]] = []
     layer_ann_list: list[np.ndarray] = []
     layer_rip_list: list[np.ndarray] = []
@@ -644,11 +766,29 @@ def evaluate_portfolio_rollup(
         BreadcrumbStep(entity_type="SIM_SET", entity_id=yelt.sim_set_id, label=yelt.name, content_hash=yelt.content_hash)
     ]
     input_hashes: dict[str, str] = {"sim_set": yelt.content_hash}
+    if industry_yelt is not None and any(is_ilw_programme(p.structure, p.instrument) for p in active_progs):
+        breadcrumbs.append(
+            BreadcrumbStep(
+                entity_type="INDUSTRY_SIM_SET",
+                entity_id=industry_yelt.sim_set_id,
+                label=industry_yelt.name,
+                content_hash=industry_yelt.content_hash,
+            )
+        )
+        input_hashes["industry_sim_set"] = industry_yelt.content_hash
 
     ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
     rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
-    for prog in programmes:
-        _, vecs = evaluate_programme_dag(prog, yelt, lineage, views=[view])
+
+    # Evaluate long programmes first so any UNL retro hedge can snapshot our own UNL book
+    for prog in long_progs:
+        _, vecs = evaluate_programme_dag(
+            prog,
+            yelt,
+            lineage,
+            views=[view],
+            industry_yelt=industry_yelt,
+        )
         ann_by_prog[prog.programme_id] = vecs["annual"][view.value]
         rip_by_prog[prog.programme_id] = vecs["rip"][view.value]
         breadcrumbs.append(
@@ -662,17 +802,64 @@ def evaluate_portfolio_rollup(
         )
         input_hashes[prog.programme_id] = prog.graph.content_hash
 
-    for entry in extract_rollup_layers(programmes, ann_by_prog, rip_by_prog, all_programmes=all_programmes):
-        layer_ann_list.append(entry.loss_vec)
-        layer_rip_list.append(entry.rip_vec)
+    fallback_unl_cache: dict[str, tuple[np.ndarray, str]] = {}
+
+    def _effective_unl_resolver(as_of: str | None, v: ViewOfRisk) -> tuple[np.ndarray, str]:
+        if portfolio_unl_resolver is not None:
+            return portfolio_unl_resolver(as_of, v)
+        key = f"{as_of or ''}:{v.value}"
+        if key not in fallback_unl_cache:
+            unl_deals = [p for p in long_progs if not is_ilw_programme(p.structure, p.instrument)]
+            fallback_unl_cache[key] = compute_unl_portfolio_events(
+                unl_deals,
+                yelt,
+                v,
+                all_deals=all_programmes,
+                as_of_date=as_of,
+            )
+        return fallback_unl_cache[key]
+
+    for prog in hedge_progs:
+        dag_resp, vecs = evaluate_programme_dag(
+            prog,
+            yelt,
+            lineage,
+            views=[view],
+            industry_yelt=industry_yelt,
+            portfolio_unl_resolver=_effective_unl_resolver,
+        )
+        ann_by_prog[prog.programme_id] = vecs["annual"][view.value]
+        rip_by_prog[prog.programme_id] = vecs["rip"][view.value]
+        for k, h in dag_resp.manifest.input_hashes.items():
+            if k.startswith("portfolio_snapshot:"):
+                input_hashes[k] = h
+        breadcrumbs.append(
+            BreadcrumbStep(
+                entity_type="PROGRAMME",
+                entity_id=prog.programme_id,
+                label=f"{prog.cedent_name} — {prog.programme_name} (Hedge)",
+                version=f"v{prog.graph.version}",
+                content_hash=prog.graph.content_hash,
+            )
+        )
+        input_hashes[prog.programme_id] = prog.graph.content_hash
+
+    for entry in extract_rollup_layers(active_progs, ann_by_prog, rip_by_prog, all_programmes=all_programmes):
+        sign = -1.0 if entry.is_hedge else 1.0
+        layer_ann_list.append(sign * entry.loss_vec)
+        layer_rip_list.append(sign * entry.rip_vec)
         layer_rows_meta.append({
             "programme_id": entry.programme_id,
             "layer_id": entry.layer_id,
             "layer_name": entry.layer_name,
             "cedent_name": entry.cedent_name,
+            "direction": entry.direction,
+            "is_hedge": entry.is_hedge,
             "limit": entry.limit,
             "premium": entry.premium,
+            "signed_premium": sign * entry.premium,
             "signed_line": entry.signed_line,
+            "raw_loss_vec": entry.loss_vec,
         })
 
     layer_matrix = np.vstack(layer_ann_list) if layer_ann_list else np.zeros((0, yelt.num_trials))
@@ -680,11 +867,15 @@ def evaluate_portfolio_rollup(
 
     port_loss = layer_matrix.sum(axis=0)
     port_rip = rip_matrix.sum(axis=0)
-    gross_premium = sum(r["premium"] for r in layer_rows_meta)
-    deployed_collateral = sum(r["limit"] for r in layer_rows_meta)
+    gross_premium = sum(r["premium"] for r in layer_rows_meta if not r["is_hedge"])
+    hedge_premium = sum(r["premium"] for r in layer_rows_meta if r["is_hedge"])
+    net_premium = gross_premium - hedge_premium
+    deployed_collateral = sum(r["limit"] for r in layer_rows_meta if not r["is_hedge"])
+    hedge_count = sum(1 for r in layer_rows_meta if r["is_hedge"])
+    expected_hedge_recovery = sum(float(np.mean(r["raw_loss_vec"])) for r in layer_rows_meta if r["is_hedge"])
 
     net_yield_on_capital = total_capital * 0.03
-    trial_profit = gross_premium + port_rip + net_yield_on_capital - port_loss
+    trial_profit = net_premium + port_rip + net_yield_on_capital - port_loss
     trial_roc_pct = (trial_profit / total_capital) * 100.0
 
     port_var_250, port_tvar_250, co_tvars = rle.euler_cotvar(
@@ -694,25 +885,37 @@ def evaluate_portfolio_rollup(
 
     alloc_rows: list[LayerAllocationRow] = []
     for idx, meta in enumerate(layer_rows_meta):
-        ep_l = _ep_stats_from_vector(layer_matrix[idx])
-        sa_tvar_250 = next(p["tvar"] for p in ep_l["ep_points"] if abs(p["return_period"] - 250.0) < 1e-6)
+        is_hedge = meta["is_hedge"]
+        ep_l = _ep_stats_from_vector(meta["raw_loss_vec"])
+        sa_tvar_250_pos = next(p["tvar"] for p in ep_l["ep_points"] if abs(p["return_period"] - 250.0) < 1e-6)
         co_tvar = float(co_tvars[idx])
-        div_credit = (1.0 - co_tvar / sa_tvar_250) * 100.0 if sa_tvar_250 > 0 else 0.0
+        el_signed = -ep_l["el"] if is_hedge else ep_l["el"]
+        sa_tvar_signed = -sa_tvar_250_pos if is_hedge else sa_tvar_250_pos
+        if is_hedge:
+            div_credit = (1.0 - abs(co_tvar) / sa_tvar_250_pos) * 100.0 if sa_tvar_250_pos > 0 else 0.0
+        else:
+            div_credit = (1.0 - co_tvar / sa_tvar_250_pos) * 100.0 if sa_tvar_250_pos > 0 else 0.0
         exp_rip_l = float(np.mean(rip_matrix[idx]))
-        exp_profit_l = meta["premium"] + exp_rip_l - ep_l["el"]
-        m_roc = (exp_profit_l / co_tvar) * 100.0 if co_tvar > 0 else 0.0
+        exp_profit_l = meta["signed_premium"] + exp_rip_l - el_signed
+        if is_hedge:
+            # Cost per dollar of tail TVaR saved (positive = cost % of capital released)
+            m_roc = (exp_profit_l / co_tvar) * 100.0 if co_tvar < -1e-9 else 0.0
+        else:
+            m_roc = (exp_profit_l / co_tvar) * 100.0 if co_tvar > 0 else 0.0
         alloc_rows.append(
             LayerAllocationRow(
                 programme_id=meta["programme_id"],
                 layer_id=meta["layer_id"],
                 layer_name=meta["layer_name"],
                 cedent_name=meta["cedent_name"],
+                direction=meta["direction"],
+                is_hedge=is_hedge,
                 limit=round(meta["limit"], 4),
-                premium=round(meta["premium"], 4),
+                premium=round(meta["signed_premium"], 4),
                 signed_line=round(meta["signed_line"], 4),
-                el=round(ep_l["el"], 4),
+                el=round(el_signed, 4),
                 expected_rip=round(exp_rip_l, 4),
-                standalone_tvar_250=round(sa_tvar_250, 4),
+                standalone_tvar_250=round(sa_tvar_signed, 4),
                 euler_cotvar_250=round(co_tvar, 4),
                 diversification_credit_pct=round(div_credit, 2),
                 marginal_roc_pct=round(m_roc, 2),
@@ -734,7 +937,7 @@ def evaluate_portfolio_rollup(
     quantiles = {
         "mean": round(float(np.mean(trial_roc_pct)), 2),
         "max": round(float(sorted_roc_desc[0]), 2),
-        "noEvents": round(((gross_premium + net_yield_on_capital) / total_capital) * 100.0, 2),
+        "noEvents": round(((net_premium + net_yield_on_capital) / total_capital) * 100.0, 2),
         "25.0th": pct_val(0.25),
         "50.0th": pct_val(0.50),
         "75.0th": pct_val(0.75),
@@ -757,12 +960,22 @@ def evaluate_portfolio_rollup(
     exp_rip = float(np.mean(port_rip))
     exp_profit = float(np.mean(trial_profit))
     break_even_prob = float(np.mean(trial_profit >= 0.0)) * 100.0
+    rotvar = (exp_profit / float(port_tvar_250)) * 100.0 if float(port_tvar_250) > 1e-9 else 0.0
 
     manifest = lineage.record_manifest(
         run_type="PORTFOLIO_ROLLUP",
         input_hashes=input_hashes,
-        parameters={"portfolio_id": portfolio_id, "view": view.value, "total_capital": total_capital},
-        output_payload={"quantiles": quantiles, "portfolio_tvar_250": round(float(port_tvar_250), 4)},
+        parameters={
+            "portfolio_id": portfolio_id,
+            "view": view.value,
+            "total_capital": total_capital,
+            "include_hedges": include_hedges,
+        },
+        output_payload={
+            "quantiles": quantiles,
+            "portfolio_tvar_250": round(float(port_tvar_250), 4),
+            "include_hedges": include_hedges,
+        },
         breadcrumb=breadcrumbs,
     )
 
@@ -770,18 +983,24 @@ def evaluate_portfolio_rollup(
         portfolio_id=portfolio_id,
         portfolio_name=portfolio_name,
         view=view,
-        currency="USD",
+        currency=portfolio_currency,
         num_trials=yelt.num_trials,
         compute_ms=compute_ms,
+        include_hedges=include_hedges,
+        hedge_count=hedge_count,
         total_capital=round(total_capital, 4),
         deployed_collateral=round(deployed_collateral, 4),
         gross_premium=round(gross_premium, 4),
+        hedge_premium=round(hedge_premium, 4),
+        net_premium=round(net_premium, 4),
         expected_rip=round(exp_rip, 4),
         expected_loss=round(exp_loss, 4),
+        expected_hedge_recovery=round(expected_hedge_recovery, 4),
         expected_profit=round(exp_profit, 4),
         mean_roc_pct=quantiles["mean"],
         no_event_roc_pct=quantiles["noEvents"],
         break_even_prob_pct=round(break_even_prob, 2),
+        return_on_tvar_pct=round(rotvar, 2),
         portfolio_var_250=round(float(port_var_250), 4),
         portfolio_tvar_250=round(float(port_tvar_250), 4),
         cotvar_sum_check_diff=cotvar_sum_diff,
@@ -790,6 +1009,142 @@ def evaluate_portfolio_rollup(
         guidelines=guidelines,
         layer_allocations=alloc_rows,
         manifest=manifest,
+    )
+
+
+def evaluate_portfolio_hedge_comparison(
+    *,
+    portfolio_id: str,
+    portfolio_name: str,
+    programmes: list[ProgrammeDeal],
+    yelt: YeltTable,
+    view: ViewOfRisk,
+    total_capital: float,
+    lineage: LineageRegistry,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
+    industry_yelt: YeltTable | None = None,
+    portfolio_unl_resolver: Callable[[str | None, ViewOfRisk], tuple[np.ndarray, str]] | None = None,
+) -> PortfolioHedgeComparisonResponse:
+    """Compare portfolio metrics with hedges (net) vs without hedges (long-only) and evaluate accretion."""
+    without_hedges = evaluate_portfolio_rollup(
+        portfolio_id=f"{portfolio_id}-gross",
+        portfolio_name=f"{portfolio_name} (Without Hedges)",
+        programmes=programmes,
+        yelt=yelt,
+        view=view,
+        total_capital=total_capital,
+        lineage=lineage,
+        all_programmes=all_programmes,
+        industry_yelt=industry_yelt,
+        portfolio_unl_resolver=portfolio_unl_resolver,
+        include_hedges=False,
+    )
+    with_hedges = evaluate_portfolio_rollup(
+        portfolio_id=portfolio_id,
+        portfolio_name=portfolio_name,
+        programmes=programmes,
+        yelt=yelt,
+        view=view,
+        total_capital=total_capital,
+        lineage=lineage,
+        all_programmes=all_programmes,
+        industry_yelt=industry_yelt,
+        portfolio_unl_resolver=portfolio_unl_resolver,
+        include_hedges=True,
+    )
+
+    has_hedges = with_hedges.hedge_count > 0
+    net_hedge_cost = with_hedges.hedge_premium - with_hedges.expected_hedge_recovery
+    delta_profit = with_hedges.expected_profit - without_hedges.expected_profit
+    delta_mean_roc = with_hedges.mean_roc_pct - without_hedges.mean_roc_pct
+    delta_no_event = with_hedges.no_event_roc_pct - without_hedges.no_event_roc_pct
+    delta_be = with_hedges.break_even_prob_pct - without_hedges.break_even_prob_pct
+    delta_var = with_hedges.portfolio_var_250 - without_hedges.portfolio_var_250
+    delta_tvar = with_hedges.portfolio_tvar_250 - without_hedges.portfolio_tvar_250
+    tvar_saved = without_hedges.portfolio_tvar_250 - with_hedges.portfolio_tvar_250
+    gross_rotvar = without_hedges.return_on_tvar_pct
+    net_rotvar = with_hedges.return_on_tvar_pct
+    delta_rotvar = net_rotvar - gross_rotvar
+    cost_per_tvar = (net_hedge_cost / tvar_saved) if tvar_saved > 1e-6 else None
+    breaches_without = sum(1 for g in without_hedges.guidelines if not g.passed)
+    breaches_with = sum(1 for g in with_hedges.guidelines if not g.passed)
+
+    if not has_hedges:
+        is_accretive = False
+        verdict = "No Active Hedges"
+        reason = "No bound hedge programmes in the portfolio yet. Bind an ILW or UNL retro hedge in Contracts to evaluate accretion."
+    elif delta_rotvar > 0 or (breaches_with < breaches_without and tvar_saved > 0):
+        is_accretive = True
+        verdict = "Accretive"
+        if delta_rotvar > 0:
+            reason = (
+                f"Hedges lift Return on 1-in-250 TVaR by {delta_rotvar:+.2f} pts "
+                f"({gross_rotvar:.2f}% → {net_rotvar:.2f}%) and save ${tvar_saved:.2f}m of tail TVaR."
+            )
+        else:
+            reason = (
+                f"Hedges resolve {breaches_without - breaches_with} risk-appetite breach(es) "
+                f"and save ${tvar_saved:.2f}m of 1-in-250 TVaR."
+            )
+    else:
+        is_accretive = False
+        verdict = "Dilutive"
+        reason = (
+            f"Hedges reduce Return on 1-in-250 TVaR by {delta_rotvar:.2f} pts "
+            f"({gross_rotvar:.2f}% → {net_rotvar:.2f}%); net hedge cost exceeds tail capital relief hurdle."
+        )
+
+    accretion = HedgeAccretionSummary(
+        has_hedges=has_hedges,
+        hedge_layer_count=with_hedges.hedge_count,
+        hedge_premium_m=round(with_hedges.hedge_premium, 4),
+        expected_hedge_recovery_m=round(with_hedges.expected_hedge_recovery, 4),
+        net_hedge_cost_m=round(net_hedge_cost, 4),
+        delta_expected_profit_m=round(delta_profit, 4),
+        delta_mean_roc_pct=round(delta_mean_roc, 2),
+        delta_no_event_roc_pct=round(delta_no_event, 2),
+        delta_break_even_prob_pct=round(delta_be, 2),
+        delta_var_250_m=round(delta_var, 4),
+        delta_tvar_250_m=round(delta_tvar, 4),
+        tvar_250_reduction_m=round(tvar_saved, 4),
+        gross_return_on_tvar_pct=round(gross_rotvar, 2),
+        net_return_on_tvar_pct=round(net_rotvar, 2),
+        delta_return_on_tvar_pct=round(delta_rotvar, 2),
+        cost_per_dollar_tvar_saved=round(cost_per_tvar, 4) if cost_per_tvar is not None else None,
+        guidelines_breached_without=breaches_without,
+        guidelines_breached_with=breaches_with,
+        is_accretive=is_accretive,
+        accretion_verdict=verdict,
+        accretion_reason=reason,
+    )
+    comparison_manifest = lineage.record_manifest(
+        run_type="PORTFOLIO_HEDGE_COMPARISON",
+        input_hashes={
+            "with_hedges": with_hedges.manifest.output_hash,
+            "without_hedges": without_hedges.manifest.output_hash,
+        },
+        parameters={"portfolio_id": portfolio_id, "view": view.value, "total_capital": total_capital},
+        output_payload=accretion.model_dump(by_alias=True),
+        breadcrumb=[
+            BreadcrumbStep(
+                entity_type="PORTFOLIO_ROLLUP",
+                entity_id=without_hedges.manifest.manifest_id,
+                label=f"Without Hedges ({without_hedges.view.value})",
+                content_hash=without_hedges.manifest.output_hash,
+            ),
+            BreadcrumbStep(
+                entity_type="PORTFOLIO_ROLLUP",
+                entity_id=with_hedges.manifest.manifest_id,
+                label=f"With Hedges ({with_hedges.view.value})",
+                content_hash=with_hedges.manifest.output_hash,
+            ),
+        ],
+    )
+    return PortfolioHedgeComparisonResponse(
+        with_hedges=with_hedges,
+        without_hedges=without_hedges,
+        accretion=accretion,
+        manifest=comparison_manifest,
     )
 
 

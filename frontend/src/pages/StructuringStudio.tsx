@@ -105,6 +105,27 @@ export function StructuringStudio({
 
   const simSetsQ = useQuery({ queryKey: ['simSets'], queryFn: () => api.listSimSets() });
   const bindingsQ = useQuery({ queryKey: ['pricingBindings'], queryFn: () => api.listPricingBindings() });
+  const selectedSnapshotDate = (() => {
+    const node = draftGraph.nodes.find((n) => n.nodeId === selectedNodeId);
+    if (node?.nodeType === 'PORTFOLIO_ROLLUP') {
+      return typeof node.params.asOfDate === 'string' && node.params.asOfDate.trim()
+        ? node.params.asOfDate.trim()
+        : (selectedProg.portfolioSnapshotDate ?? '2027-01-01');
+    }
+    return null;
+  })();
+  const snapshotInfoQ = useQuery({
+    queryKey: ['portfolioSnapshotInfo', selectedSnapshotDate],
+    queryFn: () => api.getPortfolioSnapshotInfo(selectedSnapshotDate),
+    enabled: selectedSnapshotDate !== null,
+  });
+
+  const isHedgeProg =
+    Boolean(selectedProg.isHedge) ||
+    selectedProg.direction === 'EXTERNAL_RETRO' ||
+    selectedProg.direction === 'INTERNAL_CEDED';
+  const isIlwProg = selectedProg.structure === 'ILW' || selectedProg.instrument === 'INDUSTRY_INDEX';
+  const isUnlRetroProg = isHedgeProg && !isIlwProg;
 
   const templatesQ = useQuery({
     queryKey: ['graphTemplates', selectedProg.programmeId, selectedProg.graph.version],
@@ -182,7 +203,10 @@ export function StructuringStudio({
   const rfNodes: Node[] = draftGraph.nodes.map((n) => {
     const u = unadjById[n.nodeId];
     const a = adjById[n.nodeId];
-    const isSource = n.nodeType === 'LOSS_SOURCE' || n.nodeType === 'INDUSTRY_INDEX_SOURCE';
+    const isSource =
+      n.nodeType === 'LOSS_SOURCE' ||
+      n.nodeType === 'INDUSTRY_INDEX_SOURCE' ||
+      n.nodeType === 'PORTFOLIO_ROLLUP';
     const isOutput = n.nodeType === 'PRICING_OUTPUT' || n.nodeType === 'YELT_OUTPUT' || n.nodeType === 'EP_OUTPUT';
     const layerCode =
       LAYER_NODE_TYPES.includes(n.nodeType) && typeof n.params.layerCode === 'string' && n.params.layerCode.trim()
@@ -369,9 +393,18 @@ export function StructuringStudio({
     <>
       <div className="card">
         <div className="card-title">
-          <span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             Calculation Graph <span className="badge">v{selectedProg.graph.version}</span>
-            {dirty && <span style={{ color: 'var(--warning)', marginLeft: 6 }}>Unsaved changes</span>}
+            <span className={`badge ${isHedgeProg ? 'badge-hedge' : 'badge-long'}`}>
+              {isHedgeProg ? 'Hedge' : 'Long'}
+            </span>
+            {isIlwProg && <span className="badge badge-ilw">ILW · Industry Loss Run</span>}
+            {isUnlRetroProg && (
+              <span className="badge badge-hedge">
+                UNL Retro · Snapshot {selectedProg.portfolioSnapshotDate ?? '2027-01-01'}
+              </span>
+            )}
+            {dirty && <span style={{ color: 'var(--warning)', marginLeft: 4 }}>Unsaved changes</span>}
           </span>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <RelatedProgrammeSelect
@@ -549,6 +582,145 @@ export function StructuringStudio({
                     </div>
                   );
                 })()}
+                {selectedNode.nodeType === 'INDUSTRY_INDEX_SOURCE' && (() => {
+                  const indSets = (simSetsQ.data ?? []).filter((s) => s.isIndustryCatalog);
+                  const curSimId = String(selectedNode.params.simSetId ?? 'ind-synth-cat-v1-100k');
+                  const curSet = indSets.find((s) => s.simSetId === curSimId);
+                  return (
+                    <div
+                      data-testid="industry-source-panel"
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                        padding: 8,
+                        background: 'var(--surface)',
+                        border: '1px solid var(--border-strong)',
+                        borderRadius: 6,
+                      }}
+                    >
+                      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--accent-soft)' }}>
+                        Industry Loss Run (Auto-Wired)
+                      </div>
+                      <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        Industry Catalogue
+                        <select
+                          value={curSimId}
+                          onChange={(e) => {
+                            const nextId = e.target.value;
+                            const chosen = indSets.find((s) => s.simSetId === nextId);
+                            updateSelectedNode((n) =>
+                              withParams(n, {
+                                ...n.params,
+                                simSetId: nextId,
+                                sourceKind: 'INDUSTRY_LOSS_RUN',
+                                lossFiles: chosen?.lossFiles ?? n.params.lossFiles,
+                              }),
+                            );
+                          }}
+                          style={{ width: '100%', marginTop: 3 }}
+                        >
+                          {indSets.length > 0 ? (
+                            indSets.map((s) => (
+                              <option key={s.simSetId} value={s.simSetId}>
+                                {s.name}
+                              </option>
+                            ))
+                          ) : (
+                            <option value={curSimId}>{curSimId}</option>
+                          )}
+                        </select>
+                      </label>
+                      <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+                        Available perils for downstream filters:{' '}
+                        <strong style={{ color: 'var(--text)' }}>
+                          {(curSet?.regionPerils ?? []).join(', ') || 'All industry region-perils'}
+                        </strong>
+                      </div>
+                    </div>
+                  );
+                })()}
+                {selectedNode.nodeType === 'PORTFOLIO_ROLLUP' && (() => {
+                  const curDate = String(
+                    selectedNode.params.asOfDate ?? selectedProg.portfolioSnapshotDate ?? '2027-01-01',
+                  );
+                  const snap = snapshotInfoQ.data;
+                  return (
+                    <div
+                      data-testid="portfolio-snapshot-panel"
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                        padding: 8,
+                        background: 'var(--surface)',
+                        border: '1px solid var(--border-strong)',
+                        borderRadius: 6,
+                      }}
+                    >
+                      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--info-soft)' }}>
+                        Our UNL Portfolio Snapshot (Auto-Wired)
+                      </div>
+                      <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        Snapshot As-Of Date
+                        <input
+                          type="date"
+                          value={curDate}
+                          onChange={(e) =>
+                            updateSelectedNode((n) => {
+                              const nextParams: Record<string, unknown> = {
+                                ...n.params,
+                                asOfDate: e.target.value,
+                                sourceKind: 'UNL_PORTFOLIO_SNAPSHOT',
+                              };
+                              delete nextParams.lossFiles;
+                              return withParams(n, nextParams);
+                            })
+                          }
+                          style={{ width: '100%', marginTop: 3 }}
+                        />
+                      </label>
+                      {snap && (
+                        <div style={{ fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                          <div>
+                            <strong style={{ color: 'var(--text)' }}>{snap.programmeCount}</strong> assumed UNL
+                            programme{snap.programmeCount === 1 ? '' : 's'} in force
+                          </div>
+                          <div>
+                            Perils:{' '}
+                            <strong style={{ color: 'var(--text)' }}>
+                              {snap.regionPerils.join(', ') || 'None'}
+                            </strong>
+                          </div>
+                          {snap.programmes.length > 0 && (
+                            <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              {snap.programmes.map((p) => (
+                                <div key={p.programmeId} style={{ fontSize: 10 }}>
+                                  <span className="mono">{p.uniqueCode}</span> · {p.cedentName} ({fmtMoneyM(p.limit, 0)})
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+                {selectedNode.nodeType === 'ILW_OPTION' && (
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    ILW Trigger Type
+                    <select
+                      value={String(selectedNode.params.triggerType ?? 'BINARY')}
+                      onChange={(e) => updateSelectedNodeParam('triggerType', e.target.value)}
+                      style={{ width: '100%', marginTop: 3 }}
+                    >
+                      <option value="BINARY">Binary (Full Limit @ Trigger)</option>
+                      <option value="PRO_RATA">Pro-Rata (Trigger → Exhaustion)</option>
+                      <option value="AGGREGATE">Aggregate Industry Loss</option>
+                      <option value="SECOND_EVENT">Second Event</option>
+                    </select>
+                  </label>
+                )}
                 {selectedNode.nodeType === 'YELT_OUTPUT' && (
                   <YeltOutputPanel
                     node={selectedNode}
@@ -701,6 +873,9 @@ export function StructuringStudio({
                       !LABEL_META_KEYS.includes(k) &&
                       !LAYER_META_KEYS.includes(k) &&
                       !OUTPUT_LINK_KEYS.includes(k) &&
+                      !['sourceKind', 'asOfDate', 'triggerType'].includes(k) &&
+                      !(selectedNode.nodeType === 'INDUSTRY_INDEX_SOURCE' && k === 'simSetId') &&
+                      !(selectedNode.nodeType === 'PORTFOLIO_ROLLUP' && k === 'simSetId') &&
                       !(LAYER_NODE_TYPES.includes(selectedNode.nodeType) && CMS_LAYER_PRICE_KEYS.has(k)) &&
                       (typeof v === 'number' || typeof v === 'string'),
                   )

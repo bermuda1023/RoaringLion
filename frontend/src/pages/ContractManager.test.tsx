@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ContractManager } from './ContractManager';
 
 const contractFixture = {
@@ -17,6 +17,7 @@ const contractFixture = {
   broker: 'Broker A',
   status: 'BOUND',
   direction: 'ASSUMED',
+  isHedge: false,
   structure: 'OCC_XL',
   instrument: 'UNL',
   placement: 'OPEN_MARKET',
@@ -136,5 +137,147 @@ describe('ContractManager CMS cleanups', () => {
     // Clicking "Edit per layer" switches to the Layers & Lines tab
     fireEvent.click(screen.getByRole('button', { name: /Edit per layer/i }));
     expect(await screen.findByText(/Layer Terms & Lines/i)).toBeTruthy();
+  });
+});
+
+const HEDGE_MOCK_CONTRACTS = [
+  contractFixture,
+  {
+    ...contractFixture,
+    programmeId: 'prog-ilw-fl-wind-27',
+    chainId: 'chain-ilw',
+    cedentName: 'ILW Market Protection',
+    programmeName: 'US FL Wind $40B Binary ILW',
+    direction: 'EXTERNAL_RETRO',
+    isHedge: true,
+    structure: 'ILW',
+    instrument: 'INDUSTRY_INDEX',
+    placement: 'PRIVATE',
+    simSetId: 'ind-synth-cat-v1-100k',
+    graph: {
+      graphId: 'g2',
+      name: 'g2',
+      version: 1,
+      currency: 'USD',
+      nodes: [{ nodeId: 'ilw1', nodeType: 'ILW_OPTION', label: 'ILW', params: {}, position: { x: 0, y: 0 } }],
+      edges: [],
+      contentHash: '',
+    },
+    depositPremium: 3.5,
+    limit: 25,
+    attachment: 40,
+    rol: 0.14,
+    brokeragePct: 0,
+    collateralRequired: 0,
+    profile: { ...contractFixture.profile, uniqueCode: 'RL-2027-004', programCode: 'PGM-004', rarcTotalPct: -2.5 },
+  },
+  {
+    ...contractFixture,
+    programmeId: 'prog-retro-unl-27',
+    chainId: 'chain-retro',
+    cedentName: 'RoaringLion UNL Book',
+    programmeName: 'Whole-Account UNL Retro XL',
+    status: 'QUOTED',
+    direction: 'EXTERNAL_RETRO',
+    isHedge: true,
+    structure: 'OCC_XL',
+    instrument: 'UNL',
+    portfolioSnapshotDate: '2027-01-01',
+    placement: 'PRIVATE',
+    graph: {
+      graphId: 'g3',
+      name: 'g3',
+      version: 1,
+      currency: 'USD',
+      nodes: [{ nodeId: 'r1', nodeType: 'OCC_XL', label: 'Retro', params: {}, position: { x: 0, y: 0 } }],
+      edges: [],
+      contentHash: '',
+    },
+    depositPremium: 3.5,
+    limit: 35,
+    attachment: 45,
+    rol: 0.1,
+    brokeragePct: 0,
+    collateralRequired: 0,
+    regionPerils: [],
+    profile: { ...contractFixture.profile, uniqueCode: 'RL-2027-005', programCode: 'PGM-005', rarcTotalPct: -1.0 },
+  },
+];
+
+describe('ContractManager ILW, Retro Hedge, and Long direction support', () => {
+  let createdPayloads: Record<string, unknown>[] = [];
+
+  beforeEach(() => {
+    createdPayloads = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/api/contracts') && (!init?.method || init.method === 'GET')) {
+          return new Response(JSON.stringify(HEDGE_MOCK_CONTRACTS), { status: 200 });
+        }
+        if (url.endsWith('/api/contracts') && init?.method === 'POST') {
+          const parsed = JSON.parse(String(init.body)) as Record<string, unknown>;
+          createdPayloads.push(parsed);
+          return new Response(JSON.stringify({ ...HEDGE_MOCK_CONTRACTS[1], programmeId: 'prog-new-ilw' }), { status: 200 });
+        }
+        if (url.includes('/dossier')) {
+          return new Response(JSON.stringify(dossierFixture), { status: 200 });
+        }
+        return new Response(JSON.stringify([]), { status: 200 });
+      }),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    cleanup();
+  });
+
+  it('shows ILWs and UNL Retro Hedges in Contracts ledger with direction/type filters and auto-wired New Deal creation', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <ContractManager onSelectProgramme={() => {}} />
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('US FL Wind $40B Binary ILW')).toBeTruthy();
+      expect(screen.getByText('Whole-Account UNL Retro XL')).toBeTruthy();
+    });
+
+    // Filter by Dir = Hedge -> hides Long Farmers programme
+    fireEvent.change(screen.getByLabelText('Filter Dir'), { target: { value: 'Hedge' } });
+    expect(screen.queryByText('US Wind Occ + Agg Tower')).toBeNull();
+    expect(screen.getByText('US FL Wind $40B Binary ILW')).toBeTruthy();
+    expect(screen.getByText('Whole-Account UNL Retro XL')).toBeTruthy();
+
+    // Filter by Type = ILW -> shows only ILW
+    fireEvent.change(screen.getByLabelText('Filter Type'), { target: { value: 'ILW' } });
+    expect(screen.getByText('US FL Wind $40B Binary ILW')).toBeTruthy();
+    expect(screen.queryByText('Whole-Account UNL Retro XL')).toBeNull();
+
+    // Open + New Deal and verify UNL Retro Snapshot & ILW Industry auto-wiring controls
+    fireEvent.click(screen.getByRole('button', { name: '+ New Deal' }));
+    fireEvent.change(screen.getByLabelText('Deal direction'), { target: { value: 'EXTERNAL_RETRO' } });
+    expect(screen.getByText(/connects directly to our own UNL Portfolio Snapshot/i)).toBeTruthy();
+    expect(screen.getByLabelText(/UNL Snapshot As-Of/i)).toBeTruthy();
+
+    // Switch basis to ILW -> shows Industry Loss Run auto-wiring & Trigger ($B)
+    fireEvent.change(screen.getByLabelText('Programme basis'), { target: { value: 'ILW' } });
+    expect(screen.getByText(/connects directly to the Industry Loss Run/i)).toBeTruthy();
+    expect(screen.getByLabelText('ILW trigger type')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Contract' }));
+    await waitFor(() => {
+      expect(createdPayloads.length).toBe(1);
+    });
+    expect(createdPayloads[0]).toMatchObject({
+      direction: 'EXTERNAL_RETRO',
+      isHedge: true,
+      structure: 'ILW',
+      instrument: 'INDUSTRY_INDEX',
+    });
   });
 });

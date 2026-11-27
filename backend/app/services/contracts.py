@@ -23,6 +23,7 @@ from app.models.domain import (
 )
 from app.models.enums import (
     ContractDirection,
+    IlwTriggerType,
     InstrumentType,
     LinkType,
     NodeType,
@@ -30,6 +31,7 @@ from app.models.enums import (
     PlacementType,
     ProgrammeStatus,
     StructureType,
+    is_hedge_direction,
 )
 from app.models.phase1 import (
     ContractCreate,
@@ -51,8 +53,17 @@ from app.models.phase1 import (
 from app.services.lineage import LineageRegistry, canonical_hash
 from app.services.node_labels import label_name, node_terms, relabel_graph, smart_label
 from app.services.loss_files import files_from_stored, validate_filters_match_loss_files
+from app.services.portfolio_snapshot import (
+    is_ilw_programme,
+    is_unl_retro_hedge,
+    select_unl_snapshot_contracts,
+    snapshot_loss_files,
+)
 from app.services.pricing_bind import validate_pricing_output_single_connection
 from app.services.seed_data import _build_eurowind_programme, _build_farmers_programme, _build_pacific_eq_programme
+
+DEFAULT_INDUSTRY_SIM_SET_ID = "ind-synth-cat-v1-100k"
+_SOURCE_NODE_TYPES = (NodeType.LOSS_SOURCE, NodeType.INDUSTRY_INDEX_SOURCE, NodeType.PORTFOLIO_ROLLUP)
 
 
 _OUTPUT_TYPES = (NodeType.PRICING_OUTPUT, NodeType.YELT_OUTPUT, NodeType.EP_OUTPUT)
@@ -112,6 +123,17 @@ def _layer_node(spec: ContractLayerSpec, node_id: str, written: float, signed: f
         if spec.per_event_cap is not None:
             params["perEventCap"] = spec.per_event_cap
         node_type, default_name = NodeType.AGG_XL, "Agg XL"
+    elif spec.layer_type == "ILW_OPTION":
+        params = {
+            "limit": spec.limit,
+            "trigger": spec.attachment,
+            "triggerType": spec.trigger_type.value if spec.trigger_type else IlwTriggerType.BINARY.value,
+            "depositPremium": spec.deposit_premium,
+            "placedShare": signed_line,
+        }
+        if spec.exhaustion is not None:
+            params["exhaustion"] = spec.exhaustion
+        node_type, default_name = NodeType.ILW_OPTION, "ILW"
     else:
         params = {
             "occLimit": spec.limit,
@@ -155,7 +177,8 @@ def _pricing_node(programme_id: str, layer_id: str, layer_name: str, position: d
 
 def _ordinal_name(i: int, layer_type: str) -> str:
     suffix = {1: "st", 2: "nd", 3: "rd"}.get(i if i < 20 else i % 10, "th")
-    return f"{i}{suffix} {'Agg' if layer_type == 'AGG_XL' else 'Cat'} XL"
+    kind = "ILW" if layer_type == "ILW_OPTION" else ("Agg XL" if layer_type == "AGG_XL" else "Cat XL")
+    return f"{i}{suffix} {kind}"
 
 
 def _contract_layer_specs(c: ContractCreate) -> list[ContractLayerSpec]:
@@ -163,6 +186,27 @@ def _contract_layer_specs(c: ContractCreate) -> list[ContractLayerSpec]:
         return [
             spec if (spec.name or "").strip() else spec.model_copy(update={"name": _ordinal_name(i + 1, spec.layer_type)})
             for i, spec in enumerate(c.layers)
+        ]
+    if is_ilw_programme(c.structure, c.instrument):
+        ilw_spec = c.ilw_spec or {}
+        raw_trig_type = ilw_spec.get("trigger_type") or ilw_spec.get("triggerType")
+        try:
+            trig_type = IlwTriggerType(str(raw_trig_type)) if raw_trig_type else IlwTriggerType.BINARY
+        except ValueError:
+            trig_type = IlwTriggerType.BINARY
+        exh = ilw_spec.get("exhaustion_bn") or ilw_spec.get("exhaustionBn")
+        return [
+            ContractLayerSpec(
+                name=c.programme_name,
+                layer_type="ILW_OPTION",
+                limit=c.limit,
+                attachment=c.attachment,
+                deposit_premium=c.deposit_premium,
+                trigger_type=trig_type,
+                exhaustion=float(exh) if exh is not None else None,
+                written_line=c.written_line,
+                signed_line=c.signed_line,
+            )
         ]
     return [
         ContractLayerSpec(
@@ -202,26 +246,142 @@ def _loss_files_for_sim(sim_set_id: str) -> list:
         )
 
 
-def _default_graph_for_contract(c: ContractCreate, prog_id: str) -> GraphSpec:
-    """Loss source -> zone/peril filter -> one node per layer, each priced, with a programme-total YELT."""
-    src_id, flt_id, out_id = f"src-{prog_id}", f"flt-{prog_id}", f"out-{prog_id}"
-    source_params: dict = {"simSetId": c.sim_set_id}
-    loss_files = _loss_files_for_sim(c.sim_set_id)
+def _build_source_node(
+    *,
+    src_id: str,
+    direction: ContractDirection,
+    structure: StructureType,
+    instrument: InstrumentType,
+    sim_set_id: str,
+    portfolio_snapshot_date: str | None,
+    inception_date: str | None,
+    all_contracts: list[ContractFull] | None = None,
+    programme_id: str = "",
+    position: dict[str, float] | None = None,
+) -> GraphNodeSpec:
+    pos = position or {"x": 40, "y": 100}
+    if is_ilw_programme(structure, instrument):
+        ind_sim_id = sim_set_id if sim_set_id.startswith("ind-") else DEFAULT_INDUSTRY_SIM_SET_ID
+        loss_files = _loss_files_for_sim(ind_sim_id)
+        params: dict = {
+            "simSetId": ind_sim_id,
+            "sourceKind": "INDUSTRY_LOSS_RUN",
+            "labelName": "Industry Loss Run",
+        }
+        if loss_files:
+            params["lossFiles"] = loss_files
+        return GraphNodeSpec(
+            node_id=src_id,
+            node_type=NodeType.INDUSTRY_INDEX_SOURCE,
+            label=smart_label(NodeType.INDUSTRY_INDEX_SOURCE, params, "Industry Loss Run"),
+            params=params,
+            position=pos,
+        )
+    if is_unl_retro_hedge(direction, structure, instrument):
+        as_of = (portfolio_snapshot_date or inception_date or "2027-01-01").strip()
+        snap_contracts = select_unl_snapshot_contracts(
+            all_contracts or [],
+            as_of_date=as_of,
+            exclude_programme_id=programme_id or None,
+        )
+        loss_files = snapshot_loss_files(snap_contracts, as_of_date=as_of, fallback_sim_set_id=sim_set_id)
+        params = {
+            "simSetId": sim_set_id,
+            "sourceKind": "UNL_PORTFOLIO_SNAPSHOT",
+            "asOfDate": as_of,
+            "labelName": "UNL Portfolio",
+            "lossFiles": loss_files,
+        }
+        return GraphNodeSpec(
+            node_id=src_id,
+            node_type=NodeType.PORTFOLIO_ROLLUP,
+            label=smart_label(NodeType.PORTFOLIO_ROLLUP, params, "UNL Portfolio"),
+            params=params,
+            position=pos,
+        )
+    source_params: dict = {"simSetId": sim_set_id}
+    loss_files = _loss_files_for_sim(sim_set_id)
     if loss_files:
         source_params["lossFiles"] = loss_files
+    return GraphNodeSpec(
+        node_id=src_id,
+        node_type=NodeType.LOSS_SOURCE,
+        label=f"Loss Source ({sim_set_id})",
+        params=source_params,
+        position=pos,
+    )
+
+
+def _auto_wire_graph_source(
+    graph: GraphSpec,
+    *,
+    direction: ContractDirection,
+    structure: StructureType,
+    instrument: InstrumentType,
+    sim_set_id: str,
+    portfolio_snapshot_date: str | None,
+    inception_date: str | None,
+    all_contracts: list[ContractFull] | None = None,
+    programme_id: str = "",
+) -> bool:
+    """Re-wire the graph's primary loss source when direction/structure/snapshot date changes."""
+    changed = False
+    for idx, node in enumerate(graph.nodes):
+        if node.node_type not in _SOURCE_NODE_TYPES:
+            continue
+        replacement = _build_source_node(
+            src_id=node.node_id,
+            direction=direction,
+            structure=structure,
+            instrument=instrument,
+            sim_set_id=sim_set_id,
+            portfolio_snapshot_date=portfolio_snapshot_date,
+            inception_date=inception_date,
+            all_contracts=all_contracts,
+            programme_id=programme_id,
+            position=node.position,
+        )
+        if node.node_type != replacement.node_type or node.params != replacement.params:
+            graph.nodes[idx] = replacement
+            changed = True
+        break
+    return changed
+
+
+def _default_graph_for_contract(
+    c: ContractCreate,
+    prog_id: str,
+    *,
+    all_contracts: list[ContractFull] | None = None,
+) -> GraphSpec:
+    """Loss source -> zone/peril filter -> one node per layer, each priced, with a programme-total YELT.
+
+    ILW programmes auto-wire to the Industry Loss Run (`INDUSTRY_INDEX_SOURCE`) with all industry
+    regions & perils available on the filter out of the box.
+    Normal retro hedges auto-wire to our own UNL Portfolio Snapshot (`PORTFOLIO_ROLLUP`) as of
+    `portfolio_snapshot_date`.
+    """
+    src_id, flt_id, out_id = f"src-{prog_id}", f"flt-{prog_id}", f"out-{prog_id}"
+    src_node = _build_source_node(
+        src_id=src_id,
+        direction=c.direction,
+        structure=c.structure,
+        instrument=c.instrument,
+        sim_set_id=c.sim_set_id,
+        portfolio_snapshot_date=c.portfolio_snapshot_date,
+        inception_date=c.inception_date,
+        all_contracts=all_contracts,
+        programme_id=prog_id,
+        position={"x": 40, "y": 100},
+    )
+    flt_rps = [rp for rp in c.region_perils if rp and rp != "ALL"]
     nodes = [
-        GraphNodeSpec(
-            node_id=src_id,
-            node_type=NodeType.LOSS_SOURCE,
-            label=f"Loss Source ({c.sim_set_id})",
-            params=source_params,
-            position={"x": 40, "y": 100},
-        ),
+        src_node,
         GraphNodeSpec(
             node_id=flt_id,
             node_type=NodeType.REGION_PERIL_FILTER,
-            label=f"Zone Peril ({', '.join(c.region_perils)})",
-            params={"regionPerils": c.region_perils},
+            label=f"Zone Peril ({', '.join(flt_rps)})" if flt_rps else "Zone Peril — All zones & perils",
+            params={"regionPerils": flt_rps, "labelName": "Zone Peril"},
             position={"x": 300, "y": 100},
         ),
     ]
@@ -286,7 +446,17 @@ def add_layer_to_graph(
         inputs = [(e.source, e.sign, e.weight) for e in graph.edges if e.target == layers[0].node_id]
     else:
         anchor = next(
-            (n for t in (NodeType.REGION_PERIL_FILTER, NodeType.LOSS_SOURCE) for n in graph.nodes if n.node_type == t),
+            (
+                n
+                for t in (
+                    NodeType.REGION_PERIL_FILTER,
+                    NodeType.LOSS_SOURCE,
+                    NodeType.INDUSTRY_INDEX_SOURCE,
+                    NodeType.PORTFOLIO_ROLLUP,
+                )
+                for n in graph.nodes
+                if n.node_type == t
+            ),
             None,
         )
         if anchor is None:
@@ -335,6 +505,7 @@ def remove_layer_from_graph(graph: GraphSpec, node_id: str, *, programme_id: str
 
 
 def _record_to_full(r: ContractRecord) -> ContractFull:
+    direction = ContractDirection(r.direction)
     return ContractFull(
         programme_id=r.programme_id,
         chain_id=r.chain_id,
@@ -350,12 +521,14 @@ def _record_to_full(r: ContractRecord) -> ContractFull:
         fronting_carrier=r.fronting_carrier,
         collateral_cell=r.collateral_cell,
         status=ProgrammeStatus(r.status),
-        direction=ContractDirection(r.direction),
+        direction=direction,
+        is_hedge=is_hedge_direction(direction),
         structure=StructureType(r.structure),
         instrument=InstrumentType(r.instrument),
         placement=PlacementType(r.placement),
         inception_date=r.inception_date,
         expiry_date=r.expiry_date,
+        portfolio_snapshot_date=getattr(r, "portfolio_snapshot_date", None),
         hours_clause=r.hours_clause,
         written_line=r.written_line if r.written_line is not None else 1.0,
         signed_line=r.signed_line,
@@ -393,6 +566,11 @@ def contract_to_programme_deal(c: ContractFull) -> ProgrammeDeal:
         underwriter=c.underwriter,
         broker=c.broker,
         status=c.status,
+        direction=c.direction,
+        is_hedge=is_hedge_direction(c.direction),
+        structure=c.structure,
+        instrument=c.instrument,
+        portfolio_snapshot_date=c.portfolio_snapshot_date,
         currency=c.currency,
         sim_set_id=c.sim_set_id,
         uplift_set=c.uplift_set,
@@ -1031,6 +1209,119 @@ class ContractStore:
                     )
             db.commit()
 
+        # Seed a bound ILW hedge (auto-wired to Industry Loss Run) and a quoted UNL retro hedge
+        # (auto-wired to our own UNL Portfolio Snapshot) so both live as regular Contracts programmes.
+        existing = self.list_contracts()
+        seed_lineage = LineageRegistry(persist=False)
+        self.create_contract(
+            ContractCreate(
+                programme_id="prog-ilw-fl-wind-27",
+                cedent_name="ILW Market Protection",
+                programme_name="US FL Wind $40B Binary ILW",
+                treaty_year=2027,
+                renewal_period="J27",
+                office="BDA",
+                underwriter="Lead Underwriter",
+                broker="Broker C",
+                status=ProgrammeStatus.BOUND,
+                direction=ContractDirection.EXTERNAL_RETRO,
+                is_hedge=True,
+                structure=StructureType.ILW,
+                instrument=InstrumentType.INDUSTRY_INDEX,
+                placement=PlacementType.PRIVATE,
+                inception_date="2027-01-01",
+                expiry_date="2027-12-31",
+                limit=25.0,
+                attachment=40.0,
+                deposit_premium=3.5,
+                rol=0.14,
+                brokerage_pct=0.0,
+                collateral_required=0.0,
+                currency="USD",
+                sim_set_id=DEFAULT_INDUSTRY_SIM_SET_ID,
+                region_perils=["US-FL-WS"],
+                perils=[PerilCode.WS],
+                custom_tags=["ILW", "Hedge", "FL Wind"],
+                ilw_spec={
+                    "industrySimSetId": DEFAULT_INDUSTRY_SIM_SET_ID,
+                    "regionPerils": ["US-FL-WS"],
+                    "triggerType": "BINARY",
+                    "triggerBn": 40.0,
+                    "limitM": 25.0,
+                    "rol": 0.14,
+                    "direction": "EXTERNAL_RETRO",
+                },
+                profile=ProgrammeProfile(
+                    unique_code="RL-2027-004",
+                    program_code="PGM-004",
+                    legal_entity="RoaringLion Re Transformer",
+                    trading_unit="Retro & Hedging",
+                    planning_class="ILW Hedge",
+                    new_or_renewal="NEW",
+                    written_date="2026-11-22",
+                    cedent_group="RoaringLion Cat Fund (Ceded)",
+                    cedent_country="BMU",
+                    cedent_credit_rating="Collateralized",
+                    broker_group="Broker C",
+                    limit_basis="INDUSTRY_INDEX",
+                    inuring_note="PCS Florida Wind industry loss warranty hedging peak FL tail.",
+                    rarc_total_pct=-2.5,
+                ),
+            ),
+            seed_lineage,
+            _existing_contracts=existing,
+        )
+        self.create_contract(
+            ContractCreate(
+                programme_id="prog-retro-unl-27",
+                cedent_name="RoaringLion UNL Book",
+                programme_name="Whole-Account UNL Retro XL",
+                treaty_year=2027,
+                renewal_period="J27",
+                office="BDA",
+                underwriter="Lead Underwriter",
+                broker="Broker A",
+                status=ProgrammeStatus.QUOTED,
+                direction=ContractDirection.EXTERNAL_RETRO,
+                is_hedge=True,
+                structure=StructureType.OCC_XL,
+                instrument=InstrumentType.UNL,
+                placement=PlacementType.PRIVATE,
+                inception_date="2027-01-01",
+                expiry_date="2027-12-31",
+                portfolio_snapshot_date="2027-01-01",
+                limit=35.0,
+                attachment=45.0,
+                deposit_premium=3.5,
+                rol=0.10,
+                brokerage_pct=0.0,
+                collateral_required=0.0,
+                currency="USD",
+                sim_set_id=default_sim_set_id,
+                region_perils=[],
+                perils=[PerilCode.WS, PerilCode.EQ],
+                custom_tags=["Retro", "Hedge", "UNL"],
+                profile=ProgrammeProfile(
+                    unique_code="RL-2027-005",
+                    program_code="PGM-005",
+                    legal_entity="RoaringLion Re Transformer",
+                    trading_unit="Retro & Hedging",
+                    planning_class="UNL Retrocession",
+                    new_or_renewal="NEW",
+                    written_date="2026-11-24",
+                    cedent_group="RoaringLion Cat Fund (Ceded)",
+                    cedent_country="BMU",
+                    cedent_credit_rating="AM Best A",
+                    broker_group="Broker A",
+                    limit_basis="UNL",
+                    inuring_note="Occurrence retrocession attaching over our own bound UNL portfolio snapshot as of 2027-01-01.",
+                    rarc_total_pct=-1.0,
+                ),
+            ),
+            seed_lineage,
+            _existing_contracts=existing,
+        )
+
     def list_contracts(
         self,
         *,
@@ -1130,74 +1421,128 @@ class ContractStore:
             rec = db.get(ContractRecord, programme_id)
             return _record_to_full(rec) if rec else None
 
-    def create_contract(self, payload: ContractCreate, lineage: LineageRegistry) -> ContractFull:
+    def create_contract(
+        self,
+        payload: ContractCreate,
+        lineage: LineageRegistry,
+        *,
+        _existing_contracts: list[ContractFull] | None = None,
+    ) -> ContractFull:
         prog_id = payload.programme_id or f"prog-{uuid.uuid4().hex[:8]}"
-        uplift = payload.uplift_set or UpliftSet(
+        direction = payload.direction
+        if payload.is_hedge is True and not is_hedge_direction(direction):
+            direction = ContractDirection.EXTERNAL_RETRO
+        elif payload.is_hedge is False and is_hedge_direction(direction):
+            direction = ContractDirection.ASSUMED
+
+        structure = payload.structure
+        instrument = payload.instrument
+        sim_set_id = payload.sim_set_id
+        if is_ilw_programme(structure, instrument):
+            structure = StructureType.ILW
+            instrument = InstrumentType.INDUSTRY_INDEX
+            if sim_set_id == "sim-synth-cat-v1-100k":
+                sim_set_id = DEFAULT_INDUSTRY_SIM_SET_ID
+
+        snapshot_date = payload.portfolio_snapshot_date
+        if is_unl_retro_hedge(direction, structure, instrument) and not snapshot_date:
+            snapshot_date = payload.inception_date or f"{payload.treaty_year}-01-01"
+
+        normalized_payload = payload.model_copy(
+            update={
+                "direction": direction,
+                "is_hedge": is_hedge_direction(direction),
+                "structure": structure,
+                "instrument": instrument,
+                "sim_set_id": sim_set_id,
+                "portfolio_snapshot_date": snapshot_date,
+            }
+        )
+
+        uplift = normalized_payload.uplift_set or UpliftSet(
             uplift_set_id=f"upl-{prog_id}",
-            name=f"{payload.programme_name} Uplift",
+            name=f"{normalized_payload.programme_name} Uplift",
             version=1,
             rules=[],
             content_hash=canonical_hash([]),
         )
-        graph = payload.graph or _default_graph_for_contract(payload, prog_id)
-        if payload.graph is not None:
+        need_existing = normalized_payload.graph is not None or is_unl_retro_hedge(direction, structure, instrument)
+        all_existing = (
+            _existing_contracts
+            if _existing_contracts is not None
+            else (self.list_contracts() if need_existing else [])
+        )
+        graph = normalized_payload.graph or _default_graph_for_contract(
+            normalized_payload,
+            prog_id,
+            all_contracts=all_existing,
+        )
+        if normalized_payload.graph is not None:
             ensure_layer_codes(graph, strict=True)
-            validate_pricing_links_one_to_one(prog_id, graph, self.list_contracts())
+            validate_pricing_links_one_to_one(prog_id, graph, all_existing)
+        collateral = (
+            0.0
+            if is_hedge_direction(direction) and "collateral_required" not in payload.model_fields_set
+            else normalized_payload.collateral_required
+        )
         chash = canonical_hash({
             "programme_id": prog_id,
-            "limit": payload.limit,
-            "signed_line": payload.signed_line,
-            "rol": payload.rol,
+            "direction": direction.value,
+            "structure": structure.value,
+            "limit": normalized_payload.limit,
+            "signed_line": normalized_payload.signed_line,
+            "rol": normalized_payload.rol,
             "graph": graph.content_hash,
             "uplift": uplift.content_hash,
         })
         rec = ContractRecord(
             programme_id=prog_id,
-            chain_id=payload.chain_id or f"chain-{prog_id}",
-            prior_contract_id=payload.prior_contract_id,
-            cedent_name=payload.cedent_name,
-            programme_name=payload.programme_name,
-            treaty_year=payload.treaty_year,
-            renewal_period=payload.renewal_period,
-            office=payload.office,
-            underwriter=payload.underwriter,
-            secondary_underwriter=payload.secondary_underwriter,
-            broker=payload.broker,
-            fronting_carrier=payload.fronting_carrier,
-            collateral_cell=payload.collateral_cell,
-            status=payload.status.value,
-            direction=payload.direction.value,
-            structure=payload.structure.value,
-            instrument=payload.instrument.value,
-            placement=payload.placement.value,
-            inception_date=payload.inception_date,
-            expiry_date=payload.expiry_date,
-            hours_clause=payload.hours_clause,
-            written_line=payload.written_line,
-            signed_line=payload.signed_line,
-            limit=payload.limit,
-            attachment=payload.attachment,
-            deposit_premium=payload.deposit_premium,
-            rol=payload.rol,
-            brokerage_pct=payload.brokerage_pct,
-            fronting_fee_pct=payload.fronting_fee_pct,
-            collateral_required=payload.collateral_required,
-            currency=payload.currency,
-            sim_set_id=payload.sim_set_id,
-            exposure_eclipse_programme_id=payload.exposure_eclipse_programme_id,
-            region_perils_json=json.dumps(payload.region_perils),
-            perils_json=json.dumps([p.value for p in payload.perils]),
-            custom_tags_json=json.dumps(payload.custom_tags),
+            chain_id=normalized_payload.chain_id or f"chain-{prog_id}",
+            prior_contract_id=normalized_payload.prior_contract_id,
+            cedent_name=normalized_payload.cedent_name,
+            programme_name=normalized_payload.programme_name,
+            treaty_year=normalized_payload.treaty_year,
+            renewal_period=normalized_payload.renewal_period,
+            office=normalized_payload.office,
+            underwriter=normalized_payload.underwriter,
+            secondary_underwriter=normalized_payload.secondary_underwriter,
+            broker=normalized_payload.broker,
+            fronting_carrier=normalized_payload.fronting_carrier,
+            collateral_cell=normalized_payload.collateral_cell,
+            status=normalized_payload.status.value,
+            direction=direction.value,
+            structure=structure.value,
+            instrument=instrument.value,
+            placement=normalized_payload.placement.value,
+            inception_date=normalized_payload.inception_date,
+            expiry_date=normalized_payload.expiry_date,
+            portfolio_snapshot_date=snapshot_date,
+            hours_clause=normalized_payload.hours_clause,
+            written_line=normalized_payload.written_line,
+            signed_line=normalized_payload.signed_line,
+            limit=normalized_payload.limit,
+            attachment=normalized_payload.attachment,
+            deposit_premium=normalized_payload.deposit_premium,
+            rol=normalized_payload.rol,
+            brokerage_pct=normalized_payload.brokerage_pct,
+            fronting_fee_pct=normalized_payload.fronting_fee_pct,
+            collateral_required=collateral,
+            currency=normalized_payload.currency,
+            sim_set_id=sim_set_id,
+            exposure_eclipse_programme_id=normalized_payload.exposure_eclipse_programme_id,
+            region_perils_json=json.dumps(normalized_payload.region_perils),
+            perils_json=json.dumps([p.value for p in normalized_payload.perils]),
+            custom_tags_json=json.dumps(normalized_payload.custom_tags),
             uplift_set_json=uplift.model_dump_json(),
             graph_json=graph.model_dump_json(),
-            ilw_spec_json=json.dumps(payload.ilw_spec) if payload.ilw_spec else None,
-            profile_json=(payload.profile or ProgrammeProfile(unique_code=f"RL-{payload.treaty_year}-{prog_id[-6:].upper()}", cedent_group=payload.cedent_name)).model_dump_json(),
+            ilw_spec_json=json.dumps(normalized_payload.ilw_spec) if normalized_payload.ilw_spec else None,
+            profile_json=(normalized_payload.profile or ProgrammeProfile(unique_code=f"RL-{normalized_payload.treaty_year}-{prog_id[-6:].upper()}", cedent_group=normalized_payload.cedent_name)).model_dump_json(),
             version=1,
             content_hash=chash,
         )
-        if payload.layers and payload.graph is None:
+        if normalized_payload.layers and normalized_payload.graph is None:
             _roll_up_layers(rec, graph)
-            rec.collateral_required = rec.limit * rec.signed_line
+            rec.collateral_required = 0.0 if is_hedge_direction(direction) else (rec.limit * rec.signed_line)
         else:
             _sync_profile_rarc_from_layers(rec, _active_rollup_layers(rec, graph))
         with get_session() as db:
@@ -1206,7 +1551,7 @@ class ContractStore:
             db.refresh(rec)
             full = _record_to_full(rec)
 
-        lineage.add_link(prog_id, payload.sim_set_id, LinkType.USES_LOSSES)
+        lineage.add_link(prog_id, sim_set_id, LinkType.USES_LOSSES)
         lineage.add_link(prog_id, graph.graph_id, LinkType.USES_STRUCTURE)
         return full
 
@@ -1216,6 +1561,16 @@ class ContractStore:
             if not rec:
                 return None
             data = patch.model_dump(exclude_unset=True)
+            rewire_needed = False
+            if "is_hedge" in data and data["is_hedge"] is not None:
+                want_hedge = bool(data.pop("is_hedge"))
+                if "direction" not in data or data["direction"] is None:
+                    data["direction"] = (
+                        ContractDirection.EXTERNAL_RETRO if want_hedge else ContractDirection.ASSUMED
+                    )
+            else:
+                data.pop("is_hedge", None)
+
             for k, v in data.items():
                 if k == "custom_tags":
                     rec.custom_tags_json = json.dumps(v)
@@ -1232,11 +1587,75 @@ class ContractStore:
                     setattr(rec, k, v.value)
                 else:
                     setattr(rec, k, v)
+                if k in ("direction", "structure", "instrument", "portfolio_snapshot_date", "sim_set_id"):
+                    rewire_needed = True
+
+            cur_dir = ContractDirection(rec.direction)
+            cur_struct = StructureType(rec.structure)
+            cur_inst = InstrumentType(rec.instrument)
+            if is_ilw_programme(cur_struct, cur_inst):
+                rec.structure = StructureType.ILW.value
+                rec.instrument = InstrumentType.INDUSTRY_INDEX.value
+                cur_struct = StructureType.ILW
+                cur_inst = InstrumentType.INDUSTRY_INDEX
+                if rec.sim_set_id == "sim-synth-cat-v1-100k":
+                    rec.sim_set_id = DEFAULT_INDUSTRY_SIM_SET_ID
+            elif is_unl_retro_hedge(cur_dir, cur_struct, cur_inst):
+                if not rec.portfolio_snapshot_date:
+                    rec.portfolio_snapshot_date = rec.inception_date or f"{rec.treaty_year}-01-01"
+
+            if "direction" in data and "collateral_required" not in data:
+                rec.collateral_required = 0.0 if is_hedge_direction(cur_dir) else round(rec.limit * rec.signed_line, 6)
+
+            if rewire_needed:
+                all_contracts = [_record_to_full(r) for r in db.query(ContractRecord).all()]
+                graph = GraphSpec(**json.loads(rec.graph_json))
+                graph_changed = _auto_wire_graph_source(
+                    graph,
+                    direction=cur_dir,
+                    structure=cur_struct,
+                    instrument=cur_inst,
+                    sim_set_id=rec.sim_set_id,
+                    portfolio_snapshot_date=rec.portfolio_snapshot_date,
+                    inception_date=rec.inception_date,
+                    all_contracts=all_contracts,
+                    programme_id=rec.programme_id,
+                )
+                # Keep single-layer node type aligned when toggling to/from ILW structure
+                layer_nodes = [n for n in graph.nodes if n.node_type in _LAYER_TYPES]
+                if "structure" in data and len(layer_nodes) == 1:
+                    ln = layer_nodes[0]
+                    if cur_struct == StructureType.ILW and ln.node_type in (NodeType.OCC_XL, NodeType.AGG_XL):
+                        lim_val = ln.params.get("occLimit") or ln.params.get("aggLimit") or rec.limit
+                        att_val = ln.params.get("occAttachment") or ln.params.get("aggAttachment") or rec.attachment
+                        ln.node_type = NodeType.ILW_OPTION
+                        ln.params = {
+                            "layerCode": ln.params.get("layerCode", "L1"),
+                            "labelName": ln.params.get("labelName") or rec.programme_name,
+                            "limit": float(lim_val),
+                            "trigger": float(att_val),
+                            "triggerType": "BINARY",
+                            "depositPremium": float(ln.params.get("depositPremium", rec.deposit_premium) or 0.0),
+                            "placedShare": float(ln.params.get("placedShare", rec.signed_line) or 1.0),
+                            "writtenLine": float(ln.params.get("writtenLine", rec.written_line) or 1.0),
+                        }
+                        graph_changed = True
+                if graph_changed:
+                    relabel_graph(graph)
+                    graph.version += 1
+                    graph.content_hash = canonical_hash({
+                        "nodes": [n.model_dump() for n in graph.nodes],
+                        "edges": [e.model_dump() for e in graph.edges],
+                    })
+                    rec.graph_json = graph.model_dump_json()
+
             rec.version += 1
             rec.content_hash = canonical_hash({
                 "programme_id": rec.programme_id,
                 "version": rec.version,
                 "status": rec.status,
+                "direction": rec.direction,
+                "structure": rec.structure,
                 "signed_line": rec.signed_line,
                 "limit": rec.limit,
                 "rol": rec.rol,
@@ -1317,6 +1736,31 @@ class ContractStore:
                 return None
             all_contracts = [_record_to_full(r) for r in db.query(ContractRecord).all()]
             old_graph = GraphSpec(**json.loads(rec.graph_json))
+            for node in graph.nodes:
+                if node.node_type == NodeType.PORTFOLIO_ROLLUP:
+                    as_of = str(node.params.get("asOfDate") or rec.portfolio_snapshot_date or rec.inception_date or "2027-01-01").strip()
+                    rec.portfolio_snapshot_date = as_of
+                    snap_contracts = select_unl_snapshot_contracts(
+                        all_contracts,
+                        as_of_date=as_of,
+                        exclude_programme_id=programme_id,
+                    )
+                    p = dict(node.params)
+                    p["asOfDate"] = as_of
+                    p["sourceKind"] = "UNL_PORTFOLIO_SNAPSHOT"
+                    p["lossFiles"] = snapshot_loss_files(
+                        snap_contracts, as_of_date=as_of, fallback_sim_set_id=rec.sim_set_id
+                    )
+                    node.params = p
+                elif node.node_type == NodeType.INDUSTRY_INDEX_SOURCE:
+                    ind_sim_id = str(node.params.get("simSetId") or DEFAULT_INDUSTRY_SIM_SET_ID).strip()
+                    p = dict(node.params)
+                    p["simSetId"] = ind_sim_id
+                    p["sourceKind"] = "INDUSTRY_LOSS_RUN"
+                    ind_files = _sim_loss_files(db).get(ind_sim_id)
+                    if ind_files is not None:
+                        p["lossFiles"] = ind_files
+                    node.params = p
             ensure_layer_codes(graph, strict=True)
             validate_pricing_output_single_connection(graph)
             validate_filters_match_loss_files(graph, _sim_loss_files(db), rec.sim_set_id)
@@ -1612,8 +2056,9 @@ class ContractStore:
                 structure=src.structure,
                 instrument=src.instrument,
                 placement=src.placement,
-                inception_date=f"{next_year}-01-01",
-                expiry_date=f"{next_year}-12-31",
+            inception_date=f"{next_year}-01-01",
+            expiry_date=f"{next_year}-12-31",
+            portfolio_snapshot_date=(f"{next_year}-01-01" if src.portfolio_snapshot_date else None),
                 hours_clause=src.hours_clause,
                 written_line=new_signed,
                 signed_line=new_signed,
@@ -1685,6 +2130,9 @@ class ContractStore:
                     treaty_year=rec.treaty_year,
                     renewal_period=rec.renewal_period,
                     status=rec.status,
+                    direction=rec.direction,
+                    is_hedge=is_hedge_direction(rec.direction),
+                    structure=rec.structure,
                 )
                 for rec in self._chain_records(db, programme_id)
             ]

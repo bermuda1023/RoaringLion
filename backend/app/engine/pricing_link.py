@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from app.models.domain import PricingEconomics
-from app.models.enums import NodeType
+from app.models.enums import ContractDirection, NodeType, is_hedge_direction
 
 LAYER_NODE_TYPES = (
     NodeType.OCC_XL,
@@ -36,6 +36,8 @@ class PricingLink:
     signed_line: float
     brokerage_pct: float
     layer_code: str = ""
+    direction: str = "ASSUMED"
+    is_hedge: bool = False
     rolls_up: bool = False
     warnings: list[str] = field(default_factory=list)
 
@@ -61,6 +63,8 @@ class RollupLayerEntry:
     rip_vec: np.ndarray
     loss_vec_1x: np.ndarray
     rip_vec_1x: np.ndarray
+    direction: str = "ASSUMED"
+    is_hedge: bool = False
     pricing_node_id: str | None = None
     feeder_node_id: str | None = None
 
@@ -173,11 +177,20 @@ def compute_pricing_economics(
         rip_scale *= link.premium / upstream_premium
 
     our_premium = link.premium * link.signed_line
-    brokerage = our_premium * link.brokerage_pct
     exp_loss = float(np.mean(ann)) * scale
     exp_rip = float(np.mean(rip)) * rip_scale
     income = our_premium + exp_rip
-    profit = income - brokerage - exp_loss
+    if link.is_hedge:
+        # Buying protection: we pay premium + RIP and receive expected recoveries (exp_loss)
+        brokerage = 0.0
+        net_premium = our_premium
+        profit = exp_loss - our_premium - exp_rip
+        combined_ratio = (exp_loss / income) if income > 0 else None
+    else:
+        brokerage = our_premium * link.brokerage_pct
+        net_premium = our_premium - brokerage
+        profit = income - brokerage - exp_loss
+        combined_ratio = ((exp_loss + brokerage) / income) if income > 0 else None
     our_tvar = tvar_250 * scale
     rol = _ratio(link.premium, link.limit)
     loss_on_line = _ratio(exp_loss / link.signed_line, link.limit) if link.signed_line > 0 else None
@@ -189,6 +202,8 @@ def compute_pricing_economics(
         contract_id=link.contract_id,
         contract_code=link.contract_code,
         contract_name=link.contract_name,
+        direction=link.direction,
+        is_hedge=link.is_hedge,
         layer_node_id=link.layer_node_id,
         layer_code=link.layer_code,
         layer_label=link.layer_label,
@@ -203,14 +218,14 @@ def compute_pricing_economics(
         signed_line=link.signed_line,
         our_limit=round(link.limit * link.signed_line, 6) if link.limit else None,
         our_premium=round(our_premium, 6),
-        brokerage_pct=link.brokerage_pct,
+        brokerage_pct=0.0 if link.is_hedge else link.brokerage_pct,
         brokerage=round(brokerage, 6),
-        net_premium=round(our_premium - brokerage, 6),
+        net_premium=round(net_premium, 6),
         expected_loss=round(exp_loss, 6),
         expected_rip=round(exp_rip, 6),
         expected_profit=round(profit, 6),
         loss_ratio=round(exp_loss / income, 6) if income > 0 else None,
-        combined_ratio=round((exp_loss + brokerage) / income, 6) if income > 0 else None,
+        combined_ratio=round(combined_ratio, 6) if combined_ratio is not None else None,
         rol=round(rol, 6) if rol is not None else None,
         loss_on_line=round(loss_on_line, 6) if loss_on_line is not None else None,
         multiple=round(rol / loss_on_line, 4) if rol and loss_on_line else None,
@@ -226,6 +241,7 @@ ROLLUP_TERM_TYPES = (
     NodeType.QUOTA_SHARE,
     NodeType.AGG_QUOTA_SHARE,
     NodeType.SURPLUS_SHARE,
+    NodeType.ILW_OPTION,
     NodeType.CASCADING_TOWER,
 )
 
@@ -308,6 +324,9 @@ def extract_rollup_layers(
                 loss_1x = raw_ann * inv_up
                 rip_1x = raw_rip * inv_up * rip_mult
 
+            target_dir = getattr(target_prog, "direction", ContractDirection.ASSUMED)
+            target_dir_val = target_dir.value if hasattr(target_dir, "value") else str(target_dir)
+            target_is_hedge = is_hedge_direction(target_dir)
             entries.append(
                 RollupLayerEntry(
                     programme_id=target_prog.programme_id,
@@ -327,6 +346,8 @@ def extract_rollup_layers(
                     rip_vec=rip_1x * target_signed,
                     loss_vec_1x=loss_1x,
                     rip_vec_1x=rip_1x,
+                    direction=target_dir_val,
+                    is_hedge=target_is_hedge,
                     pricing_node_id=px.node_id,
                     feeder_node_id=feeder_id,
                 )
@@ -336,6 +357,9 @@ def extract_rollup_layers(
     for prog in legacy_progs:
         ann_map = ann_by_prog[prog.programme_id]
         rip_map = rip_by_prog[prog.programme_id]
+        prog_dir = getattr(prog, "direction", ContractDirection.ASSUMED)
+        prog_dir_val = prog_dir.value if hasattr(prog_dir, "value") else str(prog_dir)
+        prog_is_hedge = is_hedge_direction(prog_dir)
         for node in prog.graph.nodes:
             if node.node_type not in ROLLUP_TERM_TYPES:
                 continue
@@ -365,6 +389,8 @@ def extract_rollup_layers(
                     rip_vec=rip_vec,
                     loss_vec_1x=loss_vec * inv_placed,
                     rip_vec_1x=rip_vec * inv_placed,
+                    direction=prog_dir_val,
+                    is_hedge=prog_is_hedge,
                     pricing_node_id=None,
                     feeder_node_id=node.node_id,
                 )

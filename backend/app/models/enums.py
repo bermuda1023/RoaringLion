@@ -65,6 +65,14 @@ class ContractDirection(str, Enum):
     EXTERNAL_RETRO = "EXTERNAL_RETRO"
 
 
+def is_hedge_direction(direction: ContractDirection | str | None) -> bool:
+    """True when the contract is a hedge (we buy protection / ceded) rather than a long (assumed)."""
+    if direction is None:
+        return False
+    val = direction.value if isinstance(direction, ContractDirection) else str(direction)
+    return val in (ContractDirection.EXTERNAL_RETRO.value, ContractDirection.INTERNAL_CEDED.value)
+
+
 class StructureType(str, Enum):
     OCC_XL = "OCC_XL"
     AGG_XL = "AGG_XL"

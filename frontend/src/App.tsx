@@ -1,16 +1,15 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { API_BASE, api, apiUrl, fetchJson } from './api/client';
+import { API_BASE, api, fetchJson } from './api/client';
 import { BreadcrumbBar } from './components/BreadcrumbBar';
 import { NavIcon } from './components/NavIcon';
-import { RocCdfChart } from './components/RocCdfChart';
-import { fmtMoneyM, fmtNum, fmtPct } from './utils/format';
+import { fmtMoneyM, fmtNum } from './utils/format';
 import { AllocationAndBranches } from './pages/AllocationAndBranches';
 import { BurnAndClaims } from './pages/BurnAndClaims';
 import { CatModelsAndOps } from './pages/CatModelsAndOps';
 import { ContractManager } from './pages/ContractManager';
-import { IlwWorkbench } from './pages/IlwWorkbench';
 import { PortfolioOptimizer } from './pages/PortfolioOptimizer';
+import { PortfolioReturns } from './pages/PortfolioReturns';
 import { SimSetCatalog } from './pages/SimSetCatalog';
 import { StructuringStudio } from './pages/StructuringStudio';
 import type { DeterministicLossRow, ViewOfRisk } from './types/contracts';
@@ -18,7 +17,6 @@ import type { DeterministicLossRow, ViewOfRisk } from './types/contracts';
 type TabKey =
   | 'cms'
   | 'simsets'
-  | 'ilw'
   | 'dag'
   | 'deterministic'
   | 'burnclaims'
@@ -34,7 +32,6 @@ const NAV_GROUPS: { label: string; items: { key: TabKey; label: string; icon: st
     items: [
       { key: 'cms', label: 'Contracts', icon: 'ledger' },
       { key: 'dag', label: 'Structuring Studio', icon: 'graph' },
-      { key: 'ilw', label: 'Industry Loss Warranties', icon: 'index' },
       { key: 'deterministic', label: 'Deterministic', icon: 'list' },
     ],
   },
@@ -61,11 +58,10 @@ const NAV_GROUPS: { label: string; items: { key: TabKey; label: string; icon: st
 ];
 
 const PAGE_INFO: Record<TabKey, { title: string; subtitle: string }> = {
-  cms: { title: 'Contract Management', subtitle: 'Programme ledger, dossiers, and renewal history' },
+  cms: { title: 'Contract Management', subtitle: 'Programme ledger (Treaty, ILW & Retro), dossiers, and renewal history' },
   dag: { title: 'Structuring Studio', subtitle: 'Build layer structures and review loss statistics' },
-  ilw: { title: 'Industry Loss Warranties', subtitle: 'Index triggers, basis risk, and catalogue pricing' },
   deterministic: { title: 'Deterministic Scenarios', subtitle: 'Recovery and erosion statements for named events' },
-  portfolio: { title: 'Portfolio Returns', subtitle: 'Fund returns, risk appetite, and capital allocation' },
+  portfolio: { title: 'Portfolio Returns', subtitle: 'Fund returns, hedge accretion, risk appetite, and capital allocation' },
   optimizer: { title: 'Portfolio Optimizer', subtitle: 'Explore efficient frontiers with layer constraints' },
   allocation: { title: 'Retro & Scenarios', subtitle: 'Retrocession, branching, and historical backtests' },
   simsets: { title: 'Simulation Sets', subtitle: 'Event loss tables and synthetic catalogues' },
@@ -100,8 +96,9 @@ const DEFAULT_LOSSES: DeterministicLossRow[] = [
 
 export function App() {
   const [tab, setTabState] = useState<TabKey>(() => {
-    const h = window.location.hash.replace('#', '') as TabKey;
-    return h in PAGE_INFO ? h : 'dag';
+    const raw = window.location.hash.replace('#', '');
+    if (raw === 'ilw') return 'cms';
+    return raw in PAGE_INFO ? (raw as TabKey) : 'dag';
   });
   const setTab = (next: TabKey) => {
     setTabState(next);
@@ -121,12 +118,6 @@ export function App() {
     retry: 1,
   });
   const selectedProg = programmesQ.data?.find((p) => p.programmeId === selectedProgId) ?? programmesQ.data?.[0];
-
-  const portfolioQ = useQuery({
-    queryKey: ['portfolio', portfolioView, totalCapital, selectedProg?.upliftSet.version],
-    queryFn: () => api.getPortfolioRollup(portfolioView, totalCapital),
-    enabled: tab === 'portfolio',
-  });
 
   const detMut = useMutation({
     mutationFn: () =>
@@ -234,8 +225,6 @@ export function App() {
 
         {tab === 'simsets' && <SimSetCatalog />}
 
-        {tab === 'ilw' && <IlwWorkbench />}
-
         {tab === 'burnclaims' && selectedProg && <BurnAndClaims programme={selectedProg} />}
 
         {tab === 'allocation' && <AllocationAndBranches />}
@@ -248,149 +237,14 @@ export function App() {
           <StructuringStudio selectedProg={selectedProg} onSelectProgramme={setSelectedProgId} />
         )}
 
-        {tab === 'portfolio' && portfolioQ.data && (
-          <>
-            <div className="card">
-              <div className="card-title">
-                <span>{portfolioQ.data.portfolioName}</span>
-                <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <select value={portfolioView} onChange={(e) => setPortfolioView(e.target.value as ViewOfRisk)}>
-                    <option value="ADJUSTED">Adjusted view</option>
-                    <option value="UNADJUSTED">Unadjusted view</option>
-                  </select>
-                  <label style={{ color: 'var(--text-muted)', fontSize: 12 }}>
-                    Fund Capital ($M)
-                    <input
-                      type="number"
-                      value={totalCapital}
-                      onChange={(e) => setTotalCapital(Number(e.target.value) || 160)}
-                      style={{ width: 80, marginLeft: 6 }}
-                    />
-                  </label>
-                  <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
-                    Rollup: {portfolioQ.data.computeMs} ms
-                  </span>
-                  <a
-                    className="btn btn-ghost"
-                    style={{ textDecoration: 'none' }}
-                    href={apiUrl(`/api/exports/portfolio-csv?view=${portfolioView}&totalCapital=${totalCapital}`)}
-                    download
-                  >
-                    Export CSV
-                  </a>
-                  <a
-                    className="btn btn-ghost"
-                    style={{ textDecoration: 'none' }}
-                    href={apiUrl(`/api/exports/portfolio-tearsheet?view=${portfolioView}&totalCapital=${totalCapital}`)}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Tear Sheet
-                  </a>
-                </div>
-              </div>
-              <div className="grid-kpi">
-                <div className="kpi">
-                  <div className="kpi-label">Mean ROC</div>
-                  <div className="kpi-val">{fmtPct(portfolioQ.data.meanRocPct, 2)}</div>
-                </div>
-                <div className="kpi">
-                  <div className="kpi-label">No-Event ROC</div>
-                  <div className="kpi-val">{fmtPct(portfolioQ.data.noEventRocPct, 2)}</div>
-                </div>
-                <div className="kpi">
-                  <div className="kpi-label">Break-Even Prob</div>
-                  <div className="kpi-val">{fmtPct(portfolioQ.data.breakEvenProbPct, 1)}</div>
-                </div>
-                <div className="kpi">
-                  <div className="kpi-label">Expected Profit</div>
-                  <div className="kpi-val">{fmtMoneyM(portfolioQ.data.expectedProfit, 2)}</div>
-                </div>
-                <div className="kpi">
-                  <div className="kpi-label">1-in-250 TVaR</div>
-                  <div className="kpi-val">{fmtMoneyM(portfolioQ.data.portfolioTvar250, 2)}</div>
-                </div>
-                <div className="kpi">
-                  <div className="kpi-label">Co-TVaR Sum Err</div>
-                  <div className="kpi-val" style={{ color: 'var(--positive)' }}>
-                    {portfolioQ.data.cotvarSumCheckDiff.toExponential(1)}
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid-2">
-                <div>
-                  <RocCdfChart data={portfolioQ.data} />
-                </div>
-                <div>
-                  <div style={{ fontWeight: 600, marginBottom: 8 }}>Risk Appetite Guidelines</div>
-                  <div className="table-wrap"><table>
-                    <thead>
-                      <tr>
-                        <th>Percentile</th>
-                        <th className="num">Limit</th>
-                        <th className="num">Actual</th>
-                        <th className="num">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {portfolioQ.data.guidelines.map((g) => (
-                        <tr key={g.label}>
-                          <td>{g.label}</td>
-                          <td className="num">{fmtPct(g.thresholdRocPct, 1)}</td>
-                          <td className="num">{fmtPct(g.actualRocPct, 2)}</td>
-                          <td className={`num ${g.passed ? 'pass' : 'fail'}`}>{g.passed ? 'Pass' : 'Breach'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table></div>
-                </div>
-              </div>
-              <div style={{ marginTop: 10 }}>
-                <BreadcrumbBar manifest={portfolioQ.data.manifest} />
-              </div>
-            </div>
-
-            <div className="card">
-              <div className="card-title">
-                <span>Euler Capital Allocation · Co-TVaR 1-in-250</span>
-              </div>
-              <div className="table-wrap"><table className="dense-table">
-                <thead>
-                  <tr>
-                    <th>Cedent</th>
-                    <th>Layer</th>
-                    <th className="num" title="Limit">Lim</th>
-                    <th className="num" title="Premium">Prem</th>
-                    <th className="num" title="Expected loss">EL</th>
-                    <th className="num" title="Expected reinstatement premium">RIP</th>
-                    <th className="num" title="Standalone 1-in-250 TVaR">TVaR</th>
-                    <th className="num" title="Euler co-TVaR at 1-in-250">Euler</th>
-                    <th className="num" title="Diversification credit">Div</th>
-                    <th className="num" title="Marginal return on capital">mROC</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {portfolioQ.data.layerAllocations.map((row) => (
-                    <tr key={`${row.programmeId}-${row.layerId}`}>
-                      <td>{row.cedentName}</td>
-                      <td>{row.layerName}</td>
-                      <td className="num">{fmtMoneyM(row.limit, 1)}</td>
-                      <td className="num">{fmtMoneyM(row.premium, 2)}</td>
-                      <td className="num">{fmtMoneyM(row.el, 2)}</td>
-                      <td className="num">{fmtMoneyM(row.expectedRip, 2)}</td>
-                      <td className="num">{fmtMoneyM(row.standaloneTvar250, 2)}</td>
-                      <td className="num" style={{ fontWeight: 600 }}>{fmtMoneyM(row.eulerCotvar250, 2)}</td>
-                      <td className="num">{fmtPct(row.diversificationCreditPct, 1)}</td>
-                      <td className="num" style={{ color: 'var(--accent)', fontWeight: 600 }}>
-                        {fmtPct(row.marginalRocPct, 1)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table></div>
-            </div>
-          </>
+        {tab === 'portfolio' && (
+          <PortfolioReturns
+            portfolioView={portfolioView}
+            onChangeView={setPortfolioView}
+            totalCapital={totalCapital}
+            onChangeCapital={setTotalCapital}
+            refreshKey={selectedProg?.upliftSet.version}
+          />
         )}
 
         {tab === 'deterministic' && (

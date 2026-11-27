@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 from app.engine.pricing_link import LAYER_NODE_TYPES, PricingLink, graph_uses_explicit_pricing_links
 from app.engine.sim_generator import REGION_PERILS, YeltTable
 from app.models.domain import GraphSpec
-from app.models.enums import NodeType
+from app.models.enums import NodeType, is_hedge_direction
 from app.models.phase1 import ContractFull, ContractLayer
 from app.services.contracts import contract_layers
 from app.services.lineage import canonical_hash
@@ -25,6 +25,8 @@ def _link_from_layer(source: str, contract: ContractFull, layer: ContractLayer, 
         contract_id=contract.programme_id,
         contract_code=contract.profile.unique_code or contract.programme_id,
         contract_name=f"{contract.cedent_name} — {contract.programme_name}",
+        direction=contract.direction.value,
+        is_hedge=is_hedge_direction(contract.direction),
         layer_node_id=layer.node_id,
         layer_code=layer.layer_code,
         layer_label=layer.label,

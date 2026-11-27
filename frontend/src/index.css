@@ -1115,6 +1115,69 @@ tr.total-row td { font-weight: 600; border-top: 1px solid var(--border-strong); 
 .layer-row label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-muted); }
 .layer-row input, .layer-row select { min-width: 0; }
 
+/* Direction, instrument & hedge accretion badges */
+.ledger-table .badge { white-space: nowrap; }
+.badge.badge-long {
+  background: var(--positive-bg);
+  color: var(--positive);
+  border-color: rgba(92, 173, 122, 0.34);
+}
+.badge.badge-hedge {
+  background: var(--info-bg);
+  color: var(--info-soft);
+  border-color: rgba(138, 155, 176, 0.38);
+}
+.badge.badge-hedge-dilutive {
+  background: var(--negative-bg);
+  color: var(--negative);
+  border-color: rgba(224, 112, 106, 0.35);
+}
+.badge.badge-ilw {
+  background: var(--accent-bg);
+  color: var(--accent-soft);
+  border-color: rgba(232, 168, 74, 0.36);
+}
+.accretion-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-sunken);
+}
+.accretion-banner.tone-positive {
+  border-color: rgba(92, 173, 122, 0.36);
+  background: linear-gradient(90deg, rgba(92, 173, 122, 0.09), var(--surface-sunken) 65%);
+}
+.accretion-banner.tone-negative {
+  border-color: rgba(224, 112, 106, 0.36);
+  background: linear-gradient(90deg, rgba(224, 112, 106, 0.09), var(--surface-sunken) 65%);
+}
+.accretion-metrics {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.accretion-metrics > div {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.accretion-metrics b {
+  font-size: 13px;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+.delta-pos { color: var(--positive) !important; }
+.delta-neg { color: var(--negative) !important; }
+
 @media (prefers-reduced-motion: reduce) {
   .main { animation: none; }
   .brand-mark, .nav-item, .kpi, .palette-item, .btn { transition: none; }

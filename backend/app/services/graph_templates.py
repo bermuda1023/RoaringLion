@@ -239,6 +239,16 @@ def _fallback_layer_template(contract: ContractFull) -> GraphTemplate:
             "depositPremium": contract.deposit_premium,
             "placedShare": 1.0,
         }
+    elif struct_node == "ILW_OPTION":
+        ilw_spec = contract.ilw_spec or {}
+        params = {
+            "layerCode": "L1",
+            "limit": contract.limit,
+            "trigger": contract.attachment,
+            "triggerType": str(ilw_spec.get("triggerType") or ilw_spec.get("trigger_type") or "BINARY"),
+            "depositPremium": contract.deposit_premium,
+            "placedShare": contract.signed_line,
+        }
     else:
         params = {
             "layerCode": "L1",
@@ -282,6 +292,15 @@ def _blank_templates() -> list[GraphTemplate]:
         }),
         ("blank-cascading", "Financial Terms", "Cascading Tower", "CASCADING_TOWER", {
             "occLimit": "", "depositPremium": "", "placedShare": 1.0, "layers": [],
+        }),
+        ("blank-ilw", "Financial Terms", "ILW Option", "ILW_OPTION", {
+            "limit": 25.0, "trigger": 40.0, "triggerType": "BINARY", "depositPremium": "", "placedShare": 1.0,
+        }),
+        ("blank-src-industry", "Sources", "Industry Loss Run", "INDUSTRY_INDEX_SOURCE", {
+            "simSetId": "ind-synth-cat-v1-100k", "sourceKind": "INDUSTRY_LOSS_RUN",
+        }),
+        ("blank-src-portfolio", "Sources", "UNL Portfolio Snapshot", "PORTFOLIO_ROLLUP", {
+            "sourceKind": "UNL_PORTFOLIO_SNAPSHOT", "asOfDate": "2027-01-01",
         }),
         ("blank-flt-rp", "Filters", "Zone / Peril Filter", "REGION_PERIL_FILTER", {
             "zones": [], "perils": [], "regionPerils": [],

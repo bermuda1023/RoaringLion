@@ -37,7 +37,10 @@ export function DagCanvas({
   const nodes: Node[] = graph.nodes.map((n) => {
     const u = unadjById[n.nodeId];
     const a = adjById[n.nodeId];
-    const isSource = n.nodeType === 'LOSS_SOURCE' || n.nodeType === 'INDUSTRY_INDEX_SOURCE';
+    const isSource =
+      n.nodeType === 'LOSS_SOURCE' ||
+      n.nodeType === 'INDUSTRY_INDEX_SOURCE' ||
+      n.nodeType === 'PORTFOLIO_ROLLUP';
     const isOutput = n.nodeType === 'PRICING_OUTPUT' || n.nodeType === 'YELT_OUTPUT' || n.nodeType === 'EP_OUTPUT';
     return {
       id: n.nodeId,

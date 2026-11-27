@@ -61,6 +61,8 @@ export function lossFilesForSource(
   return simFiles[simSetId] ?? [];
 }
 
+const SOURCE_NODE_TYPES = new Set(['LOSS_SOURCE', 'INDUSTRY_INDEX_SOURCE', 'PORTFOLIO_ROLLUP']);
+
 function upstreamSources(graph: GraphSpec, startId: string): GraphNodeSpec[] {
   const incoming = new Map<string, string[]>();
   for (const edge of graph.edges) {
@@ -78,7 +80,7 @@ function upstreamSources(graph: GraphSpec, startId: string): GraphNodeSpec[] {
     seen.add(nodeId);
     const node = byId.get(nodeId);
     if (!node) continue;
-    if (node.nodeType === 'LOSS_SOURCE') {
+    if (SOURCE_NODE_TYPES.has(node.nodeType)) {
       sources.push(node);
       continue;
     }

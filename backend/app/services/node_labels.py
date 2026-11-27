@@ -102,7 +102,19 @@ def node_terms(node_type: str, params: dict) -> str | None:
         lim, trig = _num(p.get("limit")), _num(p.get("trigger"))
         if lim is None or trig is None:
             return None
-        return f"{_amt(lim)} @ {_trim(trig)}bn industry" + _share_suffix(p)
+        trig_type = str(p.get("triggerType") or "BINARY").upper()
+        type_suffix = {
+            "PRO_RATA": " · Pro-Rata",
+            "AGGREGATE": " · Agg",
+            "SECOND_EVENT": " · 2nd Event",
+        }.get(trig_type, "")
+        return f"{_amt(lim)} @ {_trim(trig)}bn industry{type_suffix}" + _share_suffix(p)
+    if t == "INDUSTRY_INDEX_SOURCE":
+        sim_id = str(p.get("simSetId") or "").strip()
+        return f"Industry Loss Run · {sim_id}" if sim_id else "Industry Loss Run"
+    if t == "PORTFOLIO_ROLLUP":
+        as_of = str(p.get("asOfDate") or "").strip()
+        return f"UNL Portfolio Snapshot · {as_of}" if as_of else "UNL Portfolio Snapshot"
     if t == "CASCADING_TOWER":
         layers = p.get("layers") or []
         lims = [_num(l.get("occLimit")) for l in layers if isinstance(l, dict)]
