@@ -77,6 +77,16 @@ class RollupLayerEntry:
 _EMPTY_F64 = np.empty(0, dtype=np.float64)
 
 
+def deployed_capital_m(limit_m: float, premium_m: float, *, is_hedge: bool = False) -> float:
+    """Collateralized fund deployed capital needed for a layer:
+    - Assumed (Long): max(0, limit - deposit_premium) (collateral posted net of premium received).
+    - Hedge (Ceded/Retro): max(0, deposit_premium) (upfront hedge purchase cost consuming deployable capital).
+    """
+    if is_hedge:
+        return max(0.0, float(premium_m))
+    return max(0.0, float(limit_m) - float(premium_m))
+
+
 def _safe_float(raw: Any, default: float) -> float:
     if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return default

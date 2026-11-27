@@ -22,6 +22,10 @@ export interface PortfolioMetricsSnapshot {
   expectedProfitM: number;
   meanRocPct: number;
   deployedCollateralM: number;
+  fundCapitalM?: number;
+  capitalUtilizationPct?: number;
+  capitalHeadroomM?: number;
+  capitalExceeded?: boolean;
   grossPremiumM: number;
   expectedLossM: number;
   elCapitalRatio: number;
@@ -55,8 +59,11 @@ export interface OptimizedLayerRow {
   currentShare: number;
   optimalShare: number;
   deltaShare: number;
+  limit1xM?: number;
+  premium1xM?: number;
   optimalLimitM: number;
   optimalPremiumM: number;
+  optimalCapitalM?: number;
   optimalElM: number;
   optimalExpectedProfitM: number;
   coTvar100M: number;

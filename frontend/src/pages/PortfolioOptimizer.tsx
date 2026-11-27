@@ -10,12 +10,22 @@ import {
 import { OptimizerStatusFilter } from '../components/OptimizerStatusFilter';
 import {
   PROGRAMME_STATUSES,
+  type ConstraintConflict,
   type OptimizerCandidatesPage,
+  type OptimizerLayerCatalogItem,
   type OptimizerMode,
   type OptimizerObjective,
   type ProgrammeStatus,
 } from '../types/contracts';
 import { fmtInt, fmtMoneyM, fmtNum, fmtPct, fmtRatioPct } from '../utils/format';
+import {
+  clampSharePct,
+  computeAutoBandBound,
+  computeLayerDeployedCapitalM,
+  detectOptimizerConflicts,
+  isHedgeDirection,
+  normalizeLayerBound,
+} from '../utils/optimizerConstraints';
 import {
   candidatesUrl,
   countProgrammesByStatus,
@@ -55,6 +65,7 @@ interface FrontierExplorerResponse {
   view: string;
   /** Deal statuses the portfolio was built from. */
   includedStatuses?: ProgrammeStatus[];
+  fundCapitalM?: number;
   computeMs: number;
   initialPortfolio: PortfolioMetricsSnapshot;
   initialLayers: OptimizedLayerRow[];
@@ -64,6 +75,7 @@ interface FrontierExplorerResponse {
   peakReturnToTvar1000Index?: number;
   peakReturnToStdDevIndex?: number;
   frontier: FrontierExplorerPoint[];
+  conflicts?: ConstraintConflict[];
 }
 
 type DynamicConstraint =
@@ -168,7 +180,13 @@ function DeltaBar({ deltaShare, maxAbsDelta }: { deltaShare: number; maxAbsDelta
   );
 }
 
-export function PortfolioOptimizer() {
+export function PortfolioOptimizer({
+  totalCapital: controlledCapital,
+  onChangeCapital,
+}: {
+  totalCapital?: number;
+  onChangeCapital?: (cap: number) => void;
+} = {}) {
   const qc = useQueryClient();
   const [subTab, setSubTab] = useState<SubTab>('results');
 
@@ -177,11 +195,17 @@ export function PortfolioOptimizer() {
   const [view, setView] = useState<'ADJUSTED' | 'UNADJUSTED'>('ADJUSTED');
   const [objective, setObjective] = useState<OptimizerObjective>('MAX_EXPECTED_PROFIT');
   const [riskLambda, setRiskLambda] = useState(0.15);
-  const [totalCapital, setTotalCapital] = useState(160);
-  const [maxCollateral, setMaxCollateral] = useState(160);
+  const [localCapital, setLocalCapital] = useState(450);
+  const totalCapital = controlledCapital ?? localCapital;
+  const setTotalCapital = (next: number) => {
+    const clean = Number.isFinite(next) && next > 0 ? next : 1;
+    if (onChangeCapital) onChangeCapital(clean);
+    else setLocalCapital(clean);
+  };
   const [maxTvar100, setMaxTvar100] = useState(95);
   const [maxTvar250, setMaxTvar250] = useState(115);
   const [minLine, setMinLine] = useState(0.0);
+  const [bandPct, setBandPct] = useState(25);
   const [includeRetro, setIncludeRetro] = useState(true);
   const [retroLimit, setRetroLimit] = useState(25);
   const [retroTrigger, setRetroTrigger] = useState(40);
@@ -208,6 +232,7 @@ export function PortfolioOptimizer() {
   const [yKey, setYKey] = useState<YAxisKey>('returnToTvar250');
   const [showTangent, setShowTangent] = useState<boolean>(true);
   const [forkedBranchMsg, setForkedBranchMsg] = useState<string | null>(null);
+  const [lastSolvedConstraintSig, setLastSolvedConstraintSig] = useState<string | null>(null);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -270,16 +295,21 @@ export function PortfolioOptimizer() {
       }));
 
     const elCap = constraints.find((c): c is Extract<DynamicConstraint, { kind: 'EL_CAP' }> => c.kind === 'EL_CAP');
-    const cedCap = constraints.find(
+    const cedCaps = constraints.filter(
       (c): c is Extract<DynamicConstraint, { kind: 'CEDENT_CAP' }> => c.kind === 'CEDENT_CAP',
     );
+    const activeCedCapM =
+      cedCaps.length > 0 ? Math.min(...cedCaps.map((c) => c.maxLimitM).filter((v) => Number.isFinite(v) && v > 0)) : null;
 
-    const boundsList = Object.entries(layerBounds).map(([layerKey, b]) => ({
-      layerKey,
-      minShare: b.minPct / 100,
-      maxShare: b.maxPct / 100,
-      locked: b.locked,
-    }));
+    const boundsList = Object.entries(layerBounds).map(([layerKey, raw]) => {
+      const b = raw.locked ? raw : normalizeLayerBound(raw);
+      return {
+        layerKey,
+        minShare: Number((clampSharePct(b.minPct) / 100).toFixed(4)),
+        maxShare: Number((clampSharePct(b.maxPct) / 100).toFixed(4)),
+        locked: b.locked,
+      };
+    });
 
     return {
       mode,
@@ -289,11 +319,11 @@ export function PortfolioOptimizer() {
       riskAversionLambda: riskLambda,
       view,
       totalCapital,
-      maxDeployedCollateral: maxCollateral,
+      maxDeployedCollateral: totalCapital,
       maxTvar100M: maxTvar100,
       maxTvar250M: maxTvar250,
       maxElCapitalRatio: elCap ? elCap.maxRatio : null,
-      maxSingleCedentLimitM: cedCap ? cedCap.maxLimitM : null,
+      maxSingleCedentLimitM: activeCedCapM && Number.isFinite(activeCedCapM) ? activeCedCapM : null,
       regionPerilCaps,
       tvarCaps,
       layerBounds: boundsList,
@@ -304,9 +334,36 @@ export function PortfolioOptimizer() {
     };
   };
 
+  const activeSingleCedentCapM = useMemo(() => {
+    const vals = constraints
+      .filter((c): c is Extract<DynamicConstraint, { kind: 'CEDENT_CAP' }> => c.kind === 'CEDENT_CAP')
+      .map((c) => c.maxLimitM)
+      .filter((v) => Number.isFinite(v) && v > 0);
+    return vals.length > 0 ? Math.min(...vals) : null;
+  }, [constraints]);
+
+  const currentConstraintSig = useMemo(
+    () =>
+      JSON.stringify({
+        mode,
+        statuses: selectedStatuses,
+        totalCapital,
+        activeSingleCedentCapM,
+        minLine,
+        layerBounds,
+      }),
+    [mode, selectedStatuses, totalCapital, activeSingleCedentCapM, minLine, layerBounds],
+  );
+
   const exploreMut = useMutation({
-    mutationFn: () => postJson<FrontierExplorerResponse>(`/api/optimizer/explore?num_points=${numPoints}`, buildPayload()),
-    onSuccess: (res) => {
+    mutationFn: () => {
+      const sig = currentConstraintSig;
+      return postJson<FrontierExplorerResponse>(`/api/optimizer/explore?num_points=${numPoints}`, buildPayload()).then(
+        (res) => ({ res, sig }),
+      );
+    },
+    onSuccess: ({ res, sig }) => {
+      setLastSolvedConstraintSig(sig);
       setSelectedIdx(res.recommendedIndex);
       setForkedBranchMsg(null);
       if (objective === 'MAX_RETURN_ON_TVAR_250') {
@@ -329,7 +386,7 @@ export function PortfolioOptimizer() {
     exploreMut.mutate();
   }, []);
 
-  const data = exploreMut.data;
+  const data = exploreMut.data?.res;
   const activePoint: FrontierExplorerPoint | null =
     data && data.frontier.length ? data.frontier[Math.min(selectedIdx, data.frontier.length - 1)] : null;
 
@@ -373,7 +430,7 @@ export function PortfolioOptimizer() {
       const overrides: Record<string, number> = {};
       for (const [pid, acc] of Object.entries(byProg)) {
         const avg = acc.lim > 0 ? acc.wLim / acc.lim : acc.shares[0] ?? 1.0;
-        overrides[pid] = Math.min(1.5, Math.max(0.0, Number(avg.toFixed(4))));
+        overrides[pid] = Math.min(1.0, Math.max(0.0, Number(avg.toFixed(4))));
       }
       return postJson<{ branchId: string; name: string }>('/api/branches', {
         name: `Frontier #${activePoint.pointIndex + 1} (TVaR $${activePoint.metrics.tvar250M.toFixed(0)}m / ROC ${activePoint.metrics.meanRocPct}%)`,
@@ -412,9 +469,9 @@ export function PortfolioOptimizer() {
     }
   };
 
-  const applyLayerPreset = (preset: 'open' | 'band25' | 'lockAll') => {
+  const applyLayerPreset = (preset: 'open' | 'band' | 'lockAll') => {
     if (preset === 'open') {
-      // Dropping every override returns all layers, on every page, to the solver's open defaults.
+      // Dropping every override returns all layers, on every page, to the solver's open 0–100% defaults.
       setLayerBounds({});
       return;
     }
@@ -422,10 +479,10 @@ export function PortfolioOptimizer() {
     setLayerBounds((prev) => {
       const next = { ...prev };
       for (const l of listed) {
-        const cur = Math.round(l.currentShare * 100);
+        const cur = clampSharePct(l.currentShare * 100);
         next[l.layerKey] =
-          preset === 'band25'
-            ? { minPct: Math.max(0, cur - 25), maxPct: Math.min(200, cur + 25), locked: false }
+          preset === 'band'
+            ? computeAutoBandBound(l, bandPct)
             : { minPct: cur, maxPct: cur, locked: true };
       }
       return next;
@@ -435,6 +492,117 @@ export function PortfolioOptimizer() {
   const morePagesThanListed = !!candidates && candidates.matchedProgrammes > candidates.programmeIds.length;
   const resultIsStale =
     !!data?.includedStatuses && !exploreMut.isPending && !sameStatuses(data.includedStatuses, selectedStatuses);
+
+  // Auto-calculated Deployed Capital (read-only): sum of max(0, (limit - premium) * lineShare) for assumed layers
+  const currentDeployedCapitalM = useMemo(() => {
+    if (data && !resultIsStale) {
+      return data.initialPortfolio.deployedCollateralM;
+    }
+    if (typeof candidates?.universeDeployedCapitalM === 'number') {
+      return candidates.universeDeployedCapitalM;
+    }
+    return Number(
+      (candidates?.layers ?? [])
+        .reduce((sum, l) => sum + computeLayerDeployedCapitalM(l, l.currentShare), 0)
+        .toFixed(2),
+    );
+  }, [data, resultIsStale, candidates]);
+
+  const capitalUtilPct = totalCapital > 0 ? (currentDeployedCapitalM / totalCapital) * 100 : 0;
+  const capitalHeadroomM = totalCapital - currentDeployedCapitalM;
+  const currentCapitalExceeded = currentDeployedCapitalM > totalCapital + 1e-6;
+
+  // Merge listed page layers (plus retro hedge candidate) with full-portfolio initialLayers (same statuses), preserving 0%-line deals via limit1xM/premium1xM
+  const conflictUniverseLayers = useMemo<OptimizerLayerCatalogItem[]>(() => {
+    const byKey = new Map<string, OptimizerLayerCatalogItem>();
+    if (data && !resultIsStale) {
+      for (const l of data.initialLayers) {
+        const hedge = isHedgeDirection(l.direction);
+        const share = l.currentShare > 1e-6 ? l.currentShare : 0;
+        const lim1x =
+          typeof l.limit1xM === 'number' && l.limit1xM > 0
+            ? l.limit1xM
+            : share > 1e-6
+              ? l.optimalLimitM / share
+              : 0;
+        const prem1x =
+          typeof l.premium1xM === 'number' && l.premium1xM >= 0
+            ? l.premium1xM
+            : share > 1e-6
+              ? l.optimalPremiumM / share
+              : 0;
+        const cap1x =
+          share > 1e-6 && typeof l.optimalCapitalM === 'number'
+            ? l.optimalCapitalM / share
+            : hedge
+              ? Math.max(0, prem1x)
+              : Math.max(0, lim1x - prem1x);
+        if (!hedge && lim1x <= 0) continue;
+        if (hedge && prem1x <= 0) continue;
+        byKey.set(l.layerKey, {
+          layerKey: l.layerKey,
+          programmeId: l.programmeId,
+          layerId: l.layerId,
+          cedentName: l.cedentName,
+          programmeName: l.programmeName,
+          layerName: l.layerName,
+          direction: l.direction,
+          status: l.status,
+          regionPerils: l.regionPerils,
+          currentShare: l.currentShare,
+          limit1xM: lim1x,
+          premium1xM: prem1x,
+          capital1xM: cap1x,
+          el1xM: share > 1e-6 ? l.optimalElM / share : 0,
+          expectedProfit1xM: share > 1e-6 ? l.optimalExpectedProfitM / share : 0,
+          rolPct: lim1x > 0 ? (prem1x / lim1x) * 100 : 0,
+          defaultMinShare: 0,
+          defaultMaxShare: 1.0,
+        });
+      }
+    }
+    for (const l of candidates?.layers ?? []) {
+      byKey.set(l.layerKey, l);
+    }
+    if (candidates?.retroCandidate) {
+      byKey.set(candidates.retroCandidate.layerKey, candidates.retroCandidate);
+    }
+    return [...byKey.values()];
+  }, [candidates?.layers, candidates?.retroCandidate, data, resultIsStale]);
+
+  const serverConflictsMatchCurrent =
+    !resultIsStale && lastSolvedConstraintSig !== null && lastSolvedConstraintSig === currentConstraintSig;
+
+  const conflictAnalysis = useMemo(
+    () =>
+      detectOptimizerConflicts({
+        layers: conflictUniverseLayers,
+        bounds: layerBounds,
+        maxSingleCedentLimitM: activeSingleCedentCapM,
+        fundCapitalM: totalCapital,
+        minLineSizeShare: minLine,
+        serverConflicts: serverConflictsMatchCurrent ? (data?.conflicts ?? []) : [],
+        universeMaxLayerLimit1xM: candidates?.universeMaxLayerLimit1xM,
+        universeMaxLayerLabel: candidates?.universeMaxLayerLabel,
+        universeMaxCedentLimit1xM: candidates?.universeMaxCedentLimit1xM,
+        universeMaxCedentName: candidates?.universeMaxCedentName,
+        hasAllUniverseLayers: Boolean(
+          (candidates && !morePagesThanListed && !candidates.search) || (data && !resultIsStale),
+        ),
+      }),
+    [
+      conflictUniverseLayers,
+      layerBounds,
+      activeSingleCedentCapM,
+      totalCapital,
+      minLine,
+      serverConflictsMatchCurrent,
+      data?.conflicts,
+      resultIsStale,
+      candidates,
+      morePagesThanListed,
+    ],
+  );
 
   return (
     <>
@@ -567,20 +735,33 @@ export function PortfolioOptimizer() {
                     Fund Capital ($M)
                     <input
                       type="number"
+                      min={1}
                       value={totalCapital}
                       onChange={(e) => setTotalCapital(Number(e.target.value))}
                       style={{ width: '100%', marginTop: 4 }}
                     />
                   </label>
-                  <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    Max Deployed Collateral ($M)
-                    <input
-                      type="number"
-                      value={maxCollateral}
-                      onChange={(e) => setMaxCollateral(Number(e.target.value))}
-                      style={{ width: '100%', marginTop: 4 }}
-                    />
-                  </label>
+                  <div
+                    className={`capital-readonly-box${currentCapitalExceeded ? ' exceeded' : ''}`}
+                    data-testid="optimizer-deployed-capital-readonly"
+                    title="Auto-calculated read-only: Σ max(0, (Limit − Deposit Premium) × Line) for assumed layers + Σ Hedge Premium × Line for hedge positions. Solver enforces Deployed Capital ≤ Fund Capital."
+                  >
+                    <div className="capital-readonly-label">
+                      Deployed Capital (Auto)
+                      <span className={`capital-util-pill${currentCapitalExceeded ? ' exceeded' : ''}`}>
+                        {fmtPct(capitalUtilPct, 1)}
+                      </span>
+                    </div>
+                    <div className="capital-readonly-val">
+                      {fmtMoneyM(currentDeployedCapitalM, 2)}
+                      <span className="capital-readonly-sub">
+                        {currentCapitalExceeded
+                          ? `Over by ${fmtMoneyM(Math.abs(capitalHeadroomM), 1)}`
+                          : `${fmtMoneyM(capitalHeadroomM, 1)} headroom`}
+                      </span>
+                    </div>
+                    <div className="capital-readonly-formula">Σ (Limit − Prem) × Line + Hedge Prem ≤ Fund Cap</div>
+                  </div>
                   <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     Target 1-in-250 TVaR ($M)
                     <input
@@ -607,7 +788,7 @@ export function PortfolioOptimizer() {
                       min="0"
                       max="100"
                       value={Number((minLine * 100).toFixed(1))}
-                      onChange={(e) => setMinLine(Number(e.target.value) / 100)}
+                      onChange={(e) => setMinLine(clampSharePct(Number(e.target.value)) / 100)}
                       style={{ width: '100%', marginTop: 4 }}
                     />
                   </label>
@@ -635,6 +816,16 @@ export function PortfolioOptimizer() {
                     </label>
                   )}
                 </div>
+
+                {currentCapitalExceeded && (
+                  <div className="warning-banner" role="alert" style={{ marginTop: 10, marginBottom: 0 }} data-testid="optimizer-capital-warning">
+                    <strong>Current Deployed Capital exceeds Fund Capital:</strong> Initial book deploys{' '}
+                    <b>{fmtMoneyM(currentDeployedCapitalM, 2)}</b> against <b>{fmtMoneyM(totalCapital, 2)}</b> Fund
+                    Capital ({fmtPct(capitalUtilPct, 1)} utilization; over by{' '}
+                    <b>{fmtMoneyM(Math.abs(capitalHeadroomM), 2)}</b>). The optimizer will scale down lines to stay
+                    within Fund Capital unless layer min/locked bounds prevent it.
+                  </div>
+                )}
 
                 {objective.startsWith('MAX_RETURN_ON_TVAR_') && (
                   <div className="deal-sub" style={{ marginTop: 8 }}>
@@ -716,6 +907,30 @@ export function PortfolioOptimizer() {
                     </button>
                   </div>
                 </div>
+
+                {conflictAnalysis.conflicts.length > 0 && (
+                  <div
+                    className={`conflict-banner ${conflictAnalysis.hasBlockingError ? 'error' : 'warning'}`}
+                    role="alert"
+                    data-testid="optimizer-conflict-banner"
+                  >
+                    <div className="conflict-banner-title">
+                      {conflictAnalysis.hasBlockingError
+                        ? `Constraint Conflict Detected (${conflictAnalysis.conflicts.filter((c) => c.severity === 'ERROR').length} infeasible)`
+                        : `Constraint Warning (${conflictAnalysis.conflicts.length})`}
+                    </div>
+                    <ul className="conflict-list">
+                      {conflictAnalysis.conflicts.map((c, i) => (
+                        <li key={`${c.kind}-${c.cedentName ?? 'all'}-${i}`}>
+                          <span className={`conflict-tag ${c.severity === 'ERROR' ? 'error' : 'warning'}`}>
+                            {c.severity === 'ERROR' ? 'CONFLICT' : 'WARNING'}
+                          </span>{' '}
+                          {c.message}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
 
                 {constraints.length === 0 ? (
                   <div style={{ color: 'var(--text-faint)', fontSize: 12 }}>
@@ -901,15 +1116,36 @@ export function PortfolioOptimizer() {
                 }}
               >
                 <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)' }}>
-                  Layer Participation Constraints (Min % / Max % / Lock)
+                  Layer Participation Constraints (Min % / Max % ≤ 100% / Lock)
                 </span>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                   <button className="btn btn-ghost" onClick={() => applyLayerPreset('open')}>
-                    0–150% Open
+                    0–100% Open
                   </button>
-                  <button className="btn btn-ghost" onClick={() => applyLayerPreset('band25')}>
-                    ±25% Band
-                  </button>
+                  <span className="band-control-group">
+                    <input
+                      type="number"
+                      aria-label="Auto-band percentage"
+                      min={1}
+                      max={100}
+                      step={5}
+                      value={bandPct}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (Number.isFinite(n)) setBandPct(Math.min(100, Math.max(1, n)));
+                      }}
+                      className="bound-input"
+                      style={{ width: 52, height: 28 }}
+                      title="Relative ±% band applied to current held lines (capped at 100%)"
+                    />
+                    <button
+                      className="btn btn-ghost"
+                      onClick={() => applyLayerPreset('band')}
+                      title="Relative ±% around current line for held layers (e.g. 10% ± 25% → 7.5%–12.5%); 0–100% for 0%-line layers; max capped at 100%"
+                    >
+                      ±{bandPct}% Band
+                    </button>
+                  </span>
                   <button className="btn btn-ghost" onClick={() => applyLayerPreset('lockAll')}>
                     Lock All
                   </button>
@@ -917,8 +1153,8 @@ export function PortfolioOptimizer() {
               </div>
               {morePagesThanListed && (
                 <div className="deal-sub" style={{ marginBottom: 8 }}>
-                  ±25% Band and Lock All apply to the layers listed on this page. 0–150% Open clears every
-                  bound. Layers you have not changed stay open.
+                  ±{bandPct}% Band (relative to current line, max 100%) and Lock All apply to the layers listed on this
+                  page. 0–100% Open clears every bound. Layers you have not changed stay open up to 100%.
                 </div>
               )}
               <OptimizerCandidatesTable
@@ -934,6 +1170,7 @@ export function PortfolioOptimizer() {
                 onPage={setOffset}
                 bounds={layerBounds}
                 onBoundChange={(layerKey, next) => setLayerBounds((prev) => ({ ...prev, [layerKey]: next }))}
+                rowConflicts={conflictAnalysis.rowConflictsByLayerKey}
               />
             </div>
           </div>
@@ -1006,6 +1243,37 @@ export function PortfolioOptimizer() {
                 </div>
 
                 <PortfolioStatusSummary layers={activePoint.layers} stale={resultIsStale} />
+
+                {(activePoint.status === 'Infeasible' || (data.conflicts && data.conflicts.length > 0)) && (
+                  <div
+                    className={`conflict-banner ${activePoint.status === 'Infeasible' || data.conflicts?.some((c) => c.severity === 'ERROR') ? 'error' : 'warning'}`}
+                    role="alert"
+                    data-testid="results-conflict-banner"
+                  >
+                    <div className="conflict-banner-title">
+                      {activePoint.status === 'Infeasible'
+                        ? 'Infeasible Portfolio Constraints'
+                        : 'Active Constraint Notices'}
+                    </div>
+                    {data.conflicts && data.conflicts.length > 0 ? (
+                      <ul className="conflict-list">
+                        {data.conflicts.map((c, i) => (
+                          <li key={`res-${c.kind}-${c.cedentName ?? 'all'}-${i}`}>
+                            <span className={`conflict-tag ${c.severity === 'ERROR' ? 'error' : 'warning'}`}>
+                              {c.severity === 'ERROR' ? 'CONFLICT' : 'WARNING'}
+                            </span>{' '}
+                            {c.message}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div>
+                        Solver status is <b>Infeasible</b>. Open <b>1. Optimization Config</b> to inspect constraints and
+                        highlighted conflicting layers.
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Top KPI Strip (compact single row on desktop) */}
                 <div className="grid-kpi">
@@ -1237,7 +1505,18 @@ export function PortfolioOptimizer() {
                           { label: 'TVaR 1-in-500 ($M)', a: data.initialPortfolio.tvar500M, b: activePoint.metrics.tvar500M, goodUp: false, fmt: 'money' as const },
                           { label: 'TVaR 1-in-1000 ($M)', a: data.initialPortfolio.tvar1000M, b: activePoint.metrics.tvar1000M, goodUp: false, fmt: 'money' as const },
                           { label: 'Loss Std Dev ($M)', a: data.initialPortfolio.stdDevM ?? 0, b: activePoint.metrics.stdDevM ?? 0, goodUp: false, fmt: 'money' as const },
-                          { label: 'Deployed Collateral ($M)', a: data.initialPortfolio.deployedCollateralM, b: activePoint.metrics.deployedCollateralM, goodUp: false, fmt: 'money' as const },
+                          { label: 'Deployed Capital ($M)', a: data.initialPortfolio.deployedCollateralM, b: activePoint.metrics.deployedCollateralM, goodUp: false, fmt: 'money' as const },
+                          {
+                            label: `Capital Utilization (% of ${fmtMoneyM(data.fundCapitalM ?? totalCapital, 0)})`,
+                            a:
+                              data.initialPortfolio.capitalUtilizationPct ??
+                              ((data.initialPortfolio.deployedCollateralM / Math.max(1, data.fundCapitalM ?? totalCapital)) * 100),
+                            b:
+                              activePoint.metrics.capitalUtilizationPct ??
+                              ((activePoint.metrics.deployedCollateralM / Math.max(1, data.fundCapitalM ?? totalCapital)) * 100),
+                            goodUp: false,
+                            fmt: 'pct' as const,
+                          },
                         ].map((row) => {
                           const diff = row.b - row.a;
                           const pct = Math.abs(row.a) > 1e-6 ? (diff / Math.abs(row.a)) * 100 : 0;

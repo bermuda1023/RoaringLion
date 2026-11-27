@@ -14,7 +14,7 @@ import roaring_lion_engine as rle
 from pydantic import Field, model_validator
 
 from app.engine.ilw import evaluate_ilw_trial_payouts
-from app.engine.pricing_link import LAYER_NODE_TYPES, _layer_share_and_premium, extract_rollup_layers
+from app.engine.pricing_link import LAYER_NODE_TYPES, _layer_share_and_premium, deployed_capital_m, extract_rollup_layers
 from app.engine.sim_generator import YeltTable
 from app.engine.slice_runner import evaluate_programme_dag, validate_dag_acyclic
 from app.models.common import CamelModel
@@ -95,8 +95,8 @@ class RegionPerilCap(CamelModel):
 
 class LayerParticipationBound(CamelModel):
     layer_key: str
-    min_share: float = Field(default=0.0, ge=0, le=3, allow_inf_nan=False)
-    max_share: float = Field(default=1.5, ge=0, le=3, allow_inf_nan=False)
+    min_share: float = Field(default=0.0, ge=0, le=1.0, allow_inf_nan=False)
+    max_share: float = Field(default=1.0, ge=0, le=1.0, allow_inf_nan=False)
     locked: bool = False
 
     @model_validator(mode="after")
@@ -121,7 +121,7 @@ class OptimizerRequest(CamelModel):
     risk_aversion_lambda: float = Field(default=0.15, ge=0, le=2, allow_inf_nan=False)
     view: ViewOfRisk = ViewOfRisk.ADJUSTED
     total_capital: float = Field(default=160.0, gt=0, le=1_000_000, allow_inf_nan=False)
-    max_deployed_collateral: float = Field(default=160.0, ge=0, le=1_000_000, allow_inf_nan=False)
+    max_deployed_collateral: float | None = Field(default=None, ge=0, le=1_000_000, allow_inf_nan=False)
     min_deployed_collateral: float = Field(default=0.0, ge=0, le=1_000_000, allow_inf_nan=False)
     max_tvar_100_m: float = Field(default=110.0, gt=0, le=1_000_000, allow_inf_nan=False)
     max_tvar_250_m: float = Field(default=135.0, gt=0, le=1_000_000, allow_inf_nan=False)
@@ -130,8 +130,8 @@ class OptimizerRequest(CamelModel):
     region_peril_caps: list[RegionPerilCap] = []
     tvar_caps: list[TvarCapConstraint] = []
     layer_bounds: list[LayerParticipationBound] = []
-    min_line_size_share: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False)  # > 0 activates MILP
-    max_line_size_share: float = Field(default=1.5, gt=0, le=3, allow_inf_nan=False)
+    min_line_size_share: float = Field(default=0.0, ge=0, le=1.0, allow_inf_nan=False)  # > 0 activates MILP
+    max_line_size_share: float = Field(default=1.0, gt=0, le=1.0, allow_inf_nan=False)
     lock_bound_deals: bool = False
     include_retro_ilw_candidate: bool = True
     retro_ilw_limit_m: float = Field(default=25.0, ge=0, le=1_000_000, allow_inf_nan=False)
@@ -139,10 +139,16 @@ class OptimizerRequest(CamelModel):
     retro_ilw_trigger_bn: float = Field(default=40.0, ge=0, allow_inf_nan=False)
     max_retro_spend_pct_gross_prem: float = Field(default=0.25, ge=0, le=1, allow_inf_nan=False)
 
+    def effective_max_deployed_capital(self) -> float:
+        """Fund Capital is always the hard upper ceiling on deployed capital."""
+        if self.max_deployed_collateral is not None:
+            return min(float(self.total_capital), float(self.max_deployed_collateral))
+        return float(self.total_capital)
+
     @model_validator(mode="after")
     def _check_ranges(self):
-        if self.min_deployed_collateral > self.max_deployed_collateral:
-            raise ValueError("minDeployedCollateral must be <= maxDeployedCollateral")
+        if self.min_deployed_collateral > self.effective_max_deployed_capital():
+            raise ValueError("minDeployedCollateral must be <= effective Fund Capital ceiling")
         if self.min_line_size_share > self.max_line_size_share:
             raise ValueError("minLineSizeShare must be <= maxLineSizeShare")
         if self.included_statuses is not None:
@@ -165,6 +171,7 @@ class OptimizerLayerCatalogItem(CamelModel):
     current_share: float
     limit_1x_m: float
     premium_1x_m: float
+    capital_1x_m: float = 0.0
     el_1x_m: float
     expected_profit_1x_m: float
     rol_pct: float
@@ -196,6 +203,45 @@ class OptimizerCandidatesPage(CamelModel):
     programme_ids: list[str]
     layers: list[OptimizerLayerCatalogItem]
     retro_candidate: OptimizerLayerCatalogItem | None = None
+    universe_deployed_capital_m: float = 0.0
+    universe_max_layer_limit_1x_m: float = 0.0
+    universe_max_layer_label: str = ""
+    universe_max_cedent_limit_1x_m: float = 0.0
+    universe_max_cedent_name: str = ""
+
+
+class ConflictLayerDetail(CamelModel):
+    layer_key: str
+    programme_id: str
+    layer_id: str
+    cedent_name: str
+    layer_name: str
+    min_share: float
+    max_share: float
+    locked: bool = False
+    limit_1x_m: float
+    min_limit_m: float
+    max_limit_m: float
+    capital_1x_m: float = 0.0
+    min_capital_m: float = 0.0
+
+
+class ConstraintConflict(CamelModel):
+    kind: Literal[
+        "SINGLE_CEDENT_MIN_EXCEEDS_CAP",
+        "SINGLE_CEDENT_MILP_BLOCKS_LAYER",
+        "SINGLE_CEDENT_CLIPS_LAYER_MAX",
+        "SINGLE_CEDENT_CAP_EXCEEDS_LARGEST_MAX",
+        "FUND_CAPITAL_MIN_EXCEEDS_CAP",
+    ]
+    severity: Literal["ERROR", "WARNING"]
+    cedent_name: str | None = None
+    cap_limit_m: float
+    required_min_limit_m: float
+    max_possible_limit_m: float
+    excess_m: float
+    message: str
+    offending_layers: list[ConflictLayerDetail] = []
 
 
 class OptimizedDealRow(CamelModel):
@@ -247,9 +293,13 @@ class OptimizerResponse(CamelModel):
     after_return_to_tvar_1000: float = 0.0
     before_mean_roc_pct: float
     after_mean_roc_pct: float
+    fund_capital_m: float = 0.0
+    before_deployed_capital_m: float = 0.0
+    after_deployed_capital_m: float = 0.0
     included_statuses: list[ProgrammeStatus] = []
     deals: list[OptimizedDealRow]
     constraints: list[ConstraintDiagnostic]
+    conflicts: list[ConstraintConflict] = []
     manifest: RunManifest
 
 
@@ -267,6 +317,10 @@ class PortfolioMetricsSnapshot(CamelModel):
     expected_profit_m: float
     mean_roc_pct: float
     deployed_collateral_m: float
+    fund_capital_m: float = 0.0
+    capital_utilization_pct: float = 0.0
+    capital_headroom_m: float = 0.0
+    capital_exceeded: bool = False
     gross_premium_m: float
     expected_loss_m: float
     el_capital_ratio: float
@@ -299,8 +353,11 @@ class OptimizedLayerRow(CamelModel):
     current_share: float
     optimal_share: float
     delta_share: float
+    limit_1x_m: float = 0.0
+    premium_1x_m: float = 0.0
     optimal_limit_m: float
     optimal_premium_m: float
+    optimal_capital_m: float = 0.0
     optimal_el_m: float
     optimal_expected_profit_m: float
     co_tvar_100_m: float
@@ -332,6 +389,7 @@ class FrontierExplorerResponse(CamelModel):
     granularity: str
     view: str
     included_statuses: list[ProgrammeStatus] = []
+    fund_capital_m: float = 0.0
     compute_ms: float
     initial_portfolio: PortfolioMetricsSnapshot
     initial_layers: list[OptimizedLayerRow]
@@ -341,6 +399,7 @@ class FrontierExplorerResponse(CamelModel):
     peak_return_to_tvar_1000_index: int = 0
     peak_return_to_std_dev_index: int = 0
     frontier: list[FrontierExplorerPoint]
+    conflicts: list[ConstraintConflict] = []
     manifest: RunManifest
 
 
@@ -597,6 +656,7 @@ def _build_vectors(
                 "current_share": entry.signed_line,
                 "limit_1x": 0.0 if entry.is_hedge else entry.limit_1x,
                 "prem_1x": entry.prem_1x,
+                "capital_1x": deployed_capital_m(entry.limit_1x, entry.prem_1x, is_hedge=entry.is_hedge),
                 "el_1x": el_1x,
                 "profit_1x": (el_1x - entry.prem_1x - rip_1x) if entry.is_hedge else (entry.prem_1x + rip_1x - el_1x),
                 "region_perils": entry.region_perils,
@@ -631,6 +691,7 @@ def _build_vectors(
                 rip_1x = sum(entry.expected_rip_1x for entry in p_entries)
                 prem_1x = sum(entry.prem_1x for entry in p_entries)
                 lim_1x = sum(entry.limit_1x for entry in p_entries)
+                cap_1x = sum(deployed_capital_m(entry.limit_1x, entry.prem_1x, is_hedge=entry.is_hedge) for entry in p_entries)
             else:
                 for entry in p_entries:
                     ann_total += entry.loss_vec
@@ -640,6 +701,7 @@ def _build_vectors(
                 rip_1x = sum(entry.expected_rip for entry in p_entries) * scale
                 prem_1x = p.deposit_premium * scale
                 lim_1x = p.limit * scale
+                cap_1x = sum(deployed_capital_m(entry.limit, entry.premium, is_hedge=entry.is_hedge) for entry in p_entries) * scale
             el_1x = float(np.mean(loss_1x))
             p_dir = p.direction.value if hasattr(p.direction, "value") else str(p.direction)
             p_is_hedge = bool(getattr(p, "is_hedge", False))
@@ -655,6 +717,7 @@ def _build_vectors(
                 "current_share": 0.0 if no_line_held else p.signed_line,
                 "limit_1x": 0.0 if p_is_hedge else lim_1x,
                 "prem_1x": prem_1x,
+                "capital_1x": cap_1x,
                 "el_1x": el_1x,
                 "profit_1x": (el_1x - prem_1x - rip_1x) if p_is_hedge else (prem_1x + rip_1x - el_1x),
                 "region_perils": p.region_perils,
@@ -695,6 +758,7 @@ def _build_vectors(
             "current_share": 0.0,
             "limit_1x": 0.0,
             "prem_1x": prem_ilw,
+            "capital_1x": deployed_capital_m(0.0, prem_ilw, is_hedge=True),
             "el_1x": el_ilw,
             "profit_1x": el_ilw - prem_ilw,
             "region_perils": ["US-FL-WS"],
@@ -751,16 +815,247 @@ def list_optimizable_layers(
                 current_share=round(it["current_share"], 4),
                 limit_1x_m=round(it["limit_1x"], 4),
                 premium_1x_m=round(it["prem_1x"], 4),
+                capital_1x_m=round(_item_capital_1x(it), 4),
                 el_1x_m=round(it["el_1x"], 4),
                 expected_profit_1x_m=round(it["profit_1x"], 4),
                 rol_pct=round(rol_pct, 2),
                 default_min_share=0.0,
-                default_max_share=2.0 if is_hedge_direction(it["direction"]) else 1.5,
+                default_max_share=1.0,
             )
         )
     del items
     _trim_memory()
     return out
+
+
+def _item_capital_1x(it: dict[str, Any]) -> float:
+    """Per-100%-share deployed capital needed for an optimizer item: max(0, limit - premium) for assumed, max(0, premium) for hedges."""
+    if "capital_1x" in it:
+        return float(it["capital_1x"])
+    return deployed_capital_m(
+        float(it.get("limit_1x", 0.0)),
+        float(it.get("prem_1x", 0.0)),
+        is_hedge=is_hedge_direction(it.get("direction", "ASSUMED")),
+    )
+
+
+def _resolve_item_bounds(req: OptimizerRequest, items: list[dict[str, Any]]) -> list[tuple[float, float, bool]]:
+    """Resolve effective (lb, ub, locked) participation bounds per item, capped at [0, 1]."""
+    bounds_by_key = {b.layer_key: b for b in req.layer_bounds}
+    resolved: list[tuple[float, float, bool]] = []
+    max_default = min(1.0, float(req.max_line_size_share))
+    for it in items:
+        b = bounds_by_key.get(it["layer_key"]) or bounds_by_key.get(it["programme_id"])
+        if b is not None:
+            if b.locked:
+                s = min(1.0, max(0.0, float(it["current_share"])))
+                lb = ub = s
+                locked = True
+            else:
+                lb = min(1.0, max(0.0, float(b.min_share)))
+                ub = min(1.0, max(lb, float(b.max_share)))
+                locked = abs(ub - lb) < 1e-9
+        elif req.lock_bound_deals and it["status"] == "BOUND":
+            s = min(1.0, max(0.0, float(it["current_share"])))
+            lb = ub = s
+            locked = True
+        elif is_hedge_direction(it["direction"]):
+            lb, ub = 0.0, 1.0
+            locked = False
+        else:
+            lb, ub = 0.0, max_default
+            locked = False
+        resolved.append((lb, ub, locked))
+    return resolved
+
+
+def detect_constraint_conflicts(req: OptimizerRequest, items: list[dict[str, Any]]) -> list[ConstraintConflict]:
+    """Detect Single-Cedent Max and Fund Capital constraint conflicts against layer min/max/locked bounds."""
+    conflicts: list[ConstraintConflict] = []
+    var_bounds = _resolve_item_bounds(req, items)
+    assumed = [
+        (i, it, var_bounds[i])
+        for i, it in enumerate(items)
+        if not is_hedge_direction(it["direction"])
+    ]
+    if not assumed:
+        return conflicts
+
+    def _detail(it: dict[str, Any], lb: float, ub: float, locked: bool) -> ConflictLayerDetail:
+        lim1x = float(it["limit_1x"])
+        cap1x = _item_capital_1x(it)
+        return ConflictLayerDetail(
+            layer_key=it["layer_key"],
+            programme_id=it["programme_id"],
+            layer_id=it["layer_id"],
+            cedent_name=it["cedent_name"],
+            layer_name=it["layer_name"],
+            min_share=round(lb, 4),
+            max_share=round(ub, 4),
+            locked=locked,
+            limit_1x_m=round(lim1x, 4),
+            min_limit_m=round(lb * lim1x, 4),
+            max_limit_m=round(ub * lim1x, 4),
+            capital_1x_m=round(cap1x, 4),
+            min_capital_m=round(lb * cap1x, 4),
+        )
+
+    # 1. Fund Capital vs minimum required Deployed Capital from layer min/locked bounds (assumed collateral + hedge premium cost)
+    eff_cap = req.effective_max_deployed_capital()
+    all_entries = [(i, it, var_bounds[i]) for i, it in enumerate(items)]
+    min_cap_total = sum(lb * _item_capital_1x(it) for _, it, (lb, _, _) in all_entries)
+    max_cap_total = sum(ub * _item_capital_1x(it) for _, it, (_, ub, _) in all_entries)
+    if min_cap_total > eff_cap + 1e-6:
+        offending = [
+            _detail(it, lb, ub, locked)
+            for _, it, (lb, ub, locked) in all_entries
+            if lb * _item_capital_1x(it) > 1e-6
+        ]
+        excess = min_cap_total - eff_cap
+        conflicts.append(
+            ConstraintConflict(
+                kind="FUND_CAPITAL_MIN_EXCEEDS_CAP",
+                severity="ERROR",
+                cedent_name=None,
+                cap_limit_m=round(eff_cap, 2),
+                required_min_limit_m=round(min_cap_total, 2),
+                max_possible_limit_m=round(max_cap_total, 2),
+                excess_m=round(excess, 2),
+                message=(
+                    f"Minimum required Deployed Capital from layer min/locked bounds (${min_cap_total:.2f}m) "
+                    f"exceeds Fund Capital (${eff_cap:.2f}m) by ${excess:.2f}m. "
+                    f"Raise Fund Capital or lower highlighted layer Min % bounds."
+                ),
+                offending_layers=offending,
+            )
+        )
+
+    # 2. Single-Cedent Max conflicts & inconsistencies
+    if req.max_single_cedent_limit_m is not None:
+        ced_cap = float(req.max_single_cedent_limit_m)
+        by_cedent: dict[str, list[tuple[dict[str, Any], float, float, bool]]] = {}
+        for _, it, (lb, ub, locked) in assumed:
+            by_cedent.setdefault(it["cedent_name"], []).append((it, lb, ub, locked))
+
+        infeasible_cedents: set[str] = set()
+        clipped_layers: list[ConflictLayerDetail] = []
+        milp_blocked_layers: list[ConflictLayerDetail] = []
+
+        largest_layer_entry: tuple[float, dict[str, Any], float, float, bool] | None = None
+        largest_cedent_entry: tuple[float, str, list[tuple[dict[str, Any], float, float, bool]]] | None = None
+
+        for ced, rows in by_cedent.items():
+            ced_min = sum(lb * float(it["limit_1x"]) for it, lb, _, _ in rows)
+            ced_max = sum(ub * float(it["limit_1x"]) for it, _, ub, _ in rows)
+            if largest_cedent_entry is None or ced_max > largest_cedent_entry[0]:
+                largest_cedent_entry = (ced_max, ced, rows)
+            for it, lb, ub, locked in rows:
+                l_max = ub * float(it["limit_1x"])
+                if largest_layer_entry is None or l_max > largest_layer_entry[0]:
+                    largest_layer_entry = (l_max, it, lb, ub, locked)
+
+            if ced_min > ced_cap + 1e-6:
+                infeasible_cedents.add(ced)
+                offending = [_detail(it, lb, ub, locked) for it, lb, ub, locked in rows if lb * float(it["limit_1x"]) > 1e-6]
+                excess = ced_min - ced_cap
+                conflicts.append(
+                    ConstraintConflict(
+                        kind="SINGLE_CEDENT_MIN_EXCEEDS_CAP",
+                        severity="ERROR",
+                        cedent_name=ced,
+                        cap_limit_m=round(ced_cap, 2),
+                        required_min_limit_m=round(ced_min, 2),
+                        max_possible_limit_m=round(ced_max, 2),
+                        excess_m=round(excess, 2),
+                        message=(
+                            f"Single Cedent Max (${ced_cap:.2f}m) conflicts with {ced}: "
+                            f"minimum required limit from layer bounds is ${ced_min:.2f}m (+${excess:.2f}m over cap). "
+                            f"Lower Min % / unlock the highlighted layer(s) or raise Single Cedent Max to at least ${ced_min:.2f}m."
+                        ),
+                        offending_layers=offending,
+                    )
+                )
+            else:
+                for it, lb, ub, locked in rows:
+                    lim1x = float(it["limit_1x"])
+                    if (
+                        req.min_line_size_share > 1e-6
+                        and lb <= 1e-9
+                        and ub >= req.min_line_size_share
+                        and req.min_line_size_share * lim1x > ced_cap + 1e-6
+                    ):
+                        milp_blocked_layers.append(_detail(it, lb, ub, locked))
+                    if ub * lim1x > ced_cap + 1e-6:
+                        clipped_layers.append(_detail(it, lb, ub, locked))
+
+        if milp_blocked_layers:
+            names = ", ".join(f"{l.cedent_name} ({l.layer_name})" for l in milp_blocked_layers[:3])
+            extra_txt = f" (+{len(milp_blocked_layers) - 3} more)" if len(milp_blocked_layers) > 3 else ""
+            worst_milp = max(req.min_line_size_share * l.limit_1x_m for l in milp_blocked_layers)
+            conflicts.append(
+                ConstraintConflict(
+                    kind="SINGLE_CEDENT_MILP_BLOCKS_LAYER",
+                    severity="WARNING",
+                    cedent_name=milp_blocked_layers[0].cedent_name if len(milp_blocked_layers) == 1 else None,
+                    cap_limit_m=round(ced_cap, 2),
+                    required_min_limit_m=round(worst_milp, 2),
+                    max_possible_limit_m=round(max(l.max_limit_m for l in milp_blocked_layers), 2),
+                    excess_m=round(worst_milp - ced_cap, 2),
+                    message=(
+                        f"MILP Min Line Share ({req.min_line_size_share * 100:.1f}%) exceeds Single Cedent Max (${ced_cap:.2f}m) "
+                        f"on {len(milp_blocked_layers)} layer(s) ({names}{extra_txt}), forcing them to 0%."
+                    ),
+                    offending_layers=milp_blocked_layers,
+                )
+            )
+
+        if clipped_layers:
+            worst = max(clipped_layers, key=lambda l: l.max_limit_m)
+            names = ", ".join(f"{l.cedent_name} · {l.layer_name} (max ${l.max_limit_m:.1f}m)" for l in clipped_layers[:3])
+            extra_txt = f" (+{len(clipped_layers) - 3} more)" if len(clipped_layers) > 3 else ""
+            conflicts.append(
+                ConstraintConflict(
+                    kind="SINGLE_CEDENT_CLIPS_LAYER_MAX",
+                    severity="WARNING",
+                    cedent_name=worst.cedent_name if len(clipped_layers) == 1 else None,
+                    cap_limit_m=round(ced_cap, 2),
+                    required_min_limit_m=round(sum(l.min_limit_m for l in clipped_layers), 2),
+                    max_possible_limit_m=round(worst.max_limit_m, 2),
+                    excess_m=round(worst.max_limit_m - ced_cap, 2),
+                    message=(
+                        f"Single Cedent Max (${ced_cap:.2f}m) is tighter than configured Max % on {len(clipped_layers)} layer(s): "
+                        f"{names}{extra_txt}. Those layers will be capped below their Max % bound."
+                    ),
+                    offending_layers=clipped_layers,
+                )
+            )
+
+        if largest_layer_entry is not None and largest_cedent_entry is not None:
+            l_max_val, l_it, l_lb, l_ub, l_locked = largest_layer_entry
+            c_max_val, c_name, c_rows = largest_cedent_entry
+            if ced_cap > c_max_val + 1e-6:
+                offending = [_detail(it, lb, ub, locked) for it, lb, ub, locked in c_rows]
+                if not any(o.layer_key == l_it["layer_key"] for o in offending):
+                    offending.append(_detail(l_it, l_lb, l_ub, l_locked))
+                conflicts.append(
+                    ConstraintConflict(
+                        kind="SINGLE_CEDENT_CAP_EXCEEDS_LARGEST_MAX",
+                        severity="WARNING",
+                        cedent_name=c_name,
+                        cap_limit_m=round(ced_cap, 2),
+                        required_min_limit_m=0.0,
+                        max_possible_limit_m=round(c_max_val, 2),
+                        excess_m=round(ced_cap - c_max_val, 2),
+                        message=(
+                            f"Single Cedent Max (${ced_cap:.2f}m) is larger than the largest cedent's max exposure "
+                            f"({c_name}: ${c_max_val:.2f}m) and the largest layer's max "
+                            f"({l_it['cedent_name']} · {l_it['layer_name']}: ${l_max_val:.2f}m), so this cap cannot bind."
+                        ),
+                        offending_layers=offending,
+                    )
+                )
+
+    return conflicts
 
 
 def _gross_positive_sum(mat: np.ndarray) -> np.ndarray:
@@ -826,36 +1121,50 @@ def _compute_portfolio_snapshot(
     profit_m = float(sum(weights[i] * items[i]["profit_1x"] for i in range(m)))
     yield_m = total_capital * 0.03
     mean_roc = ((profit_m + yield_m) / total_capital) * 100.0
-    deployed = float(sum(weights[i] * items[i]["limit_1x"] for i in range(m) if not is_hedge_direction(items[i]["direction"])))
+    deployed = float(sum(weights[i] * _item_capital_1x(items[i]) for i in range(m)))
+    cap_util_pct = (deployed / total_capital) * 100.0 if total_capital > 0 else 0.0
+    cap_headroom = total_capital - deployed
+    cap_exceeded = deployed > total_capital + 1e-6
     gross_prem = float(sum(weights[i] * items[i]["prem_1x"] for i in range(m) if not is_hedge_direction(items[i]["direction"])))
     exp_loss = float(np.mean(port_loss))
     std_dev = float(np.std(port_loss)) if n_trials > 0 else 0.0
     el_cap_ratio = max(0.0, exp_loss) / total_capital
-    ret_tvar_100 = (profit_m / float(tvar_100)) if float(tvar_100) > 1e-6 else 0.0
-    ret_tvar_250 = (profit_m / float(tvar_250)) if float(tvar_250) > 1e-6 else 0.0
-    ret_tvar_500 = (profit_m / float(tvar_500)) if float(tvar_500) > 1e-6 else 0.0
-    ret_tvar_1000 = (profit_m / float(tvar_1000)) if float(tvar_1000) > 1e-6 else 0.0
-    ret_std_dev = (profit_m / std_dev) if std_dev > 1e-6 else 0.0
+    profit_r = round(profit_m, 4)
+    std_dev_r = round(std_dev, 4)
+    tvar_50_r = round(float(tvar_50), 4)
+    tvar_100_r = round(float(tvar_100), 4)
+    tvar_250_r = round(float(tvar_250), 4)
+    tvar_500_r = round(float(tvar_500), 4)
+    tvar_1000_r = round(float(tvar_1000), 4)
+    ret_tvar_100 = (profit_r / tvar_100_r) if tvar_100_r > 1e-6 else 0.0
+    ret_tvar_250 = (profit_r / tvar_250_r) if tvar_250_r > 1e-6 else 0.0
+    ret_tvar_500 = (profit_r / tvar_500_r) if tvar_500_r > 1e-6 else 0.0
+    ret_tvar_1000 = (profit_r / tvar_1000_r) if tvar_1000_r > 1e-6 else 0.0
+    ret_std_dev = (profit_r / std_dev_r) if std_dev_r > 1e-6 else 0.0
 
     snap = PortfolioMetricsSnapshot(
-        expected_profit_m=round(profit_m, 4),
+        expected_profit_m=profit_r,
         mean_roc_pct=round(mean_roc, 2),
         deployed_collateral_m=round(deployed, 2),
+        fund_capital_m=round(total_capital, 2),
+        capital_utilization_pct=round(cap_util_pct, 2),
+        capital_headroom_m=round(cap_headroom, 2),
+        capital_exceeded=cap_exceeded,
         gross_premium_m=round(gross_prem, 4),
         expected_loss_m=round(exp_loss, 4),
         el_capital_ratio=round(el_cap_ratio, 4),
         risk_reward_ratio=round(ret_tvar_250, 4),
-        std_dev_m=round(std_dev, 4),
+        std_dev_m=std_dev_r,
         return_to_tvar_100=round(ret_tvar_100, 4),
         return_to_tvar_250=round(ret_tvar_250, 4),
         return_to_tvar_500=round(ret_tvar_500, 4),
         return_to_tvar_1000=round(ret_tvar_1000, 4),
         return_to_std_dev=round(ret_std_dev, 4),
-        tvar_50_m=round(float(tvar_50), 4),
-        tvar_100_m=round(float(tvar_100), 4),
-        tvar_250_m=round(float(tvar_250), 4),
-        tvar_500_m=round(float(tvar_500), 4),
-        tvar_1000_m=round(float(tvar_1000), 4),
+        tvar_50_m=tvar_50_r,
+        tvar_100_m=tvar_100_r,
+        tvar_250_m=tvar_250_r,
+        tvar_500_m=tvar_500_r,
+        tvar_1000_m=tvar_1000_r,
         var_100_m=round(float(var_100), 4),
         var_250_m=round(float(var_250), 4),
     )
@@ -879,8 +1188,11 @@ def _compute_portfolio_snapshot(
                 current_share=round(it["current_share"], 4),
                 optimal_share=round(w, 4),
                 delta_share=round(w - it["current_share"], 4),
+                limit_1x_m=round(it["limit_1x"], 4),
+                premium_1x_m=round(it["prem_1x"], 4),
                 optimal_limit_m=round(w * it["limit_1x"], 4),
                 optimal_premium_m=round(w * it["prem_1x"], 4),
+                optimal_capital_m=round(w * _item_capital_1x(it), 4),
                 optimal_el_m=round(w * it["el_1x"], 4),
                 optimal_expected_profit_m=round(w * it["profit_1x"], 4),
                 co_tvar_100_m=round(float(co_tvar_100[i]), 4),
@@ -1046,35 +1358,16 @@ def _build_highs_model(
     cur_w = np.array([it["current_share"] for it in items], dtype=np.float64)
     profit_1x = np.array([float(it["profit_1x"]) for it in items], dtype=np.float64)
 
-    bounds_by_key = {b.layer_key: b for b in req.layer_bounds}
-
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
     h.setOptionValue("time_limit", 15.0)
 
     use_milp = req.min_line_size_share > 1e-6
 
-    # Decision variables w_0..w_{m-1}
-    var_bounds: list[tuple[float, float, bool]] = []  # (lb, ub, is_locked)
+    # Decision variables w_0..w_{m-1} (strictly capped in [0, 1])
+    var_bounds = _resolve_item_bounds(req, items)
     for i, it in enumerate(items):
-        b = bounds_by_key.get(it["layer_key"]) or bounds_by_key.get(it["programme_id"])
-        if b is not None:
-            if b.locked:
-                lb = ub = float(it["current_share"])
-                locked = True
-            else:
-                lb, ub = float(b.min_share), float(b.max_share)
-                locked = abs(ub - lb) < 1e-9
-        elif req.lock_bound_deals and it["status"] == "BOUND":
-            lb = ub = float(it["current_share"])
-            locked = True
-        elif is_hedge_direction(it["direction"]):
-            lb, ub = 0.0, 2.0
-            locked = False
-        else:
-            lb, ub = 0.0, float(req.max_line_size_share)
-            locked = False
-        var_bounds.append((lb, ub, locked))
+        lb, ub, _ = var_bounds[i]
         h.addVar(lb, ub)
         if req.objective == "MIN_TVAR_250":
             h.changeColCost(i, 0.0)
@@ -1166,11 +1459,20 @@ def _build_highs_model(
                 h.addRow(-highspy.kHighsInf, 0.0, 2, [i, y_start + i], [-1.0, float(req.min_line_size_share)])
                 row_cursor += 1
 
-    # 1. Total Deployed Collateral constraint
+    # 1. Total Deployed Capital constraint: sum(assumed (limit - premium) * share + hedge premium * share) <= Fund Capital
     assumed_idxs = [i for i, it in enumerate(items) if not is_hedge_direction(it["direction"])]
-    assumed_lims = [float(items[i]["limit_1x"]) for i in assumed_idxs]
-    if assumed_idxs:
-        add_named_row("Max Deployed Collateral ($M)", float(req.min_deployed_collateral), float(req.max_deployed_collateral), assumed_idxs, assumed_lims)
+    cap_idxs = [i for i in range(m) if _item_capital_1x(items[i]) > 1e-12]
+    cap_coeffs = [_item_capital_1x(items[i]) for i in cap_idxs]
+    eff_max_cap = req.effective_max_deployed_capital()
+    if cap_idxs:
+        add_named_row(
+            "Deployed Capital <= Fund Capital ($M)",
+            float(req.min_deployed_collateral),
+            eff_max_cap,
+            cap_idxs,
+            cap_coeffs,
+            tag="deployed_capital",
+        )
 
     # 2. 1-in-100 TVaR (Rockafellar-Uryasev)
     tvar_100_row = add_named_row(
@@ -1676,23 +1978,34 @@ def solve_portfolio_optimization(
     base_tvar_250 = float(base_multi[1][1])
     base_tvar_1000 = float(base_multi[2][1])
     base_profit = float(sum(cur_w[i] * items[i]["profit_1x"] for i in range(m)))
+    base_deployed = float(sum(cur_w[i] * _item_capital_1x(items[i]) for i in range(m)))
     yield_m = req.total_capital * 0.03
     base_roc = ((base_profit + yield_m) / req.total_capital) * 100.0
 
-    tail_idx = _select_tail_scenarios(mat)
-    tail_mat = mat[:, tail_idx]
+    conflicts = detect_constraint_conflicts(req, items)
+    has_blocking_conflict = any(c.severity == "ERROR" for c in conflicts)
 
-    solver_name, status_str, opt_w, diags = _solve_core(
-        req=req, items=items, mat=mat, tail_mat=tail_mat, tail_idx=tail_idx, w_mat_buf=w_mat_buf
-    )
+    if has_blocking_conflict:
+        solver_name = "HiGHS MILP" if req.min_line_size_share > 1e-6 else "HiGHS LP"
+        status_str = "Infeasible"
+        opt_w = cur_w
+        diags = []
+    else:
+        tail_idx = _select_tail_scenarios(mat)
+        tail_mat = mat[:, tail_idx]
+        solver_name, status_str, opt_w, diags = _solve_core(
+            req=req, items=items, mat=mat, tail_mat=tail_mat, tail_idx=tail_idx, w_mat_buf=w_mat_buf
+        )
+        del tail_mat
 
     opt_multi = rle.euler_cotvar_multi(_weighted_mat(mat, opt_w, w_mat_buf), [100.0, 250.0, 1000.0])
     opt_tvar_100 = float(opt_multi[0][1])
     opt_tvar_250 = float(opt_multi[1][1])
     opt_tvar_1000 = float(opt_multi[2][1])
-    del w_mat_buf, mat, tail_mat
+    del w_mat_buf, mat
     _trim_memory()
     opt_profit = float(sum(opt_w[i] * items[i]["profit_1x"] for i in range(m)))
+    opt_deployed = float(sum(opt_w[i] * _item_capital_1x(items[i]) for i in range(m)))
     opt_roc = ((opt_profit + yield_m) / req.total_capital) * 100.0
 
     def _safe_ratio(p: float, tv: float) -> float:
@@ -1751,32 +2064,45 @@ def solve_portfolio_optimization(
         breadcrumb=solve_breadcrumb,
     )
 
+    base_profit_r = round(base_profit, 4)
+    opt_profit_r = round(opt_profit, 4)
+    base_tvar_100_r = round(base_tvar_100, 4)
+    opt_tvar_100_r = round(opt_tvar_100, 4)
+    base_tvar_250_r = round(base_tvar_250, 4)
+    opt_tvar_250_r = round(opt_tvar_250, 4)
+    base_tvar_1000_r = round(base_tvar_1000, 4)
+    opt_tvar_1000_r = round(opt_tvar_1000, 4)
+
     return OptimizerResponse(
         mode=req.mode,
         objective=req.objective,
         solver=solver_name,
         status=status_str,
         compute_ms=compute_ms,
-        before_expected_profit_m=round(base_profit, 4),
-        after_expected_profit_m=round(opt_profit, 4),
+        before_expected_profit_m=base_profit_r,
+        after_expected_profit_m=opt_profit_r,
         delta_expected_profit_m=round(opt_profit - base_profit, 4),
-        before_tvar_100_m=round(base_tvar_100, 4),
-        after_tvar_100_m=round(opt_tvar_100, 4),
-        before_tvar_250_m=round(base_tvar_250, 4),
-        after_tvar_250_m=round(opt_tvar_250, 4),
-        before_tvar_1000_m=round(base_tvar_1000, 4),
-        after_tvar_1000_m=round(opt_tvar_1000, 4),
-        before_return_to_tvar_100=_safe_ratio(base_profit, base_tvar_100),
-        after_return_to_tvar_100=_safe_ratio(opt_profit, opt_tvar_100),
-        before_return_to_tvar_250=_safe_ratio(base_profit, base_tvar_250),
-        after_return_to_tvar_250=_safe_ratio(opt_profit, opt_tvar_250),
-        before_return_to_tvar_1000=_safe_ratio(base_profit, base_tvar_1000),
-        after_return_to_tvar_1000=_safe_ratio(opt_profit, opt_tvar_1000),
+        before_tvar_100_m=base_tvar_100_r,
+        after_tvar_100_m=opt_tvar_100_r,
+        before_tvar_250_m=base_tvar_250_r,
+        after_tvar_250_m=opt_tvar_250_r,
+        before_tvar_1000_m=base_tvar_1000_r,
+        after_tvar_1000_m=opt_tvar_1000_r,
+        before_return_to_tvar_100=_safe_ratio(base_profit_r, base_tvar_100_r),
+        after_return_to_tvar_100=_safe_ratio(opt_profit_r, opt_tvar_100_r),
+        before_return_to_tvar_250=_safe_ratio(base_profit_r, base_tvar_250_r),
+        after_return_to_tvar_250=_safe_ratio(opt_profit_r, opt_tvar_250_r),
+        before_return_to_tvar_1000=_safe_ratio(base_profit_r, base_tvar_1000_r),
+        after_return_to_tvar_1000=_safe_ratio(opt_profit_r, opt_tvar_1000_r),
         before_mean_roc_pct=round(base_roc, 2),
         after_mean_roc_pct=round(opt_roc, 2),
+        fund_capital_m=round(req.total_capital, 2),
+        before_deployed_capital_m=round(base_deployed, 2),
+        after_deployed_capital_m=round(opt_deployed, 2),
         included_statuses=included_statuses,
         deals=deal_rows,
         constraints=diags,
+        conflicts=conflicts,
         manifest=manifest,
     )
 
@@ -1816,7 +2142,7 @@ def compute_efficient_frontier(
         _, opt_tvar_250, _ = rle.euler_cotvar(_weighted_mat(mat, opt_w, w_mat_buf), 250.0)
         opt_profit = float(sum(opt_w[i] * items[i]["profit_1x"] for i in range(m)))
         opt_roc = ((opt_profit + yield_m) / req.total_capital) * 100.0
-        dep = float(sum(opt_w[i] * items[i]["limit_1x"] for i in range(m) if not is_hedge_direction(items[i]["direction"])))
+        dep = float(sum(opt_w[i] * _item_capital_1x(items[i]) for i in range(m)))
         ret_tv250 = (opt_profit / float(opt_tvar_250)) if float(opt_tvar_250) > 1e-6 else 0.0
         points.append(
             FrontierPoint(
@@ -1864,7 +2190,80 @@ def explore_efficient_frontier(
 
     cur_w = np.array([it["current_share"] for it in items], dtype=np.float64)
     w_mat_buf = np.empty(mat.shape, dtype=np.float64)
-    init_snap, init_layers, _ = _compute_portfolio_snapshot(items, mat, cur_w, req.total_capital, w_mat_buf=w_mat_buf)
+    init_snap, init_layers, init_rp_stack = _compute_portfolio_snapshot(
+        items, mat, cur_w, req.total_capital, w_mat_buf=w_mat_buf
+    )
+
+    conflicts = detect_constraint_conflicts(layer_req, items)
+    if any(c.severity == "ERROR" for c in conflicts):
+        del w_mat_buf, mat
+        _trim_memory()
+        solver_name = "HiGHS MILP" if req.min_line_size_share > 1e-6 else "HiGHS LP"
+        infeasible_pts = [
+            FrontierExplorerPoint(
+                point_index=idx,
+                target_tvar_250_m=round(float(req.max_tvar_250_m), 2),
+                status="Infeasible",
+                solver=solver_name,
+                metrics=init_snap,
+                layers=init_layers,
+                constraints=[],
+                return_period_contributions=init_rp_stack,
+            )
+            for idx in range(num_points)
+        ]
+        compute_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        explore_input_hashes = {"sim_set": yelt.content_hash, "req": canonical_hash(req.model_dump()), **snapshot_hashes}
+        explore_breadcrumb = [
+            BreadcrumbStep(entity_type="SIM_SET", entity_id=yelt.sim_set_id, label=yelt.name, content_hash=yelt.content_hash),
+            *[
+                BreadcrumbStep(
+                    entity_type="PORTFOLIO_SNAPSHOT",
+                    entity_id=f"unl-snapshot-{k.split(':', 1)[1]}",
+                    label=f"UNL Portfolio Snapshot ({k.split(':', 1)[1]})",
+                    content_hash=h,
+                )
+                for k, h in sorted(snapshot_hashes.items())
+            ],
+        ]
+        manifest = lineage.record_manifest(
+            run_type="FRONTIER_EXPLORER",
+            input_hashes=explore_input_hashes,
+            parameters={
+                "num_points": num_points,
+                "granularity": req.granularity,
+                "mode": req.mode,
+                "objective": req.objective,
+                "view": req.view.value,
+                "included_statuses": None if req.included_statuses is None else [s.value for s in req.included_statuses],
+                "effective_statuses": [s.value for s in included_statuses],
+            },
+            output_payload={
+                "points": len(infeasible_pts),
+                "recommended_index": 0,
+                "status": "Infeasible",
+                "conflict_count": len(conflicts),
+            },
+            breadcrumb=explore_breadcrumb,
+        )
+        return FrontierExplorerResponse(
+            mode=req.mode,
+            granularity=req.granularity,
+            view=req.view.value,
+            included_statuses=included_statuses,
+            fund_capital_m=round(req.total_capital, 2),
+            compute_ms=compute_ms,
+            initial_portfolio=init_snap,
+            initial_layers=init_layers,
+            recommended_index=0,
+            peak_return_to_tvar_100_index=0,
+            peak_return_to_tvar_250_index=0,
+            peak_return_to_tvar_1000_index=0,
+            peak_return_to_std_dev_index=0,
+            frontier=infeasible_pts,
+            conflicts=conflicts,
+            manifest=manifest,
+        )
 
     tail_idx = _select_tail_scenarios(mat)
     tail_mat = mat[:, tail_idx]
@@ -2110,6 +2509,7 @@ def explore_efficient_frontier(
         granularity=req.granularity,
         view=req.view.value,
         included_statuses=included_statuses,
+        fund_capital_m=round(req.total_capital, 2),
         compute_ms=compute_ms,
         initial_portfolio=init_snap,
         initial_layers=init_layers,
@@ -2119,5 +2519,6 @@ def explore_efficient_frontier(
         peak_return_to_tvar_1000_index=peak_1000_idx,
         peak_return_to_std_dev_index=peak_sd_idx,
         frontier=frontier_pts,
+        conflicts=conflicts,
         manifest=manifest,
     )

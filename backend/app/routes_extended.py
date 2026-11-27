@@ -418,6 +418,14 @@ def create_extended_router(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        # Lightweight column-only SQL summary (selective rollup + currency-safe, zero DAG/YELT eval)
+        summary = contract_store.summarize_optimizer_universe(
+            statuses=statuses,
+            link_target_statuses=optimizer_link_target_statuses(chosen),
+            exclude_structures=[StructureType.ILW],
+        )
+
         return OptimizerCandidatesPage(
             mode=mode,
             view=view.value,
@@ -441,6 +449,11 @@ def create_extended_router(
             programme_ids=[d.programme_id for d in deals],
             layers=[l for l in layers if l.layer_key != "cand-retro-ilw-fl" and l.direction == "ASSUMED"],
             retro_candidate=next((l for l in layers if l.layer_key == "cand-retro-ilw-fl"), None),
+            universe_deployed_capital_m=float(summary["deployed_capital_m"]),
+            universe_max_layer_limit_1x_m=float(summary["max_layer_limit_1x_m"]),
+            universe_max_layer_label=str(summary["max_layer_label"]),
+            universe_max_cedent_limit_1x_m=float(summary["max_cedent_limit_1x_m"]),
+            universe_max_cedent_name=str(summary["max_cedent_name"]),
         )
 
     @router.post("/api/optimizer/explore", response_model=FrontierExplorerResponse)

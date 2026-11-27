@@ -105,7 +105,7 @@ export function App() {
   };
   const [selectedProgId, setSelectedProgId] = useState<string>('prog-farmers-us-27');
   const [portfolioView, setPortfolioView] = useState<ViewOfRisk>('ADJUSTED');
-  const [totalCapital, setTotalCapital] = useState<number>(160);
+  const [totalCapital, setTotalCapital] = useState<number>(450);
   const [detView, setDetView] = useState<ViewOfRisk>('UNADJUSTED');
   const [losses, setLosses] = useState<DeterministicLossRow[]>(DEFAULT_LOSSES);
 
@@ -250,9 +250,11 @@ export function App() {
 
         {tab === 'burnclaims' && selectedProg && <BurnAndClaims programme={selectedProg} />}
 
-        {tab === 'allocation' && <AllocationAndBranches />}
+        {tab === 'allocation' && <AllocationAndBranches totalCapital={totalCapital} />}
 
-        {tab === 'optimizer' && <PortfolioOptimizer />}
+        {tab === 'optimizer' && (
+          <PortfolioOptimizer totalCapital={totalCapital} onChangeCapital={setTotalCapital} />
+        )}
 
         {tab === 'modelsops' && <CatModelsAndOps />}
 

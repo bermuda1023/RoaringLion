@@ -25,8 +25,10 @@ def build_portfolio_csv(rollup: PortfolioRollupResponse) -> str:
     w.writerow([])
 
     w.writerow(["Metric", "Value"])
-    w.writerow(["Total Capital ($M)", rollup.total_capital])
-    w.writerow(["Deployed Collateral ($M)", rollup.deployed_collateral])
+    w.writerow(["Fund Capital ($M)", rollup.total_capital])
+    w.writerow(["Deployed Capital ($M)", rollup.deployed_collateral])
+    w.writerow(["Capital Utilization (%)", rollup.capital_utilization_pct])
+    w.writerow(["Capital Headroom ($M)", rollup.capital_headroom_m])
     w.writerow(["Include Hedges", rollup.include_hedges])
     w.writerow(["Gross Premium ($M)", rollup.gross_premium])
     w.writerow(["Hedge Premium ($M)", rollup.hedge_premium])
@@ -155,7 +157,7 @@ def build_portfolio_tearsheet_html(rollup: PortfolioRollupResponse) -> str:
   <div class="kpi"><div class="lbl">Net / Hedge Prem</div><div class="val">${rollup.net_premium:.2f}m / ${rollup.hedge_premium:.2f}m</div></div>
   <div class="kpi"><div class="lbl">Expected Profit</div><div class="val">${rollup.expected_profit:.2f}m</div></div>
   <div class="kpi"><div class="lbl">1-in-250 TVaR</div><div class="val">${rollup.portfolio_tvar_250:.2f}m</div></div>
-  <div class="kpi"><div class="lbl">Total Capital</div><div class="val">${rollup.total_capital:.0f}m</div></div>
+  <div class="kpi"><div class="lbl">Fund / Deployed Cap</div><div class="val">${rollup.total_capital:.0f}m / ${rollup.deployed_collateral:.1f}m</div></div>
 </div>
 <h2>Computed Return Period Losses (OEP / AEP / TVaR)</h2>
 <table><thead><tr><th>Return Period</th><th class="num">Exceedance Prob</th><th class="num">OEP</th><th class="num">OEP TVaR</th><th class="num">AEP</th><th class="num">AEP TVaR</th></tr></thead><tbody>{ep_rows}</tbody></table>
