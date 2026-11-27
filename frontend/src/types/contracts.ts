@@ -210,6 +210,26 @@ export interface LayerAllocationRow {
   marginalRocPct: number;
 }
 
+export interface PortfolioEpPoint {
+  returnPeriod: number;
+  probability: number;
+  oep: number;
+  oepTvar: number;
+  aep: number;
+  aepTvar: number;
+}
+
+export interface PortfolioEpSlice {
+  key: string;
+  label: string;
+  dimension: 'TOTAL' | 'REGION' | 'PERIL' | 'REGION_PERIL' | string;
+  aal: number;
+  sd: number;
+  maxOcc: number;
+  maxYear: number;
+  epPoints: PortfolioEpPoint[];
+}
+
 export interface PortfolioRollupResponse {
   portfolioId: string;
   portfolioName: string;
@@ -244,8 +264,134 @@ export interface PortfolioRollupResponse {
     actualRocPct: number;
     passed: boolean;
   }[];
+  epCurve?: PortfolioEpPoint[];
+  epByRegion?: PortfolioEpSlice[];
+  epByPeril?: PortfolioEpSlice[];
+  epByRegionPeril?: PortfolioEpSlice[];
   layerAllocations: LayerAllocationRow[];
   manifest: RunManifest;
+}
+
+export interface PortfolioSliceSpec {
+  label: string;
+  view?: ViewOfRisk;
+  totalCapital?: number;
+  includeHedges?: boolean;
+  statuses?: string[] | null;
+  treatyYears?: number[] | null;
+  renewalPeriods?: string[] | null;
+  inceptionFrom?: string | null;
+  inceptionTo?: string | null;
+  regionPerils?: string[] | null;
+  programmeIds?: string[] | null;
+}
+
+export interface PortfolioCompareRequest {
+  portfolioA: PortfolioSliceSpec;
+  portfolioB: PortfolioSliceSpec;
+}
+
+export interface EpDeltaPoint {
+  returnPeriod: number;
+  probability: number;
+  oepA: number;
+  oepB: number;
+  deltaOep: number;
+  oepTvarA: number;
+  oepTvarB: number;
+  deltaOepTvar: number;
+  aepA: number;
+  aepB: number;
+  deltaAep: number;
+  aepTvarA: number;
+  aepTvarB: number;
+  deltaAepTvar: number;
+}
+
+export interface EpSplitDeltaRow {
+  key: string;
+  label: string;
+  dimension: string;
+  aalA: number;
+  aalB: number;
+  deltaAal: number;
+  oep100A: number;
+  oep100B: number;
+  deltaOep100: number;
+  oep250A: number;
+  oep250B: number;
+  deltaOep250: number;
+  aep100A: number;
+  aep100B: number;
+  deltaAep100: number;
+  aep250A: number;
+  aep250B: number;
+  deltaAep250: number;
+  tvar250A: number;
+  tvar250B: number;
+  deltaTvar250: number;
+}
+
+export interface PortfolioDeltaSummary {
+  programmeCountA: number;
+  programmeCountB: number;
+  layerCountA: number;
+  layerCountB: number;
+  deltaNetPremiumM: number;
+  deltaGrossPremiumM: number;
+  deltaExpectedLossM: number;
+  deltaExpectedProfitM: number;
+  deltaMeanRocPct: number;
+  deltaNoEventRocPct: number;
+  deltaBreakEvenProbPct: number;
+  deltaReturnOnTvarPct: number;
+  deltaVar250M: number;
+  deltaTvar250M: number;
+  deltaOep100M: number;
+  deltaOep250M: number;
+  deltaAep100M: number;
+  deltaAep250M: number;
+}
+
+export interface PortfolioCompareResponse {
+  currency: string;
+  portfolioA: PortfolioRollupResponse;
+  portfolioB: PortfolioRollupResponse;
+  programmeCountA: number;
+  programmeCountB: number;
+  delta: PortfolioDeltaSummary;
+  epDeltas: EpDeltaPoint[];
+  regionDeltas: EpSplitDeltaRow[];
+  perilDeltas: EpSplitDeltaRow[];
+  regionPerilDeltas: EpSplitDeltaRow[];
+  manifest: RunManifest;
+}
+
+export interface PortfolioComparePreset {
+  id: string;
+  name: string;
+  description: string;
+  portfolioA: PortfolioSliceSpec;
+  portfolioB: PortfolioSliceSpec;
+}
+
+export interface PortfolioCompareContractMeta {
+  programmeId: string;
+  treatyYear: number;
+  status: string;
+  direction: string;
+  isHedge: boolean;
+  inceptionDate: string;
+  renewalPeriod: string;
+}
+
+export interface PortfolioCompareOptionsResponse {
+  treatyYears: number[];
+  statuses: { status: string; count: number }[];
+  renewalPeriods: string[];
+  regionPerils: string[];
+  presets: PortfolioComparePreset[];
+  contracts: PortfolioCompareContractMeta[];
 }
 
 export interface HedgeAccretionSummary {

@@ -23,8 +23,14 @@ from typing import Any
 import numpy as np
 import roaring_lion_engine as rle
 
-from app.engine.pricing_link import LAYER_NODE_TYPES, PricingLink, compute_pricing_economics, extract_rollup_layers
-from app.engine.sim_generator import RP_TO_ID, YeltTable
+from app.engine.pricing_link import (
+    LAYER_NODE_TYPES,
+    PricingLink,
+    compute_pricing_economics,
+    extract_rollup_layers,
+    graph_uses_explicit_pricing_links,
+)
+from app.engine.sim_generator import REGION_PERILS, RP_TO_ID, YeltTable
 from app.models.domain import (
     BreadcrumbStep,
     CdfPoint,
@@ -33,13 +39,19 @@ from app.models.domain import (
     DeterministicRunRequest,
     DeterministicRunResponse,
     DeterministicStepResult,
+    EpDeltaPoint,
     EpPoint,
+    EpSplitDeltaRow,
     GraphSpec,
     GuidelineCheck,
     HedgeAccretionSummary,
     LayerAllocationRow,
     LayerStateSnapshot,
     NodeViewMetrics,
+    PortfolioCompareResponse,
+    PortfolioDeltaSummary,
+    PortfolioEpPoint,
+    PortfolioEpSlice,
     PortfolioHedgeComparisonResponse,
     PortfolioRollupResponse,
     ProgrammeDeal,
@@ -51,6 +63,27 @@ from app.services.portfolio_snapshot import compute_unl_portfolio_events, is_ilw
 from app.services.sim_sets import _trim_memory
 
 DEFAULT_RETURN_PERIODS = [10.0, 20.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0]
+PORTFOLIO_EP_RETURN_PERIODS = [10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]
+
+_REGION_LABELS: dict[str, str] = {
+    "US": "US · United States",
+    "JP": "JP · Japan",
+    "EU": "EU · Europe",
+    "AU": "AU · Australia",
+    "GL": "GL · Global",
+}
+
+_PERIL_LABELS: dict[str, str] = {
+    "WS": "WS · Windstorm",
+    "EQ": "EQ · Earthquake",
+    "CS": "CS · Convective Storm",
+    "WF": "WF · Wildfire",
+    "FL": "FL · Flood",
+    "FR": "FR · Fire",
+    "WT": "WT · Winterstorm",
+    "TR": "TR · Terrorism",
+    "CY": "CY · Cyber",
+}
 
 # Content-addressed LRU cache for DAG intermediate node outputs:
 # key -> (ev_out, ann, mx, rip, ep_dict)
@@ -105,8 +138,9 @@ def apply_deal_view(yelt: YeltTable, uplift_set: UpliftSet, view: ViewOfRisk) ->
     return rle.apply_uplifts_yelt(yelt.losses, yelt.rp_ids, rules_json)
 
 
-def _ep_stats_from_vector(vec: np.ndarray) -> dict[str, Any]:
-    return json.loads(rle.ep_stats(np.ascontiguousarray(vec, dtype=np.float64), DEFAULT_RETURN_PERIODS))
+def _ep_stats_from_vector(vec: np.ndarray, return_periods: list[float] | None = None) -> dict[str, Any]:
+    rps = return_periods if return_periods is not None else DEFAULT_RETURN_PERIODS
+    return json.loads(rle.ep_stats(np.ascontiguousarray(vec, dtype=np.float64), rps))
 
 
 def _check_finite_numbers(value: Any, path: str) -> None:
@@ -358,6 +392,7 @@ def evaluate_programme_dag(
     *,
     compute_metrics: bool = True,
     need_events: bool = True,
+    need_rollup_events: bool = False,
 ) -> tuple[DagEvalResponse, dict[str, dict[str, np.ndarray]]]:
     """Evaluate a programme's DAG on UNADJUSTED and ADJUSTED views via Rust with content-addressed node caching."""
     t0 = time.perf_counter()
@@ -368,6 +403,17 @@ def evaluate_programme_dag(
     for edge in programme.graph.edges:
         incoming[edge.target].append(edge)
         out_counts[edge.source] += 1
+
+    keep_event_ids: set[str] = set()
+    if need_rollup_events and not need_events:
+        if graph_uses_explicit_pricing_links(programme.graph):
+            keep_event_ids = {
+                n.node_id
+                for n in programme.graph.nodes
+                if n.node_type == NodeType.PRICING_OUTPUT and str(n.params.get("contractId") or "").strip()
+            }
+        else:
+            keep_event_ids = {n.node_id for n in programme.graph.nodes if n.node_type in LAYER_NODE_TYPES}
 
     topo = validate_dag_acyclic(programme.graph)
     _PASS_THROUGH_TYPES = (
@@ -703,7 +749,7 @@ def evaluate_programme_dag(
                 else:
                     ep = None
 
-            if need_events or remaining_uses[nid] > 0:
+            if need_events or remaining_uses[nid] > 0 or (need_rollup_events and nid in keep_event_ids):
                 node_event_streams[nid] = ev_out
             node_ann[nid] = ann
             node_rip[nid] = rip
@@ -716,7 +762,7 @@ def evaluate_programme_dag(
             if not need_events:
                 for e in in_edges:
                     remaining_uses[e.source] -= 1
-                    if remaining_uses[e.source] <= 0:
+                    if remaining_uses[e.source] <= 0 and not (need_rollup_events and e.source in keep_event_ids):
                         node_event_streams.pop(e.source, None)
 
             if compute_metrics and ep is not None:
@@ -846,6 +892,162 @@ def evaluate_programme_dag(
     return resp, {"annual": annual_vectors, "rip": rip_vectors, "events": event_vectors}
 
 
+def _ep_points_from_oep_aep(oep_stats: dict[str, Any], aep_stats: dict[str, Any]) -> list[PortfolioEpPoint]:
+    oep_by_rp = {float(p["return_period"]): p for p in oep_stats["ep_points"]}
+    aep_by_rp = {float(p["return_period"]): p for p in aep_stats["ep_points"]}
+    points: list[PortfolioEpPoint] = []
+    for rp in PORTFOLIO_EP_RETURN_PERIODS:
+        op = oep_by_rp.get(rp)
+        ap = aep_by_rp.get(rp)
+        points.append(
+            PortfolioEpPoint(
+                return_period=rp,
+                probability=round(1.0 / rp, 6),
+                oep=round(float(op["var"]) if op else 0.0, 4),
+                oep_tvar=round(float(op["tvar"]) if op else 0.0, 4),
+                aep=round(float(ap["var"]) if ap else 0.0, 4),
+                aep_tvar=round(float(ap["tvar"]) if ap else 0.0, 4),
+            )
+        )
+    return points
+
+
+def _ep_slice_from_event_subset(
+    *,
+    key: str,
+    label: str,
+    dimension: str,
+    trials_0: np.ndarray,
+    losses: np.ndarray,
+    num_trials: int,
+) -> PortfolioEpSlice:
+    aep_vec = np.bincount(trials_0, weights=losses, minlength=num_trials)
+    oep_vec = np.zeros(num_trials, dtype=np.float64)
+    if len(losses):
+        np.maximum.at(oep_vec, trials_0, losses)
+    aep_stats = _ep_stats_from_vector(aep_vec, PORTFOLIO_EP_RETURN_PERIODS)
+    oep_stats = _ep_stats_from_vector(oep_vec, PORTFOLIO_EP_RETURN_PERIODS)
+    ep_pts = _ep_points_from_oep_aep(oep_stats, aep_stats)
+    del aep_vec, oep_vec
+    return PortfolioEpSlice(
+        key=key,
+        label=label,
+        dimension=dimension,
+        aal=round(float(aep_stats["el"]), 4),
+        sd=round(float(aep_stats["sd"]), 4),
+        max_occ=round(float(oep_stats["max_val"]), 4),
+        max_year=round(float(aep_stats["max_val"]), 4),
+        ep_points=ep_pts,
+    )
+
+
+def _compute_portfolio_ep_splits(
+    port_events: np.ndarray,
+    yelt: YeltTable,
+) -> tuple[list[PortfolioEpPoint], list[PortfolioEpSlice], list[PortfolioEpSlice], list[PortfolioEpSlice]]:
+    """Compute live OEP/AEP/TVaR curves for Total Portfolio plus Region, Peril, and Region-Peril splits.
+
+    Streams one group at a time from the single 1D `port_events` vector so peak RAM stays minimal.
+    """
+    num_trials = yelt.num_trials
+    nz_idx = np.flatnonzero(port_events != 0.0)
+    if len(nz_idx) == 0:
+        empty_pts = [
+            PortfolioEpPoint(
+                return_period=rp,
+                probability=round(1.0 / rp, 6),
+                oep=0.0,
+                oep_tvar=0.0,
+                aep=0.0,
+                aep_tvar=0.0,
+            )
+            for rp in PORTFOLIO_EP_RETURN_PERIODS
+        ]
+        return empty_pts, [], [], []
+
+    nz_trials = (yelt.trial_ids[nz_idx] - 1).astype(np.intp, copy=False)
+    nz_rps = yelt.rp_ids[nz_idx]
+    nz_losses = port_events[nz_idx]
+
+    total_slice = _ep_slice_from_event_subset(
+        key="TOTAL",
+        label="Total Portfolio",
+        dimension="TOTAL",
+        trials_0=nz_trials,
+        losses=nz_losses,
+        num_trials=num_trials,
+    )
+
+    present_rp_ids = sorted(int(r) for r in np.unique(nz_rps) if 0 <= int(r) < len(REGION_PERILS))
+    region_groups: dict[str, list[int]] = {}
+    peril_groups: dict[str, list[int]] = {}
+    for rp_id in present_rp_ids:
+        rp_key = REGION_PERILS[rp_id]
+        region = rp_key.split("-", 1)[0]
+        peril = rp_key.rsplit("-", 1)[-1]
+        region_groups.setdefault(region, []).append(rp_id)
+        peril_groups.setdefault(peril, []).append(rp_id)
+
+    def _sort_key(s: PortfolioEpSlice) -> tuple[float, float, str]:
+        tvar250 = next((pt.aep_tvar for pt in s.ep_points if abs(pt.return_period - 250.0) < 1e-6), 0.0)
+        return (-abs(tvar250), -abs(s.aal), s.key)
+
+    by_region: list[PortfolioEpSlice] = []
+    for region, ids in region_groups.items():
+        mask = nz_rps == ids[0] if len(ids) == 1 else np.isin(nz_rps, ids)
+        if not np.any(mask):
+            continue
+        by_region.append(
+            _ep_slice_from_event_subset(
+                key=region,
+                label=_REGION_LABELS.get(region, region),
+                dimension="REGION",
+                trials_0=nz_trials[mask],
+                losses=nz_losses[mask],
+                num_trials=num_trials,
+            )
+        )
+    by_region.sort(key=_sort_key)
+
+    by_peril: list[PortfolioEpSlice] = []
+    for peril, ids in peril_groups.items():
+        mask = nz_rps == ids[0] if len(ids) == 1 else np.isin(nz_rps, ids)
+        if not np.any(mask):
+            continue
+        by_peril.append(
+            _ep_slice_from_event_subset(
+                key=peril,
+                label=_PERIL_LABELS.get(peril, peril),
+                dimension="PERIL",
+                trials_0=nz_trials[mask],
+                losses=nz_losses[mask],
+                num_trials=num_trials,
+            )
+        )
+    by_peril.sort(key=_sort_key)
+
+    by_rp: list[PortfolioEpSlice] = []
+    for rp_id in present_rp_ids:
+        rp_key = REGION_PERILS[rp_id]
+        mask = nz_rps == rp_id
+        if not np.any(mask):
+            continue
+        by_rp.append(
+            _ep_slice_from_event_subset(
+                key=rp_key,
+                label=rp_key,
+                dimension="REGION_PERIL",
+                trials_0=nz_trials[mask],
+                losses=nz_losses[mask],
+                num_trials=num_trials,
+            )
+        )
+    by_rp.sort(key=_sort_key)
+
+    del nz_idx, nz_trials, nz_rps, nz_losses
+    return total_slice.ep_points, by_region, by_peril, by_rp
+
+
 def evaluate_portfolio_rollup(
     *,
     portfolio_id: str,
@@ -895,6 +1097,7 @@ def evaluate_portfolio_rollup(
 
     ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
     rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
+    ev_by_prog: dict[str, dict[str, np.ndarray]] = {}
     internal_lineage = LineageRegistry(persist=False)
 
     # Identify cross-linked programmes so self-linked programmes can be streamed one-by-one without
@@ -911,13 +1114,35 @@ def evaluate_portfolio_rollup(
     streamed_entries: list[Any] = []
     deferred_progs: list[ProgrammeDeal] = []
     port_rip = np.zeros(yelt.num_trials, dtype=np.float64)
+    port_events = np.zeros(len(yelt.losses), dtype=np.float64)
     _empty_f64 = np.empty(0, dtype=np.float64)
 
-    def _collect_prog(prog: ProgrammeDeal, ann_map: dict[str, np.ndarray], rip_map: dict[str, np.ndarray]) -> None:
+    def _accumulate_entry_event(entry: Any, ev_map: dict[str, np.ndarray]) -> None:
+        ev_nid = getattr(entry, "event_node_id", None)
+        if not ev_nid or ev_nid not in ev_map:
+            return
+        ev = ev_map[ev_nid]
+        if len(ev) != len(port_events):
+            return
+        mult = (-1.0 if entry.is_hedge else 1.0) * float(getattr(entry, "event_scale", 1.0))
+        if abs(mult - 1.0) < 1e-12:
+            np.add(port_events, ev, out=port_events)
+        elif abs(mult + 1.0) < 1e-12:
+            np.subtract(port_events, ev, out=port_events)
+        elif abs(mult) > 1e-12:
+            np.add(port_events, ev * mult, out=port_events)
+
+    def _collect_prog(
+        prog: ProgrammeDeal,
+        ann_map: dict[str, np.ndarray],
+        rip_map: dict[str, np.ndarray],
+        ev_map: dict[str, np.ndarray],
+    ) -> None:
         if prog.programme_id in cross_ids:
             deferred_progs.append(prog)
             ann_by_prog[prog.programme_id] = ann_map
             rip_by_prog[prog.programme_id] = rip_map
+            ev_by_prog[prog.programme_id] = ev_map
         else:
             local = extract_rollup_layers(
                 [prog],
@@ -934,6 +1159,8 @@ def evaluate_portfolio_rollup(
                     else:
                         np.add(port_rip, e.rip_vec, out=port_rip)
                     e.rip_vec = _empty_f64
+                _accumulate_entry_event(e, ev_map)
+            ev_map.clear()
             streamed_entries.extend(local)
 
     # Evaluate long programmes first so any UNL retro hedge can snapshot our own UNL book
@@ -946,8 +1173,9 @@ def evaluate_portfolio_rollup(
             industry_yelt=industry_yelt,
             compute_metrics=False,
             need_events=False,
+            need_rollup_events=True,
         )
-        _collect_prog(prog, vecs["annual"][view.value], vecs["rip"][view.value])
+        _collect_prog(prog, vecs["annual"][view.value], vecs["rip"][view.value], vecs["events"][view.value])
         del vecs
         breadcrumbs.append(
             BreadcrumbStep(
@@ -987,8 +1215,9 @@ def evaluate_portfolio_rollup(
             portfolio_unl_resolver=_effective_unl_resolver,
             compute_metrics=False,
             need_events=False,
+            need_rollup_events=True,
         )
-        _collect_prog(prog, vecs["annual"][view.value], vecs["rip"][view.value])
+        _collect_prog(prog, vecs["annual"][view.value], vecs["rip"][view.value], vecs["events"][view.value])
         del vecs
         for k, h in dag_resp.manifest.input_hashes.items():
             if k.startswith("portfolio_snapshot:"):
@@ -1005,19 +1234,24 @@ def evaluate_portfolio_rollup(
         input_hashes[prog.programme_id] = prog.graph.content_hash
 
     entries = streamed_entries
+    fallback_unl_cache.clear()
     if deferred_progs:
-        entries.extend(
-            extract_rollup_layers(
-                deferred_progs,
-                ann_by_prog,
-                rip_by_prog,
-                all_programmes=all_programmes,
-                include_1x=False,
-                consume_maps=True,
-            )
+        deferred_entries = extract_rollup_layers(
+            deferred_progs,
+            ann_by_prog,
+            rip_by_prog,
+            all_programmes=all_programmes,
+            include_1x=False,
+            consume_maps=True,
         )
+        for e in deferred_entries:
+            src_pid = getattr(e, "source_programme_id", "") or e.programme_id
+            if src_pid in ev_by_prog:
+                _accumulate_entry_event(e, ev_by_prog[src_pid])
+        entries.extend(deferred_entries)
     ann_by_prog.clear()
     rip_by_prog.clear()
+    ev_by_prog.clear()
 
     m_layers = len(entries)
     layer_matrix = np.empty((m_layers, yelt.num_trials), dtype=np.float64)
@@ -1071,6 +1305,8 @@ def evaluate_portfolio_rollup(
         np.ascontiguousarray(layer_matrix, dtype=np.float64), 250.0
     )
     del layer_matrix
+    ep_curve, ep_by_region, ep_by_peril, ep_by_region_peril = _compute_portfolio_ep_splits(port_events, yelt)
+    del port_events
     _trim_memory()
     cotvar_sum_diff = abs(float(np.sum(co_tvars)) - float(port_tvar_250))
 
@@ -1197,6 +1433,10 @@ def evaluate_portfolio_rollup(
         cdf_curve=cdf_curve,
         quantiles=quantiles,
         guidelines=guidelines,
+        ep_curve=ep_curve,
+        ep_by_region=ep_by_region,
+        ep_by_peril=ep_by_peril,
+        ep_by_region_peril=ep_by_region_peril,
         layer_allocations=alloc_rows,
         manifest=manifest,
     )
@@ -1335,6 +1575,241 @@ def evaluate_portfolio_hedge_comparison(
         without_hedges=without_hedges,
         accretion=accretion,
         manifest=comparison_manifest,
+    )
+
+
+def _ep_point_by_rp(points: list[PortfolioEpPoint], rp: float) -> PortfolioEpPoint | None:
+    for pt in points:
+        if abs(pt.return_period - rp) < 1e-6:
+            return pt
+    return None
+
+
+def _build_split_deltas(
+    slices_a: list[PortfolioEpSlice],
+    slices_b: list[PortfolioEpSlice],
+    dimension: str,
+) -> list[EpSplitDeltaRow]:
+    map_a = {s.key: s for s in slices_a}
+    map_b = {s.key: s for s in slices_b}
+    all_keys = sorted(
+        set(map_a) | set(map_b),
+        key=lambda k: (
+            -max(
+                abs((_ep_point_by_rp(map_a[k].ep_points, 250.0).aep_tvar if k in map_a and _ep_point_by_rp(map_a[k].ep_points, 250.0) else 0.0)),
+                abs((_ep_point_by_rp(map_b[k].ep_points, 250.0).aep_tvar if k in map_b and _ep_point_by_rp(map_b[k].ep_points, 250.0) else 0.0)),
+            ),
+            k,
+        ),
+    )
+    rows: list[EpSplitDeltaRow] = []
+    for key in all_keys:
+        sa = map_a.get(key)
+        sb = map_b.get(key)
+        label = (sa or sb).label if (sa or sb) else key
+        aal_a = sa.aal if sa else 0.0
+        aal_b = sb.aal if sb else 0.0
+        pt100_a = _ep_point_by_rp(sa.ep_points, 100.0) if sa else None
+        pt100_b = _ep_point_by_rp(sb.ep_points, 100.0) if sb else None
+        pt250_a = _ep_point_by_rp(sa.ep_points, 250.0) if sa else None
+        pt250_b = _ep_point_by_rp(sb.ep_points, 250.0) if sb else None
+
+        oep100_a = pt100_a.oep if pt100_a else 0.0
+        oep100_b = pt100_b.oep if pt100_b else 0.0
+        oep250_a = pt250_a.oep if pt250_a else 0.0
+        oep250_b = pt250_b.oep if pt250_b else 0.0
+        aep100_a = pt100_a.aep if pt100_a else 0.0
+        aep100_b = pt100_b.aep if pt100_b else 0.0
+        aep250_a = pt250_a.aep if pt250_a else 0.0
+        aep250_b = pt250_b.aep if pt250_b else 0.0
+        tvar250_a = pt250_a.aep_tvar if pt250_a else 0.0
+        tvar250_b = pt250_b.aep_tvar if pt250_b else 0.0
+
+        rows.append(
+            EpSplitDeltaRow(
+                key=key,
+                label=label,
+                dimension=dimension,
+                aal_a=round(aal_a, 4),
+                aal_b=round(aal_b, 4),
+                delta_aal=round(aal_a - aal_b, 4),
+                oep_100_a=round(oep100_a, 4),
+                oep_100_b=round(oep100_b, 4),
+                delta_oep_100=round(oep100_a - oep100_b, 4),
+                oep_250_a=round(oep250_a, 4),
+                oep_250_b=round(oep250_b, 4),
+                delta_oep_250=round(oep250_a - oep250_b, 4),
+                aep_100_a=round(aep100_a, 4),
+                aep_100_b=round(aep100_b, 4),
+                delta_aep_100=round(aep100_a - aep100_b, 4),
+                aep_250_a=round(aep250_a, 4),
+                aep_250_b=round(aep250_b, 4),
+                delta_aep_250=round(aep250_a - aep250_b, 4),
+                tvar_250_a=round(tvar250_a, 4),
+                tvar_250_b=round(tvar250_b, 4),
+                delta_tvar_250=round(tvar250_a - tvar250_b, 4),
+            )
+        )
+    return rows
+
+
+def evaluate_portfolio_comparison(
+    *,
+    label_a: str,
+    programmes_a: list[ProgrammeDeal],
+    view_a: ViewOfRisk,
+    total_capital_a: float,
+    include_hedges_a: bool,
+    label_b: str,
+    programmes_b: list[ProgrammeDeal],
+    view_b: ViewOfRisk,
+    total_capital_b: float,
+    include_hedges_b: bool,
+    yelt: YeltTable,
+    lineage: LineageRegistry,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
+    industry_yelt: YeltTable | None = None,
+    portfolio_unl_resolver: Callable[[str | None, ViewOfRisk], tuple[np.ndarray, str]] | None = None,
+) -> PortfolioCompareResponse:
+    """Compare any two portfolio slices (e.g., YoY 2027 vs 2026, Plan vs Current, Net vs Gross) sequentially."""
+    rollup_a = evaluate_portfolio_rollup(
+        portfolio_id="compare-a",
+        portfolio_name=label_a,
+        programmes=programmes_a,
+        yelt=yelt,
+        view=view_a,
+        total_capital=total_capital_a,
+        lineage=lineage,
+        all_programmes=all_programmes,
+        industry_yelt=industry_yelt,
+        portfolio_unl_resolver=portfolio_unl_resolver,
+        include_hedges=include_hedges_a,
+    )
+    rollup_b = evaluate_portfolio_rollup(
+        portfolio_id="compare-b",
+        portfolio_name=label_b,
+        programmes=programmes_b,
+        yelt=yelt,
+        view=view_b,
+        total_capital=total_capital_b,
+        lineage=lineage,
+        all_programmes=all_programmes,
+        industry_yelt=industry_yelt,
+        portfolio_unl_resolver=portfolio_unl_resolver,
+        include_hedges=include_hedges_b,
+    )
+
+    if rollup_a.currency != rollup_b.currency:
+        raise ValueError(
+            f"Cannot compare portfolios with different currencies without FX_CONVERSION: "
+            f"{rollup_a.currency} vs {rollup_b.currency}"
+        )
+
+    ep_deltas: list[EpDeltaPoint] = []
+    for rp in PORTFOLIO_EP_RETURN_PERIODS:
+        pa = _ep_point_by_rp(rollup_a.ep_curve, rp)
+        pb = _ep_point_by_rp(rollup_b.ep_curve, rp)
+        oep_a = pa.oep if pa else 0.0
+        oep_b = pb.oep if pb else 0.0
+        oep_tvar_a = pa.oep_tvar if pa else 0.0
+        oep_tvar_b = pb.oep_tvar if pb else 0.0
+        aep_a = pa.aep if pa else 0.0
+        aep_b = pb.aep if pb else 0.0
+        aep_tvar_a = pa.aep_tvar if pa else 0.0
+        aep_tvar_b = pb.aep_tvar if pb else 0.0
+        ep_deltas.append(
+            EpDeltaPoint(
+                return_period=rp,
+                probability=round(1.0 / rp, 6),
+                oep_a=round(oep_a, 4),
+                oep_b=round(oep_b, 4),
+                delta_oep=round(oep_a - oep_b, 4),
+                oep_tvar_a=round(oep_tvar_a, 4),
+                oep_tvar_b=round(oep_tvar_b, 4),
+                delta_oep_tvar=round(oep_tvar_a - oep_tvar_b, 4),
+                aep_a=round(aep_a, 4),
+                aep_b=round(aep_b, 4),
+                delta_aep=round(aep_a - aep_b, 4),
+                aep_tvar_a=round(aep_tvar_a, 4),
+                aep_tvar_b=round(aep_tvar_b, 4),
+                delta_aep_tvar=round(aep_tvar_a - aep_tvar_b, 4),
+            )
+        )
+
+    pt100_d = next((d for d in ep_deltas if abs(d.return_period - 100.0) < 1e-6), None)
+    pt250_d = next((d for d in ep_deltas if abs(d.return_period - 250.0) < 1e-6), None)
+
+    delta = PortfolioDeltaSummary(
+        programme_count_a=len(programmes_a),
+        programme_count_b=len(programmes_b),
+        layer_count_a=len(rollup_a.layer_allocations),
+        layer_count_b=len(rollup_b.layer_allocations),
+        delta_net_premium_m=round(rollup_a.net_premium - rollup_b.net_premium, 4),
+        delta_gross_premium_m=round(rollup_a.gross_premium - rollup_b.gross_premium, 4),
+        delta_expected_loss_m=round(rollup_a.expected_loss - rollup_b.expected_loss, 4),
+        delta_expected_profit_m=round(rollup_a.expected_profit - rollup_b.expected_profit, 4),
+        delta_mean_roc_pct=round(rollup_a.mean_roc_pct - rollup_b.mean_roc_pct, 2),
+        delta_no_event_roc_pct=round(rollup_a.no_event_roc_pct - rollup_b.no_event_roc_pct, 2),
+        delta_break_even_prob_pct=round(rollup_a.break_even_prob_pct - rollup_b.break_even_prob_pct, 2),
+        delta_return_on_tvar_pct=round(rollup_a.return_on_tvar_pct - rollup_b.return_on_tvar_pct, 2),
+        delta_var_250_m=round(rollup_a.portfolio_var_250 - rollup_b.portfolio_var_250, 4),
+        delta_tvar_250_m=round(rollup_a.portfolio_tvar_250 - rollup_b.portfolio_tvar_250, 4),
+        delta_oep_100_m=pt100_d.delta_oep if pt100_d else 0.0,
+        delta_oep_250_m=pt250_d.delta_oep if pt250_d else 0.0,
+        delta_aep_100_m=pt100_d.delta_aep if pt100_d else 0.0,
+        delta_aep_250_m=pt250_d.delta_aep if pt250_d else 0.0,
+    )
+
+    region_deltas = _build_split_deltas(rollup_a.ep_by_region, rollup_b.ep_by_region, "REGION")
+    peril_deltas = _build_split_deltas(rollup_a.ep_by_peril, rollup_b.ep_by_peril, "PERIL")
+    rp_deltas = _build_split_deltas(rollup_a.ep_by_region_peril, rollup_b.ep_by_region_peril, "REGION_PERIL")
+
+    manifest = lineage.record_manifest(
+        run_type="PORTFOLIO_COMPARE",
+        input_hashes={
+            "portfolio_a": rollup_a.manifest.output_hash,
+            "portfolio_b": rollup_b.manifest.output_hash,
+        },
+        parameters={
+            "label_a": label_a,
+            "label_b": label_b,
+            "view_a": view_a.value,
+            "view_b": view_b.value,
+            "total_capital_a": total_capital_a,
+            "total_capital_b": total_capital_b,
+            "include_hedges_a": include_hedges_a,
+            "include_hedges_b": include_hedges_b,
+            "currency": rollup_a.currency,
+        },
+        output_payload=delta.model_dump(by_alias=True),
+        breadcrumb=[
+            BreadcrumbStep(
+                entity_type="PORTFOLIO_ROLLUP",
+                entity_id=rollup_a.manifest.manifest_id,
+                label=label_a,
+                content_hash=rollup_a.manifest.output_hash,
+            ),
+            BreadcrumbStep(
+                entity_type="PORTFOLIO_ROLLUP",
+                entity_id=rollup_b.manifest.manifest_id,
+                label=label_b,
+                content_hash=rollup_b.manifest.output_hash,
+            ),
+        ],
+    )
+
+    return PortfolioCompareResponse(
+        currency=rollup_a.currency,
+        portfolio_a=rollup_a,
+        portfolio_b=rollup_b,
+        programme_count_a=len(programmes_a),
+        programme_count_b=len(programmes_b),
+        delta=delta,
+        ep_deltas=ep_deltas,
+        region_deltas=region_deltas,
+        peril_deltas=peril_deltas,
+        region_peril_deltas=rp_deltas,
+        manifest=manifest,
     )
 
 

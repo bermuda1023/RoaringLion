@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { API_BASE, api, fetchJson } from './api/client';
-import { BreadcrumbBar } from './components/BreadcrumbBar';
 import { NavIcon } from './components/NavIcon';
 import { fmtMoneyM, fmtNum } from './utils/format';
 import { AllocationAndBranches } from './pages/AllocationAndBranches';
@@ -53,7 +52,7 @@ const NAV_GROUPS: { label: string; items: { key: TabKey; label: string; icon: st
   },
   {
     label: 'Governance',
-    items: [{ key: 'benchmarks', label: 'Lineage & Audit', icon: 'shield' }],
+    items: [{ key: 'benchmarks', label: 'Audit & Benchmarks', icon: 'shield' }],
   },
 ];
 
@@ -61,13 +60,13 @@ const PAGE_INFO: Record<TabKey, { title: string; subtitle: string }> = {
   cms: { title: 'Contract Management', subtitle: 'Programme ledger (Treaty, ILW & Retro), dossiers, and renewal history' },
   dag: { title: 'Structuring Studio', subtitle: 'Build layer structures and review loss statistics' },
   deterministic: { title: 'Deterministic Scenarios', subtitle: 'Recovery and erosion statements for named events' },
-  portfolio: { title: 'Portfolio Returns', subtitle: 'Fund returns, hedge accretion, risk appetite, and capital allocation' },
+  portfolio: { title: 'Portfolio Returns', subtitle: 'Live EP curves, return-period analytics, timeline comparisons, and capital allocation' },
   optimizer: { title: 'Portfolio Optimizer', subtitle: 'Explore efficient frontiers with layer constraints' },
   allocation: { title: 'Retro & Scenarios', subtitle: 'Retrocession, branching, and historical backtests' },
   simsets: { title: 'Simulation Sets', subtitle: 'Event loss tables and synthetic catalogues' },
   burnclaims: { title: 'Burn & Claims', subtitle: 'Experience burn and claims development' },
   modelsops: { title: 'Models & Operations', subtitle: 'Model jobs, exposure sync, and fund ops' },
-  benchmarks: { title: 'Lineage & Audit', subtitle: 'Run history, freshness, and performance' },
+  benchmarks: { title: 'Audit & Benchmarks', subtitle: 'Run history, freshness, and performance' },
 };
 
 const DEFAULT_LOSSES: DeterministicLossRow[] = [
@@ -369,7 +368,6 @@ export function App() {
                     </table></div>
                   </div>
                 ))}
-                <BreadcrumbBar manifest={detMut.data.manifest} />
               </div>
             )}
           </>

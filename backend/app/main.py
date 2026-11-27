@@ -18,6 +18,7 @@ from app.engine.ilw import evaluate_ilw_trial_payouts, price_ilw_with_portfolio_
 from app.engine.pricing_link import extract_rollup_layers
 from app.engine.slice_runner import (
     evaluate_deterministic_run,
+    evaluate_portfolio_comparison,
     evaluate_portfolio_hedge_comparison,
     evaluate_portfolio_rollup,
     evaluate_programme_dag,
@@ -29,6 +30,8 @@ from app.models.domain import (
     DeterministicRunRequest,
     DeterministicRunResponse,
     GraphSpec,
+    PortfolioCompareRequest,
+    PortfolioCompareResponse,
     PortfolioHedgeComparisonResponse,
     PortfolioRollupResponse,
     ProgrammeDeal,
@@ -714,6 +717,207 @@ def rollup_cms_slice(req: SliceRollupRequest) -> PortfolioRollupResponse:
             industry_yelt=ind_yelt,
             portfolio_unl_resolver=_make_portfolio_unl_resolver(),
             include_hedges=req.include_hedges,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/portfolio/compare/options")
+def get_portfolio_compare_options() -> dict:
+    """Return available treaty years, statuses, and data-driven comparison presets (YoY, Current vs Plan, etc.)."""
+    all_contracts = CONTRACT_STORE.list_contracts()
+    years = sorted({c.treaty_year for c in all_contracts}, reverse=True)
+    status_counts: dict[str, int] = {}
+    for c in all_contracts:
+        status_counts[c.status.value] = status_counts.get(c.status.value, 0) + 1
+    statuses_out = [
+        {"status": s.value, "count": status_counts.get(s.value, 0)}
+        for s in ProgrammeStatus
+        if status_counts.get(s.value, 0) > 0
+    ]
+    renewal_periods = sorted({c.renewal_period for c in all_contracts if c.renewal_period})
+    region_perils = sorted({rp for c in all_contracts for rp in c.region_perils})
+
+    presets: list[dict] = []
+    if years:
+        bound_years = sorted(
+            {c.treaty_year for c in all_contracts if c.status in (ProgrammeStatus.BOUND, ProgrammeStatus.BOUND_FOR_OPS)},
+            reverse=True,
+        )
+        latest_year = bound_years[0] if bound_years else years[0]
+        latest_statuses = {c.status.value for c in all_contracts if c.treaty_year == latest_year}
+        bound_statuses = [s for s in ("BOUND", "BOUND_FOR_OPS") if s in latest_statuses] or [
+            next(iter(sorted(latest_statuses)))
+        ]
+        plan_statuses = [
+            s
+            for s in ("BOUND", "BOUND_FOR_OPS", "FIRM_ORDER", "AUTHORIZED", "QUOTED", "PLANNED")
+            if s in latest_statuses
+        ]
+        if len(plan_statuses) > len(bound_statuses):
+            presets.append({
+                "id": "plan-vs-current",
+                "name": f"Plan vs Current ({latest_year})",
+                "description": f"{latest_year} Bound + Authorized + Quoted vs {latest_year} Bound",
+                "portfolioA": {
+                    "label": f"{latest_year} Plan (Bound + Pipeline)",
+                    "treatyYears": [latest_year],
+                    "statuses": plan_statuses,
+                    "includeHedges": True,
+                },
+                "portfolioB": {
+                    "label": f"{latest_year} Current (Bound)",
+                    "treatyYears": [latest_year],
+                    "statuses": bound_statuses,
+                    "includeHedges": True,
+                },
+            })
+        prior_years = [y for y in years if y < latest_year]
+        if prior_years:
+            prev_year = prior_years[0]
+            prev_statuses = sorted({c.status.value for c in all_contracts if c.treaty_year == prev_year})
+            presets.append({
+                "id": "yoy-book",
+                "name": f"YoY Book ({latest_year} vs {prev_year})",
+                "description": f"{latest_year} Bound book vs {prev_year} Prior Underwriting Year",
+                "portfolioA": {
+                    "label": f"{latest_year} Bound Book",
+                    "treatyYears": [latest_year],
+                    "statuses": bound_statuses,
+                    "includeHedges": True,
+                },
+                "portfolioB": {
+                    "label": f"{prev_year} Prior UY",
+                    "treatyYears": [prev_year],
+                    "statuses": prev_statuses,
+                    "includeHedges": True,
+                },
+            })
+            by_id = {c.programme_id: c for c in all_contracts}
+            matched_curr: list[str] = []
+            matched_prev: list[str] = []
+            for c in all_contracts:
+                if (
+                    c.treaty_year == latest_year
+                    and c.status.value in bound_statuses
+                    and c.prior_contract_id
+                    and c.prior_contract_id in by_id
+                ):
+                    prior = by_id[c.prior_contract_id]
+                    if prior.treaty_year == prev_year and prior.status.value in prev_statuses:
+                        matched_curr.append(c.programme_id)
+                        matched_prev.append(prior.programme_id)
+            if matched_curr:
+                presets.append({
+                    "id": "yoy-renewals",
+                    "name": f"YoY Renewals ({len(matched_curr)} Matched)",
+                    "description": f"Same-store comparison of {len(matched_curr)} renewed cedents ({latest_year} vs {prev_year})",
+                    "portfolioA": {
+                        "label": f"{latest_year} Renewals ({len(matched_curr)})",
+                        "treatyYears": [latest_year],
+                        "statuses": bound_statuses,
+                        "programmeIds": matched_curr,
+                        "includeHedges": True,
+                    },
+                    "portfolioB": {
+                        "label": f"{prev_year} Prior Renewals ({len(matched_prev)})",
+                        "treatyYears": [prev_year],
+                        "statuses": prev_statuses,
+                        "programmeIds": matched_prev,
+                        "includeHedges": True,
+                    },
+                })
+        presets.append({
+            "id": "net-vs-gross",
+            "name": f"Net vs Gross ({latest_year} Bound)",
+            "description": f"{latest_year} Bound Net of Hedges vs Gross (Long Only)",
+            "portfolioA": {
+                "label": f"{latest_year} Bound (Net)",
+                "treatyYears": [latest_year],
+                "statuses": bound_statuses,
+                "includeHedges": True,
+            },
+            "portfolioB": {
+                "label": f"{latest_year} Bound (Gross)",
+                "treatyYears": [latest_year],
+                "statuses": bound_statuses,
+                "includeHedges": False,
+            },
+        })
+
+    return {
+        "treatyYears": years,
+        "statuses": statuses_out,
+        "renewalPeriods": renewal_periods,
+        "regionPerils": region_perils,
+        "presets": presets,
+        "contracts": [
+            {
+                "programmeId": c.programme_id,
+                "treatyYear": c.treaty_year,
+                "status": c.status.value,
+                "direction": c.direction.value,
+                "isHedge": is_hedge_direction(c.direction),
+                "inceptionDate": c.inception_date or f"{c.treaty_year}-01-01",
+                "renewalPeriod": c.renewal_period,
+            }
+            for c in all_contracts
+        ],
+    }
+
+
+@app.post("/api/portfolio/compare", response_model=PortfolioCompareResponse)
+def compare_portfolios(req: PortfolioCompareRequest) -> PortfolioCompareResponse:
+    """Compare two portfolio slices (timelines, statuses, hedge basis, or views) side by side."""
+    all_contracts = CONTRACT_STORE.list_contracts()
+    all_deals = {c.programme_id: contract_to_programme_deal(c) for c in all_contracts}
+
+    def _select_for(spec, side_name: str) -> list[ProgrammeDeal]:
+        slice_req = SliceRollupRequest(
+            portfolio_name=spec.label,
+            view=spec.view,
+            total_capital=spec.total_capital,
+            include_hedges=spec.include_hedges,
+            statuses=spec.statuses,
+            treaty_years=spec.treaty_years,
+            renewal_periods=spec.renewal_periods,
+            inception_from=spec.inception_from,
+            inception_to=spec.inception_to,
+            region_perils=spec.region_perils,
+            programme_ids=spec.programme_ids,
+        )
+        matched = CONTRACT_STORE.select_slice(slice_req)
+        if not spec.include_hedges:
+            matched = [c for c in matched if not is_hedge_direction(c.direction)]
+        if not matched:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{side_name} ('{spec.label}') matched 0 contracts. Adjust treaty year, date range, or status filters.",
+            )
+        return [all_deals[c.programme_id] for c in matched]
+
+    progs_a = _select_for(req.portfolio_a, "Portfolio A")
+    progs_b = _select_for(req.portfolio_b, "Portfolio B")
+
+    yelt = SIM_STORE.get_yelt(_base_yelt.sim_set_id)
+    ind_yelt = SIM_STORE.get_yelt(_ind_yelt.sim_set_id)
+    try:
+        return evaluate_portfolio_comparison(
+            label_a=req.portfolio_a.label,
+            programmes_a=progs_a,
+            view_a=req.portfolio_a.view,
+            total_capital_a=req.portfolio_a.total_capital,
+            include_hedges_a=req.portfolio_a.include_hedges,
+            label_b=req.portfolio_b.label,
+            programmes_b=progs_b,
+            view_b=req.portfolio_b.view,
+            total_capital_b=req.portfolio_b.total_capital,
+            include_hedges_b=req.portfolio_b.include_hedges,
+            yelt=yelt,
+            lineage=LINEAGE,
+            all_programmes=all_deals,
+            industry_yelt=ind_yelt,
+            portfolio_unl_resolver=_make_portfolio_unl_resolver(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

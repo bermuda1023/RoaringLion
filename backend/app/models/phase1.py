@@ -447,7 +447,10 @@ class SliceRollupRequest(CamelModel):
     directions: list[ContractDirection] | None = None
     underwriters: list[str] | None = None
     offices: list[str] | None = None
+    treaty_years: list[int] | None = None
     renewal_periods: list[str] | None = None
+    inception_from: str | None = None
+    inception_to: str | None = None
     region_perils: list[str] | None = None
     programme_ids: list[str] | None = None
 
