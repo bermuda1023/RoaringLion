@@ -361,6 +361,8 @@ def _evaluate_for_rollup(
         views=[view],
         industry_yelt=industry_yelt,
         portfolio_unl_resolver=portfolio_unl_resolver,
+        compute_metrics=False,
+        need_events=False,
     )
     if snapshot_hashes_out is not None:
         for k, h in dag_resp.manifest.input_hashes.items():
@@ -403,6 +405,8 @@ def _evaluate_for_rollup(
                 views=[view],
                 industry_yelt=industry_yelt,
                 portfolio_unl_resolver=portfolio_unl_resolver,
+                compute_metrics=False,
+                need_events=False,
             )
         ann[node_id] = runs[at_full]["annual"][view.value][node_id]
         rip[node_id] = runs[at_full]["rip"][view.value][node_id]
@@ -740,6 +744,19 @@ def _compute_portfolio_snapshot(
             )
         )
 
+    name_counts: dict[str, int] = {}
+    for it in items:
+        name_counts[it["layer_name"]] = name_counts.get(it["layer_name"], 0) + 1
+    seen_stack_labels: set[str] = set()
+    stack_labels: list[str] = []
+    for it in items:
+        base = it["layer_name"]
+        label = f"{it['cedent_name']} · {base}" if name_counts[base] > 1 else base
+        if label in seen_stack_labels:
+            label = f"{label} ({it['layer_key']})"
+        seen_stack_labels.add(label)
+        stack_labels.append(label)
+
     rp_stack: list[ReturnPeriodStackRow] = []
     for rp in STACK_RETURN_PERIODS:
         _, rp_tvar, rp_co = by_rp[rp]
@@ -747,7 +764,7 @@ def _compute_portfolio_snapshot(
             ReturnPeriodStackRow(
                 return_period=rp,
                 total_loss_m=round(float(rp_tvar), 4),
-                by_layer={items[i]["layer_name"]: round(float(rp_co[i]), 4) for i in range(m)},
+                by_layer={stack_labels[i]: round(float(rp_co[i]), 4) for i in range(m)},
             )
         )
 

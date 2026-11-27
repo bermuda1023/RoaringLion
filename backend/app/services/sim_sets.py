@@ -66,7 +66,13 @@ def build_aligned_industry_catalog(base_yelt: YeltTable, seed: int = 20269999) -
     rng = np.random.default_rng(seed)
     # Market-share inverse multipliers converting cedent $M loss to industry $B loss
     # e.g., $100M cedent FL wind loss ~ $50B industry event on average
-    rp_scale_to_bn = np.array([0.48, 0.42, 0.38, 0.55, 0.50, 0.32], dtype=np.float64)
+    rp_scale_to_bn = np.array(
+        [
+            0.48, 0.42, 0.38, 0.55, 0.50, 0.32,  # original 6
+            0.40, 0.45, 0.25, 0.28, 0.36, 0.30, 0.35,  # expanded 7
+        ],
+        dtype=np.float64,
+    )
     scales = rp_scale_to_bn[np.clip(base_yelt.rp_ids, 0, len(rp_scale_to_bn) - 1)]
     # LogNormal basis noise (mean ~ 1.0, CV ~ 22%) so indemnity vs index has realistic basis risk
     basis_noise = rng.lognormal(mean=-0.024, sigma=0.22, size=len(base_yelt.losses))
@@ -115,13 +121,17 @@ class SimSetStore:
             base_rec = db.get(SimSetRecord, "sim-synth-cat-v1-100k")
             ind_rec = db.get(SimSetRecord, "ind-synth-cat-v1-100k")
 
-            if base_rec and Path(base_rec.parquet_path).exists():
+            base_rps = set(json.loads(base_rec.region_perils_json or "[]")) if base_rec else set()
+            ind_rps = set(json.loads(ind_rec.region_perils_json or "[]")) if ind_rec else set()
+            expected_rps = set(REGION_PERILS)
+
+            if base_rec and Path(base_rec.parquet_path).exists() and expected_rps.issubset(base_rps):
                 base_yelt = self.get_yelt(base_rec.sim_set_id)
             else:
                 base_yelt = generate_synthetic_sim_set(num_trials=num_trials)
                 self._persist(db, base_yelt, SimSetFormat.SYNTHETIC, is_industry=False)
 
-            if ind_rec and Path(ind_rec.parquet_path).exists():
+            if ind_rec and Path(ind_rec.parquet_path).exists() and expected_rps.issubset(ind_rps):
                 ind_yelt = self.get_yelt(ind_rec.sim_set_id)
             else:
                 ind_yelt = build_aligned_industry_catalog(base_yelt)
