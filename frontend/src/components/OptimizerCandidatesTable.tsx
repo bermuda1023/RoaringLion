@@ -26,7 +26,13 @@ export function listedLayers(page: OptimizerCandidatesPage | undefined): Optimiz
   return [...page.layers, ...(page.retroCandidate && !page.search ? [page.retroCandidate] : [])];
 }
 
+/** Longest search the candidates endpoint accepts. */
+const MAX_SEARCH_LENGTH = 120;
+
 function emptyMessage(page: OptimizerCandidatesPage): string {
+  if (page.matchedProgrammes > 0 && page.programmeIds.length === 0) {
+    return 'This page is past the last programme. Go back a page.';
+  }
   if (page.matchedProgrammes > 0) return 'The programmes on this page have no layer that rolls up into a portfolio.';
   if (page.search) return `No deal in the selected statuses matches “${page.search}”.`;
   return 'No deal has a selected status. Tick another status above.';
@@ -34,6 +40,11 @@ function emptyMessage(page: OptimizerCandidatesPage): string {
 
 interface OptimizerCandidatesTableProps {
   page: OptimizerCandidatesPage | undefined;
+  /** True while `page` is the previous answer, shown until the one for the current filter arrives. */
+  isPreviousPage: boolean;
+  /** Offset and page size of the request in flight or shown, so paging never starts from a stale page. */
+  offset: number;
+  pageSize: number;
   isFetching: boolean;
   error: Error | null;
   onRetry: () => void;
@@ -47,6 +58,9 @@ interface OptimizerCandidatesTableProps {
 /** The deals in the portfolio, one page of programmes at a time, with each layer's participation bounds. */
 export function OptimizerCandidatesTable({
   page,
+  isPreviousPage,
+  offset,
+  pageSize,
   isFetching,
   error,
   onRetry,
@@ -59,8 +73,8 @@ export function OptimizerCandidatesTable({
   const rows = listedLayers(page);
   const shown = page?.programmeIds.length ?? 0;
   const matched = page?.matchedProgrammes ?? 0;
-  const offset = page?.offset ?? 0;
-  const limit = page?.limit ?? 0;
+  const firstShown = page?.offset ?? 0;
+  const canPage = !!page && !isPreviousPage;
 
   return (
     <>
@@ -69,6 +83,7 @@ export function OptimizerCandidatesTable({
           type="search"
           aria-label="Search deals"
           placeholder="Search cedent, programme, broker or id"
+          maxLength={MAX_SEARCH_LENGTH}
           value={search}
           onChange={(e) => onSearch(e.target.value)}
         />
@@ -79,22 +94,24 @@ export function OptimizerCandidatesTable({
               : 'Loading deals…'
             : matched === 0
               ? 'No programmes'
-              : `Programmes ${fmtInt(offset + 1)}–${fmtInt(offset + shown)} of ${fmtInt(matched)} · ${fmtInt(page.layers.length)} ${page.layers.length === 1 ? 'layer' : 'layers'}`}
+              : shown === 0
+                ? `No programmes on this page · ${fmtInt(matched)} in total`
+                : `Programmes ${fmtInt(firstShown + 1)}–${fmtInt(firstShown + shown)} of ${fmtInt(matched)} · ${fmtInt(page.layers.length)} ${page.layers.length === 1 ? 'layer' : 'layers'}`}
           {isFetching && page ? ' · updating…' : ''}
         </span>
         <button
           type="button"
           className="btn btn-ghost"
-          onClick={() => onPage(Math.max(0, offset - limit))}
-          disabled={!page || offset === 0}
+          onClick={() => onPage(Math.max(0, offset - pageSize))}
+          disabled={!canPage || offset === 0}
         >
           Previous
         </button>
         <button
           type="button"
           className="btn btn-ghost"
-          onClick={() => onPage(offset + limit)}
-          disabled={!page || offset + limit >= matched}
+          onClick={() => onPage(offset + pageSize)}
+          disabled={!canPage || offset + pageSize >= matched}
         >
           Next
         </button>

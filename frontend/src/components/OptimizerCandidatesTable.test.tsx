@@ -63,6 +63,9 @@ function page(over: Partial<OptimizerCandidatesPage> = {}): OptimizerCandidatesP
 function renderTable(over: Partial<Parameters<typeof OptimizerCandidatesTable>[0]> = {}) {
   const props = {
     page: page(),
+    isPreviousPage: false,
+    offset: 25,
+    pageSize: 25,
     isFetching: false,
     error: null,
     onRetry: vi.fn(),
@@ -101,9 +104,32 @@ describe('OptimizerCandidatesTable', () => {
   });
 
   it('disables paging at either end', () => {
-    renderTable({ page: page({ offset: 0, matchedProgrammes: 2 }) });
+    renderTable({ page: page({ offset: 0, matchedProgrammes: 2 }), offset: 0 });
     expect((screen.getByRole('button', { name: 'Previous' }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: 'Next' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('does not page from the previous answer while the one for a new filter is loading', () => {
+    // The filter just changed: the request in flight is for offset 0, the rows shown are still page 2.
+    renderTable({ isPreviousPage: true, offset: 0 });
+    expect((screen.getByRole('button', { name: 'Previous' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Next' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('lets the user step back from a page past the last programme', () => {
+    const props = renderTable({
+      page: page({ offset: 50, matchedProgrammes: 20, programmeIds: [], layers: [], retroCandidate: null }),
+      offset: 50,
+    });
+    expect(screen.getByText(/No programmes on this page · 20 in total/)).toBeTruthy();
+    expect(screen.getByText(/past the last programme/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
+    expect(props.onPage).toHaveBeenLastCalledWith(25);
+  });
+
+  it('caps the search at the length the server accepts', () => {
+    renderTable();
+    expect((screen.getByRole('searchbox', { name: 'Search deals' }) as HTMLInputElement).maxLength).toBe(120);
   });
 
   it('reports what the user types in the search box', () => {
@@ -113,7 +139,7 @@ describe('OptimizerCandidatesTable', () => {
   });
 
   it('explains an empty search result and keeps the hedge candidate out of deal searches', () => {
-    renderTable({ page: page({ search: 'nobody', layers: [], programmeIds: [], matchedProgrammes: 0, offset: 0 }) });
+    renderTable({ page: page({ search: 'nobody', layers: [], programmeIds: [], matchedProgrammes: 0, offset: 0 }), offset: 0 });
     expect(screen.getByText(/No deal in the selected statuses matches “nobody”/)).toBeTruthy();
     expect(screen.getByText('No programmes')).toBeTruthy();
     expect(screen.queryByText('ILW Market Hedge')).toBeNull();

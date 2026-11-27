@@ -16,7 +16,8 @@ from app.engine.optimizer import (
 )
 from app.engine.slice_runner import evaluate_programme_dag
 from app.main import CONTRACT_STORE, SIM_STORE, _base_yelt, _ind_yelt, app
-from app.models.enums import ProgrammeStatus, StructureType, ViewOfRisk
+from app.models.domain import GraphEdgeSpec, GraphNodeSpec, ProgrammeDeal
+from app.models.enums import NodeType, ProgrammeStatus, StructureType, ViewOfRisk
 from app.services.contracts import contract_to_programme_deal
 from app.services.lineage import LineageRegistry
 
@@ -141,6 +142,10 @@ def test_manifest_records_the_statuses_asked_for_and_the_ones_used(deals):
     default = client.post("/api/optimizer/solve", json={"mode": "CURRENT"}).json()["manifest"]["parameters"]
     assert default["included_statuses"] is None
     assert default["effective_statuses"] == ["QUOTED", "FIRM_ORDER", "BOUND"]
+
+    explicit = client.post("/api/optimizer/solve", json={"mode": "CURRENT", "includedStatuses": ["NTU", "BOUND"]})
+    assert explicit.json()["manifest"]["parameters"]["included_statuses"] == ["BOUND", "NTU"]
+    assert explicit.json()["manifest"]["parameters"]["effective_statuses"] == ["BOUND", "NTU"]
 
     explored = _explore(mode="CURRENT", includedStatuses=["NTU", "BOUND"])["manifest"]["parameters"]
     assert explored["included_statuses"] == ["BOUND", "NTU"]
@@ -274,6 +279,153 @@ def test_restating_a_zero_line_layer_leaves_the_rest_of_the_programme_alone():
     assert shares[zero_layer] == 1.0 and shares[held_layer] == 0.5
     # The stored programme is untouched.
     assert CONTRACT_STORE.get_contract(full["programmeId"]).graph == programme.graph
+
+
+class _TwoLayerDeal:
+    """A stored deal with layer `zero` (20 xs 40, premium 3) at a 0% line and layer `held` (20 xs 60,
+    premium 2) at 50%, plus helpers to reshape its graph in memory and read what the optimizer builds."""
+
+    def __init__(self) -> None:
+        full = _create_full(
+            "Shapes",
+            "DECLINED",
+            layers=[
+                {"limit": 20, "attachment": 40, "depositPremium": 3.0, "signedLine": 0.0},
+                {"limit": 20, "attachment": 60, "depositPremium": 2.0, "signedLine": 0.5},
+            ],
+        )
+        self.deal = contract_to_programme_deal(CONTRACT_STORE.get_contract(full["programmeId"]))
+        self.zero, self.held = [n.node_id for n in self.deal.graph.nodes if n.node_type == NodeType.OCC_XL]
+        self.filter = next(n.node_id for n in self.deal.graph.nodes if n.node_type == NodeType.REGION_PERIL_FILTER)
+        self.yelt, self.ind_yelt = _yelts()
+        # True 100% expected loss of each layer, from the graph with both layers at a 100% line.
+        at_full = self.annual(self.reshape(shares={self.zero: 1.0, self.held: 1.0}))
+        self.el_zero, self.el_held = float(at_full[self.zero].mean()), float(at_full[self.held].mean())
+        assert self.el_zero > 0.1 and self.el_held > 0.1
+
+    def reshape(
+        self, *, shares=None, params=None, drop_nodes=(), drop_edges=(), add_nodes=(), add_edges=(), **deal_fields
+    ) -> ProgrammeDeal:
+        changes = {node_id: dict(extra) for node_id, extra in (params or {}).items()}
+        for node_id, share in (shares or {}).items():
+            changes.setdefault(node_id, {})["placedShare"] = share
+        nodes = [
+            n.model_copy(update={"params": {**n.params, **changes[n.node_id]}}) if n.node_id in changes else n
+            for n in self.deal.graph.nodes
+            if n.node_id not in drop_nodes
+        ]
+        edges = [
+            e
+            for e in self.deal.graph.edges
+            if (e.source, e.target) not in drop_edges and e.source not in drop_nodes and e.target not in drop_nodes
+        ]
+        edges += [
+            GraphEdgeSpec(edge_id=f"e-test-{i}", source=src, target=dst, sign=1, weight=1.0)
+            for i, (src, dst) in enumerate(add_edges)
+        ]
+        graph = self.deal.graph.model_copy(update={"nodes": [*nodes, *add_nodes], "edges": edges})
+        return self.deal.model_copy(update={"graph": graph, **deal_fields})
+
+    def annual(self, deal: ProgrammeDeal) -> dict:
+        _, out = evaluate_programme_dag(deal, self.yelt, LineageRegistry(persist=False), views=[ViewOfRisk.ADJUSTED])
+        return out["annual"]["ADJUSTED"]
+
+    def items(self, deal: ProgrammeDeal, granularity: str = "LAYER") -> dict[str, dict]:
+        request = OptimizerRequest(
+            granularity=granularity, include_retro_ilw_candidate=False, included_statuses=[S.DECLINED]
+        )
+        built, _ = _build_vectors([deal], self.yelt, self.ind_yelt, request)
+        return {it["layer_id"]: it for it in built}
+
+
+@pytest.fixture(scope="module")
+def shapes() -> _TwoLayerDeal:
+    return _TwoLayerDeal()
+
+
+def test_zero_line_layer_on_a_graph_without_pricing_links(shapes):
+    pricing_nodes = [n.node_id for n in shapes.deal.graph.nodes if n.node_type == NodeType.PRICING_OUTPUT]
+    items = shapes.items(shapes.reshape(drop_nodes=pricing_nodes))
+    assert items[shapes.zero]["current_share"] == 0.0
+    assert items[shapes.zero]["el_1x"] == pytest.approx(shapes.el_zero)
+    assert (items[shapes.zero]["prem_1x"], items[shapes.zero]["limit_1x"]) == (3.0, 20.0)
+    assert items[shapes.held]["current_share"] == 0.5
+    assert items[shapes.held]["el_1x"] == pytest.approx(shapes.el_held)
+
+
+def test_zero_line_layer_priced_through_a_combination(shapes):
+    combo = GraphNodeSpec(node_id="combo", node_type=NodeType.COMBINATION, label="Combination", params={})
+    deal = shapes.reshape(
+        drop_edges=[(shapes.zero, f"px-{shapes.zero}")],
+        add_nodes=[combo],
+        add_edges=[(shapes.zero, "combo"), ("combo", f"px-{shapes.zero}")],
+    )
+    items = shapes.items(deal)
+    assert items[shapes.zero]["current_share"] == 0.0
+    assert items[shapes.zero]["el_1x"] == pytest.approx(shapes.el_zero)
+
+
+def test_zero_line_layer_sharing_a_pricing_output_with_a_held_layer(shapes):
+    """Several inputs into one Pricing Output count together as 100% of the linked layer; the unplaced
+    one now contributes its 100% loss instead of nothing."""
+    deal = shapes.reshape(drop_nodes=[f"px-{shapes.held}"], add_edges=[(shapes.held, f"px-{shapes.zero}")])
+    items = shapes.items(deal)
+    assert set(items) == {shapes.zero}
+    assert items[shapes.zero]["el_1x"] == pytest.approx(shapes.el_zero + 0.5 * shapes.el_held)
+
+
+def test_zero_line_layer_fed_by_another_zero_line_layer(shapes):
+    # The second layer now reads the first layer's recoveries (at most 20 an event), so it attaches low.
+    chained = dict(
+        shares={shapes.held: 0.0},
+        params={shapes.held: {"occLimit": 10.0, "occAttachment": 5.0}},
+        drop_edges=[(shapes.filter, shapes.held)],
+        add_edges=[(shapes.zero, shapes.held)],
+    )
+    items = shapes.items(shapes.reshape(**chained))
+    both_full = shapes.annual(shapes.reshape(**{**chained, "shares": {shapes.zero: 1.0, shapes.held: 1.0}}))
+    assert float(both_full[shapes.held].mean()) > 0.01
+    assert items[shapes.held]["current_share"] == 0.0
+    assert items[shapes.held]["el_1x"] == pytest.approx(float(both_full[shapes.held].mean()))
+    assert items[shapes.zero]["el_1x"] == pytest.approx(shapes.el_zero)
+
+
+@pytest.mark.parametrize("sub_shares, programme_line", [((0.0, 0.0), 0.5), ((None, None), 0.0), ((0.0, 0.5), 0.5)])
+def test_zero_line_cascading_tower(shapes, sub_shares, programme_line):
+    """The rollup reads a tower as one layer at its first sub-layer's share (the programme line when
+    the sub-layer names none), so that is what decides whether the tower is unplaced."""
+    def tower(shares):
+        subs = [
+            {"occLimit": 20.0, "occAttachment": 40.0, "depositPremium": 3.0},
+            {"occLimit": 20.0, "occAttachment": 60.0, "depositPremium": 2.0},
+        ]
+        layers = [{**sub, **({} if share is None else {"placedShare": share})} for sub, share in zip(subs, shares)]
+        return GraphNodeSpec(node_id=shapes.zero, node_type=NodeType.CASCADING_TOWER, label="Tower", params={"layers": layers})
+
+    def with_tower(shares, **fields):
+        return shapes.reshape(
+            drop_nodes=[shapes.zero, shapes.held, f"px-{shapes.held}"],
+            add_nodes=[tower(shares)],
+            add_edges=[(shapes.filter, shapes.zero), (shapes.zero, f"px-{shapes.zero}")],
+            **fields,
+        )
+
+    full_el = float(shapes.annual(with_tower((1.0, 1.0)))[shapes.zero].mean())
+    assert full_el > 0.1
+    item = shapes.items(with_tower(sub_shares, signed_line=programme_line))[shapes.zero]
+    assert item["current_share"] == 0.0
+    assert item["el_1x"] == pytest.approx(full_el)
+    assert (item["prem_1x"], item["limit_1x"]) == (5.0, 40.0)
+
+
+def test_deal_granularity_when_no_layer_is_held(shapes):
+    """The contract-level line can say 50% while every layer is at 0%; layers are what roll up."""
+    deal = shapes.reshape(shares={shapes.held: 0.0}, signed_line=0.5)
+    item = shapes.items(deal, "DEAL")[shapes.deal.programme_id]
+    assert item["current_share"] == 0.0
+    assert item["el_1x"] == pytest.approx(shapes.el_zero + shapes.el_held)
+    assert (item["prem_1x"], item["limit_1x"]) == (5.0, 40.0)
+    assert item["profit_1x"] < item["prem_1x"]
 
 
 # ── Invalid selections ──

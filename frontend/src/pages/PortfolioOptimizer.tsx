@@ -856,6 +856,9 @@ export function PortfolioOptimizer() {
               )}
               <OptimizerCandidatesTable
                 page={candidates}
+                isPreviousPage={candidatesQ.isPlaceholderData}
+                offset={offset}
+                pageSize={CANDIDATE_PAGE_SIZE}
                 isFetching={candidatesQ.isFetching}
                 error={candidatesQ.error}
                 onRetry={() => void candidatesQ.refetch()}

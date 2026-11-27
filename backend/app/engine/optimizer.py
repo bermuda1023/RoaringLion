@@ -13,7 +13,7 @@ from pydantic import Field, model_validator
 from app.engine.ilw import evaluate_ilw_trial_payouts
 from app.engine.pricing_link import LAYER_NODE_TYPES, _layer_share_and_premium, extract_rollup_layers
 from app.engine.sim_generator import YeltTable
-from app.engine.slice_runner import evaluate_programme_dag
+from app.engine.slice_runner import evaluate_programme_dag, validate_dag_acyclic
 from app.models.common import CamelModel
 from app.models.domain import BreadcrumbStep, GraphNodeSpec, ProgrammeDeal, RunManifest
 from app.models.enums import ContractDirection, IlwTriggerType, NodeType, ProgrammeStatus, ViewOfRisk
@@ -35,7 +35,10 @@ OptimizerMode = Literal["CURRENT", "FORWARD_PLANNING"]
 # Deal statuses each horizon mode builds its portfolio from when the request names none.
 CURRENT_MODE_STATUSES = frozenset({ProgrammeStatus.QUOTED, ProgrammeStatus.FIRM_ORDER, ProgrammeStatus.BOUND})
 FORWARD_MODE_EXCLUDED_STATUSES = frozenset({ProgrammeStatus.DECLINED, ProgrammeStatus.NTU, ProgrammeStatus.EXPIRED})
-NO_DEALS_MESSAGE = "No programmes match the selected deal statuses, so there is no portfolio to optimize"
+NO_DEALS_MESSAGE = (
+    "No programmes match the selected deal statuses, or none of them has a layer that rolls up, "
+    "so there is no portfolio to optimize"
+)
 
 
 def default_optimizer_statuses(mode: OptimizerMode) -> list[ProgrammeStatus]:
@@ -305,24 +308,24 @@ _UNPLACED_SHARE = 1e-9
 
 
 def _is_unplaced(node: GraphNodeSpec, programme_signed_line: float) -> bool:
+    """True for a layer whose share, as the rollup reads it, is 0%."""
     if node.node_type not in LAYER_NODE_TYPES:
         return False
-    if node.node_type == NodeType.CASCADING_TOWER:
-        subs = node.params.get("layers") or []
-        return bool(subs) and all(float(l.get("placedShare", 1.0)) <= _UNPLACED_SHARE for l in subs)
     return _layer_share_and_premium(node, programme_signed_line)[0] <= _UNPLACED_SHARE
 
 
 def _at_full_share(node: GraphNodeSpec) -> GraphNodeSpec:
     params = dict(node.params)
     if node.node_type == NodeType.CASCADING_TOWER:
+        # The rollup treats a tower as one layer at its first sub-layer's share.
         params["layers"] = [{**l, "placedShare": 1.0} for l in params.get("layers") or []]
     else:
         params["placedShare"] = 1.0
     return node.model_copy(update={"params": params})
 
 
-def _with_nodes(programme: ProgrammeDeal, nodes: list[GraphNodeSpec]) -> ProgrammeDeal:
+def _with_full_share(programme: ProgrammeDeal, layer_ids: frozenset[str] | set[str]) -> ProgrammeDeal:
+    nodes = [_at_full_share(n) if n.node_id in layer_ids else n for n in programme.graph.nodes]
     return programme.model_copy(update={"graph": programme.graph.model_copy(update={"nodes": nodes})})
 
 
@@ -333,10 +336,13 @@ def _evaluate_for_rollup(
 
     Losses come out of the graph at each layer's placed share, and the optimizer restates them to 100%
     by dividing by that share. A layer at a 0% line has no loss to restate, which would leave it with
-    premium and no risk. Each such layer is therefore re-run on its own at 100% (so it cannot disturb
-    the other nodes it feeds), and its vectors, with those of a Pricing Output fed only by it, replace
-    the zero ones. Returns the programme with those layers at 100%, its annual and RIP vectors by node,
-    and the ids of the unplaced layers, whose current share stays 0.
+    premium and no risk. So an unplaced layer is re-run at 100%, together with any unplaced layer
+    above it, and the result replaces the zero vectors of that layer and of each Pricing Output its
+    loss reaches without passing through another layer (directly, or through a combination). Every
+    other node, including a held layer and whatever it feeds, keeps the vectors of the stored graph.
+
+    Returns the programme with its unplaced layers at 100%, the annual and RIP vectors by node, and
+    the ids of the unplaced layers, whose current share stays 0.
     """
     _, out = evaluate_programme_dag(programme, yelt, LineageRegistry(persist=False), views=[view])
     ann, rip = out["annual"][view.value], out["rip"][view.value]
@@ -344,23 +350,37 @@ def _evaluate_for_rollup(
     if not unplaced:
         return programme, ann, rip, unplaced
 
-    ann, rip = dict(ann), dict(rip)
-    sources_by_target: dict[str, list[str]] = {}
+    nodes_by_id = {n.node_id: n for n in programme.graph.nodes}
+    sources: dict[str, list[str]] = {}
     for e in programme.graph.edges:
-        sources_by_target.setdefault(e.target, []).append(e.source)
-    for layer_id in unplaced:
-        solo = _with_nodes(programme, [_at_full_share(n) if n.node_id == layer_id else n for n in programme.graph.nodes])
-        _, solo_out = evaluate_programme_dag(solo, yelt, LineageRegistry(persist=False), views=[view])
-        priced_by = [
-            n.node_id
-            for n in programme.graph.nodes
-            if n.node_type == NodeType.PRICING_OUTPUT and sources_by_target.get(n.node_id) == [layer_id]
-        ]
-        for node_id in (layer_id, *priced_by):
-            ann[node_id] = solo_out["annual"][view.value][node_id]
-            rip[node_id] = solo_out["rip"][view.value][node_id]
-    restated = _with_nodes(programme, [_at_full_share(n) if n.node_id in unplaced else n for n in programme.graph.nodes])
-    return restated, ann, rip, unplaced
+        sources.setdefault(e.target, []).append(e.source)
+
+    nothing: frozenset[str] = frozenset()
+    above: dict[str, frozenset[str]] = {}  # every unplaced layer upstream of a node
+    reached_by: dict[str, frozenset[str]] = {}  # unplaced layers whose loss reaches a node layer-free
+    ann, rip = dict(ann), dict(rip)
+    runs: dict[frozenset[str], dict[str, dict[str, dict[str, np.ndarray]]]] = {}
+    for node_id in validate_dag_acyclic(programme.graph):
+        srcs = sources.get(node_id, [])
+        above[node_id] = nothing.union(*(above[s] | ({s} & unplaced) for s in srcs))
+        if node_id in unplaced:
+            reached_by[node_id] = frozenset({node_id})
+        elif nodes_by_id[node_id].node_type in LAYER_NODE_TYPES:
+            reached_by[node_id] = nothing
+        else:
+            reached_by[node_id] = nothing.union(*(reached_by[s] for s in srcs))
+        # Only layers and Pricing Outputs roll up, so other nodes keep the stored graph's vectors.
+        rolls_up = node_id in unplaced or nodes_by_id[node_id].node_type == NodeType.PRICING_OUTPUT
+        if not (rolls_up and reached_by[node_id]):
+            continue
+        at_full = reached_by[node_id].union(*(above[z] for z in reached_by[node_id]))
+        if at_full not in runs:
+            _, runs[at_full] = evaluate_programme_dag(
+                _with_full_share(programme, at_full), yelt, LineageRegistry(persist=False), views=[view]
+            )
+        ann[node_id] = runs[at_full]["annual"][view.value][node_id]
+        rip[node_id] = runs[at_full]["rip"][view.value][node_id]
+    return _with_full_share(programme, unplaced), ann, rip, unplaced
 
 
 def _build_vectors(
@@ -443,7 +463,10 @@ def _build_vectors(
                 continue
             ann_total = np.zeros(yelt.num_trials, dtype=np.float64)
             rip_total = np.zeros(yelt.num_trials, dtype=np.float64)
-            if p.signed_line <= _UNPLACED_SHARE:
+            no_line_held = p.signed_line <= _UNPLACED_SHARE or all(
+                entry.signed_line <= _UNPLACED_SHARE for entry in p_entries
+            )
+            if no_line_held:
                 # No line is held, so there is no current mix to scale: 100% means 100% of every layer.
                 for entry in p_entries:
                     ann_total += entry.loss_vec_1x
@@ -471,7 +494,7 @@ def _build_vectors(
                 "layer_name": p.programme_name,
                 "direction": "ASSUMED",
                 "status": p.status.value,
-                "current_share": p.signed_line,
+                "current_share": 0.0 if no_line_held else p.signed_line,
                 "limit_1x": lim_1x,
                 "prem_1x": prem_1x,
                 "el_1x": el_1x,
