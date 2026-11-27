@@ -1410,6 +1410,121 @@ def test_imap_bodystructure_recurses_into_forwarded_message_rfc822(monkeypatch):
     client.post(f"/api/intake/drafts/{drafts[0]['draftId']}/discard")
 
 
+def test_imap_quarantines_deterministic_invalid_message_so_second_poll_advances_to_valid_mail(monkeypatch):
+    """Security review: Deterministically invalid mail (e.g. ELT rate cap ValueError) is quarantined & marked \\Seen."""
+    from email.message import EmailMessage
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "quar-secret")
+
+    msg_bad = EmailMessage()
+    msg_bad["Message-ID"] = "<imap-poison-elt-001@test>"
+    msg_bad["From"] = "bad@example.com"
+    msg_bad["Subject"] = "Poison ELT"
+    msg_bad.set_content("Bad ELT attachment")
+    msg_bad.add_attachment(
+        b"event_id,annual_rate,mean_loss,region_peril_key\n1001,1000000,25.0,US-FL-WS\n",
+        maintype="text",
+        subtype="csv",
+        filename="poison_elt.csv",
+    )
+
+    msg_good = EmailMessage()
+    msg_good["Message-ID"] = "<imap-good-after-poison-002@test>"
+    msg_good["From"] = "broker@example.com"
+    msg_good["Subject"] = "Good later submission"
+    msg_good.set_content("Cedent: Good Later Re\nProgramme: Good Later XL 2027\nInception: 2027-01-01\nRegion: US-FL-WS\nLayer 1: $10M xs $20M | Premium $2.0M")
+
+    raw_by_num = {b"1": msg_bad.as_bytes(), b"2": msg_good.as_bytes()}
+    seen_flags: set[bytes] = set()
+
+    class FakeQuarantineIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"2"])
+
+        def search(self, charset, criterion: str):
+            # Return at most 1 oldest UNSEEN message per poll to simulate prefix starvation
+            unseen = [n for n in (b"1", b"2") if n not in seen_flags][:1]
+            return ("OK", [b" ".join(unseen)])
+
+        def fetch(self, num: bytes, cmd: str):
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [f"{num.decode()} (RFC822.SIZE {len(raw_by_num[num])})".encode("ascii")])
+            return ("OK", [(b"1 (BODY[] {100})", raw_by_num[num])])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                seen_flags.add(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeQuarantineIMAP)
+
+    # Poll 1 hits poison message 1 -> quarantined & marked \Seen (no draft created)
+    p1 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "quar-secret"})
+    assert p1.status_code == 200, p1.text
+    assert p1.json()["processedCount"] == 0
+    assert p1.json()["skippedCount"] == 1
+    assert b"1" in seen_flags
+
+    # Poll 2 advances to valid message 2 instead of stalling on message 1
+    p2 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "quar-secret"})
+    assert p2.status_code == 200, p2.text
+    assert p2.json()["processedCount"] == 1
+    assert len(p2.json()["drafts"]) == 1
+    assert p2.json()["drafts"][0]["extracted"]["cedentName"] == "Good Later Re"
+    assert b"2" in seen_flags
+
+    for d in p2.json()["drafts"]:
+        client.post(f"/api/intake/drafts/{d['draftId']}/discard")
+
+
+def test_watched_folder_rejects_symlink_pointing_outside_root(tmp_path: Path, monkeypatch):
+    """Security review: Symlinks inside a watched folder pointing outside the root must not be ingested."""
+    watch_root = tmp_path / "submissions_watch"
+    outside_secret = tmp_path / "outside_secret.txt"
+    outside_secret.write_text("Cedent: Secret Leak\nProgramme: Should Never Be Read\n", encoding="utf-8")
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_FOLDER_ROOT", str(watch_root))
+
+    ok = client.put(
+        "/api/intake/programmes/prog-farmers-us-27/watched-folder",
+        json={"watchedFolder": "symlink-check"},
+    )
+    assert ok.status_code == 200
+    prog_dir = watch_root / "symlink-check"
+    (prog_dir / "leak.txt").symlink_to(outside_secret)
+
+    # Status must not count the symlink as a pending file
+    status = client.get("/api/intake/folder/status").json()
+    wp = next(w for w in status["watchedProgrammes"] if w["programmeId"] == "prog-farmers-us-27")
+    assert wp["pendingFiles"] == 0
+
+    # Scan must skip the symlink and create zero drafts
+    scan = client.post("/api/intake/folder/scan?programmeId=prog-farmers-us-27")
+    assert scan.status_code == 200, scan.text
+    assert scan.json()["pickedUpCount"] == 0
+    assert scan.json()["drafts"] == []
+    assert scan.json()["skippedCount"] == 1
+
+    client.put("/api/intake/programmes/prog-farmers-us-27/watched-folder", json={"watchedFolder": None})
+
+
 def test_parquet_yelt_reads_actual_trial_count():
     """Bugbot #2: Parquet YELT detection must read actual trial count instead of hardcoding 10,000."""
     import pyarrow as pa

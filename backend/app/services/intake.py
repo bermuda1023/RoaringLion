@@ -8,6 +8,7 @@ without changing its status) and never binds a live book.
 from __future__ import annotations
 
 import base64
+import binascii
 import email
 import gc
 import hashlib
@@ -18,7 +19,9 @@ import os
 import quopri
 import re
 import ssl
+import stat
 import uuid
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,14 +135,16 @@ def _tokenize_imap_sexp(text: str) -> list[str]:
     return tokens
 
 
-def _parse_sexp_list(tokens: list[str], pos: int) -> tuple[list, int]:
+def _parse_sexp_list(tokens: list[str], pos: int, depth: int = 0) -> tuple[list, int]:
+    if depth > 32:
+        raise ValueError("IMAP BODYSTRUCTURE nesting depth exceeded.")
     out: list = []
     assert tokens[pos] == "("
     pos += 1
     while pos < len(tokens) and tokens[pos] != ")":
         tok = tokens[pos]
         if tok == "(":
-            sub, pos = _parse_sexp_list(tokens, pos)
+            sub, pos = _parse_sexp_list(tokens, pos, depth + 1)
             out.append(sub)
         elif tok.startswith('"') and tok.endswith('"'):
             out.append(tok[1:-1])
@@ -258,6 +263,71 @@ def _decode_imap_part_bytes(raw_bytes: bytes, encoding: str) -> bytes:
     return raw_bytes
 
 
+_DETERMINISTIC_CONTENT_ERROR_NAMES = frozenset({
+    "ArrowInvalid",
+    "PdfReadError",
+    "PdfStreamError",
+    "InvalidFileException",
+    "ComputeError",
+    "NoDataError",
+    "SchemaError",
+})
+
+
+def _is_deterministic_content_error(exc: Exception) -> bool:
+    """True for corrupt/invalid message content that will fail identically on every retry."""
+    if isinstance(exc, (ValueError, RecursionError, binascii.Error, UnicodeDecodeError, zipfile.BadZipFile)):
+        return True
+    return type(exc).__name__ in _DETERMINISTIC_CONTENT_ERROR_NAMES
+
+
+def _safe_lstat_regular_in_root(path: Path, root: Path) -> os.stat_result | None:
+    """Return lstat if `path` is a non-symlink regular file whose resolved path stays inside `root`."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        return None
+    try:
+        path.resolve().relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return st
+
+
+def _read_regular_file_nofollow(path: Path, root: Path, max_bytes: int) -> tuple[bytes, os.stat_result] | None:
+    """Safely read a regular file inside `root` without following symlinks (lstat + resolve + O_NOFOLLOW)."""
+    st = _safe_lstat_regular_in_root(path, root)
+    if st is None or st.st_size > max_bytes:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or fst.st_size > max_bytes:
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        with os.fdopen(fd, "rb", closefd=True) as fh:
+            while True:
+                chunk = fh.read(256 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    return None
+                chunks.append(chunk)
+        return b"".join(chunks), fst
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return None
 def _extract_fetch_payload(data: object) -> bytes | None:
     if not isinstance(data, list):
         return None
@@ -1252,8 +1322,35 @@ class SubmissionIntakeService:
                             has_existing_attachments=already_stored_attachments > 0,
                         )
                 except Exception as exc:
-                    # Leave message UNSEEN so transient failures are retried on the next poll.
-                    logger.warning("Failed to ingest IMAP message %s; leaving UNSEEN for retry: %s", num, exc)
+                    if _is_deterministic_content_error(exc):
+                        # Quarantine deterministically invalid content (corrupt file, YELT/ELT cap, bad base64, etc.)
+                        # and mark \Seen so it cannot stall the UNSEEN prefix on subsequent polls.
+                        num_str = num.decode("utf-8", errors="ignore") if isinstance(num, (bytes, bytearray)) else str(num)
+                        q_key = f"email:quarantine:{locals().get('msg_id') or num_str}"
+                        logger.warning(
+                            "Quarantining deterministically invalid IMAP message %s (%s: %s); marking \\Seen",
+                            num,
+                            type(exc).__name__,
+                            exc,
+                        )
+                        with get_session() as db:
+                            try:
+                                db.add(
+                                    WatchedIngestionRecord(
+                                        door=IntakeDoor.EMAIL.value,
+                                        programme_id=None,
+                                        external_key=q_key,
+                                        draft_id="QUARANTINED",
+                                    )
+                                )
+                                db.commit()
+                            except IntegrityError:
+                                db.rollback()
+                        imap.store(num, "+FLAGS", "\\Seen")
+                        skipped += 1
+                        continue
+                    # Transient connection/I/O/DB failure: leave UNSEEN so the next poll retries it.
+                    logger.warning("Transient failure ingesting IMAP message %s; leaving UNSEEN for retry: %s", num, exc)
                     skipped += 1
                     continue
 
@@ -1314,9 +1411,11 @@ class SubmissionIntakeService:
             pending = 0
             if exists:
                 for p in sorted(resolved.iterdir()):
-                    if not p.is_file() or p.name.startswith(".") or p.suffix.lower() not in SUPPORTED_INTAKE_EXTS:
+                    if p.name.startswith(".") or p.suffix.lower() not in SUPPORTED_INTAKE_EXTS:
                         continue
-                    st = p.stat()
+                    st = _safe_lstat_regular_in_root(p, root)
+                    if st is None:
+                        continue
                     key = f"folder:{c.programme_id}:{p.name}:{st.st_mtime_ns}:{st.st_size}"
                     if key not in ingested_keys:
                         pending += 1
@@ -1363,17 +1462,21 @@ class SubmissionIntakeService:
                 continue
             scanned += 1
             for p in sorted(resolved.iterdir()):
-                if not p.is_file() or p.name.startswith(".") or p.suffix.lower() not in SUPPORTED_INTAKE_EXTS:
+                if p.name.startswith(".") or p.suffix.lower() not in SUPPORTED_INTAKE_EXTS:
                     continue
-                st = p.stat()
-                if st.st_size > MAX_UPLOAD_BYTES:
+                st = _safe_lstat_regular_in_root(p, root)
+                if st is None or st.st_size > MAX_UPLOAD_BYTES:
                     skipped += 1
                     continue
                 ext_key = f"folder:{c.programme_id}:{p.name}:{st.st_mtime_ns}:{st.st_size}"
                 if ext_key in ingested_keys:
                     skipped += 1
                     continue
-                raw = p.read_bytes()
+                read_res = _read_regular_file_nofollow(p, root, MAX_UPLOAD_BYTES)
+                if read_res is None:
+                    skipped += 1
+                    continue
+                raw, _ = read_res
                 draft = self.ingest_file(
                     raw_bytes=raw,
                     filename=p.name,
