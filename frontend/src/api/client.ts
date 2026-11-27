@@ -59,9 +59,7 @@ export interface ContractFull extends ProgrammeDeal {
   inceptionDate?: string | null;
   expiryDate?: string | null;
   hoursClause: number;
-  authorizedLine: number;
   attachment: number;
-  technicalRol?: number | null;
   brokeragePct: number;
   frontingFeePct: number;
   customTags: string[];

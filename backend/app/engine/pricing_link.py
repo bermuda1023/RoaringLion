@@ -35,7 +35,6 @@ class PricingLink:
     written_line: float
     signed_line: float
     brokerage_pct: float
-    technical_rol: float | None = None
     layer_code: str = ""
     rolls_up: bool = False
     warnings: list[str] = field(default_factory=list)
@@ -217,8 +216,6 @@ def compute_pricing_economics(
         multiple=round(rol / loss_on_line, 4) if rol and loss_on_line else None,
         tvar_250=round(our_tvar, 6),
         return_on_tvar=round(profit / our_tvar, 6) if our_tvar > 0 else None,
-        technical_rol=link.technical_rol,
-        price_adequacy=round(rol / link.technical_rol, 6) if rol and link.technical_rol else None,
         warnings=warnings,
     )
 

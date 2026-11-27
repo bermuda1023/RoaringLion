@@ -125,15 +125,16 @@ class ContractLayer(CamelModel):
     rol: float | None = None
     reinstatements: float | None = None
     rip_rate: float | None = None
-    authorized_line: float = 1.0
     written_line: float
     signed_line: float
     our_limit: float | None = None
     our_premium: float = 0.0
     brokerage_pct: float = 0.10
     our_net_premium: float = 0.0
-    technical_rol: float | None = None
-    price_adequacy: float | None = None
+    rarc_pct: float | None = None
+    expected_loss: float | None = None
+    expected_rip: float | None = None
+    loss_ratio: float | None = None
     editable: list[str] = []
     name: str = ""
     terms: str | None = None
@@ -154,11 +155,10 @@ class ContractLayerUpdate(CamelModel):
     reinstatements: float | None = None
     rip_rate: float | None = None
     rol: float | None = None
-    authorized_line: float | None = None
     written_line: float | None = None
     signed_line: float | None = None
     brokerage_pct: float | None = None
-    technical_rol: float | None = None
+    rarc_pct: float | None = None
 
 
 class ContractLayerSpec(CamelModel):
@@ -174,11 +174,10 @@ class ContractLayerSpec(CamelModel):
     reinstatements: float | None = Field(default=1.0, ge=0)
     rip_rate: float = Field(default=1.0, ge=0, le=5)
     per_event_cap: float | None = Field(default=None, gt=0)
-    authorized_line: float | None = Field(default=None, ge=0, le=1)
     written_line: float | None = Field(default=None, ge=0, le=1)
     signed_line: float | None = Field(default=None, ge=0, le=1)
     brokerage_pct: float | None = Field(default=None, ge=0, le=0.9)
-    technical_rol: float | None = Field(default=None, ge=0, le=5)
+    rarc_pct: float | None = Field(default=None, ge=-100.0, le=500.0, allow_inf_nan=False)
 
 
 class ContractLayersUpdateRequest(CamelModel):
@@ -244,14 +243,12 @@ class ContractCreate(CamelModel):
     inception_date: str | None = "2027-01-01"
     expiry_date: str | None = "2027-12-31"
     hours_clause: int = 72
-    authorized_line: float = 1.0
     written_line: float = 1.0
     signed_line: float = 1.0
     limit: float = 25.0
     attachment: float = 50.0
     deposit_premium: float = 4.0
     rol: float = 0.16
-    technical_rol: float | None = None
     brokerage_pct: float = 0.10
     fronting_fee_pct: float = 0.02
     collateral_required: float = 25.0
@@ -274,12 +271,10 @@ class ContractUpdate(CamelModel):
     sim_set_id: str | None = None
     written_line: float | None = None
     signed_line: float | None = None
-    authorized_line: float | None = None
     deposit_premium: float | None = None
     limit: float | None = None
     attachment: float | None = None
     rol: float | None = None
-    technical_rol: float | None = None
     brokerage_pct: float | None = None
     fronting_fee_pct: float | None = None
     collateral_required: float | None = None
@@ -315,14 +310,12 @@ class ContractFull(CamelModel):
     inception_date: str | None = None
     expiry_date: str | None = None
     hours_clause: int = 72
-    authorized_line: float = 1.0
     written_line: float = 1.0
     signed_line: float = 1.0
     limit: float = 0.0
     attachment: float = 0.0
     deposit_premium: float = 0.0
     rol: float = 0.0
-    technical_rol: float | None = None
     brokerage_pct: float = 0.10
     fronting_fee_pct: float = 0.02
     collateral_required: float = 0.0

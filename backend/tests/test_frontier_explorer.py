@@ -85,7 +85,8 @@ def test_portfolio_and_programme_exports_include_manifest_provenance():
 
 
 def test_cms_profile_notes_and_360_dossier():
-    # Update programme profile metadata (unique code + RARC + credit rating + broker contact)
+    # Update programme profile metadata (unique code + credit rating + broker contact)
+    # Programme RARC is rolled up from layers and cannot be overwritten manually via profile.
     r_upd = client.put(
         "/api/contracts/prog-farmers-us-27",
         json={
@@ -93,13 +94,13 @@ def test_cms_profile_notes_and_360_dossier():
                 "uniqueCode": "RL-2027-001",
                 "cedentCreditRating": "AM Best A+",
                 "brokerContact": "Treaty Desk Lead",
-                "rarcTotalPct": 7.25,
+                "rarcTotalPct": 99.0,
                 "economicInflationPct": 3.5,
             }
         },
     )
     assert r_upd.status_code == 200
-    assert r_upd.json()["profile"]["rarcTotalPct"] == 7.25
+    assert abs(r_upd.json()["profile"]["rarcTotalPct"] - 6.1) < 1e-4
 
     # Post an underwriting note and verify retrieval
     r_note = client.post(
@@ -114,6 +115,10 @@ def test_cms_profile_notes_and_360_dossier():
     assert r_dos.status_code == 200
     dos = r_dos.json()
     assert dos["contract"]["profile"]["cedentCreditRating"] == "AM Best A+"
+    assert dos["pricingLink"]["programmeLossRatio"] is not None
+    assert dos["pricingLink"]["programmeLossRatio"] > 0
+    assert "authorizedLine" not in dos["contract"]
+    assert "technicalRol" not in dos["contract"]
     assert any("underlying QS inuring" in n["body"] for n in dos["notes"])
     assert len(dos["pricingLink"]["adjustedNodes"]) >= 4
     assert dos["exposureLink"] is not None

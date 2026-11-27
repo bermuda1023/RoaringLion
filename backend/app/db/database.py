@@ -53,6 +53,19 @@ def init_engine(db_url: str | None = None):
         if "profile_json" not in cols:
             with _engine.begin() as conn:
                 conn.execute(text("ALTER TABLE contracts ADD COLUMN profile_json TEXT DEFAULT '{}'"))
+        if "authorized_line" in cols:
+            with _engine.begin() as conn:
+                if "written_line" in cols:
+                    conn.execute(
+                        text(
+                            "UPDATE contracts SET written_line = authorized_line "
+                            "WHERE written_line IS NULL AND authorized_line IS NOT NULL"
+                        )
+                    )
+                conn.execute(text("ALTER TABLE contracts DROP COLUMN authorized_line"))
+        if "technical_rol" in cols:
+            with _engine.begin() as conn:
+                conn.execute(text("ALTER TABLE contracts DROP COLUMN technical_rol"))
     if "sim_sets" in insp.get_table_names():
         sim_cols = {c["name"] for c in insp.get_columns("sim_sets")}
         if "loss_files_json" not in sim_cols:

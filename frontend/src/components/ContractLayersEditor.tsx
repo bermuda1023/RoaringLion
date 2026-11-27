@@ -1,7 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Fragment, useEffect, useState } from 'react';
 import { fetchJson } from '../api/client';
-import { fmtMoneyM, fmtNum, fmtRatioPct } from '../utils/format';
+import { fmtMoneyM, fmtNum, fmtPct, fmtRatioPct } from '../utils/format';
+import {
+  computeLayerLossRatio,
+  computeTotalLossRatio,
+  computeWeightedRarc,
+  type LayerLossRatioInput,
+} from '../utils/layerRollup';
 import { composeLabel, nextLayerCode, nodeTerms } from '../utils/nodeLabels';
 
 export interface ContractLayer {
@@ -15,15 +21,16 @@ export interface ContractLayer {
   rol: number | null;
   reinstatements: number | null;
   ripRate: number | null;
-  authorizedLine: number;
   writtenLine: number;
   signedLine: number;
   ourLimit: number | null;
   ourPremium: number;
   brokeragePct: number;
   ourNetPremium: number;
-  technicalRol: number | null;
-  priceAdequacy: number | null;
+  rarcPct: number | null;
+  expectedLoss?: number | null;
+  expectedRip?: number | null;
+  lossRatio?: number | null;
   editable: string[];
   name: string;
   terms: string | null;
@@ -41,11 +48,10 @@ type Field =
   | 'attachment'
   | 'depositPremium'
   | 'rol'
-  | 'technicalRol'
+  | 'rarcPct'
   | 'reinstatements'
   | 'ripRate'
   | 'brokeragePct'
-  | 'authorizedLine'
   | 'writtenLine'
   | 'signedLine';
 type Draft = Record<string, Partial<Record<Field, string>>>;
@@ -70,10 +76,12 @@ const TYPE_SHORT: Record<string, string> = {
   ILW_OPTION: 'ILW',
 };
 
-const PCT_FIELDS: Field[] = ['rol', 'technicalRol', 'ripRate', 'brokeragePct', 'authorizedLine', 'writtenLine', 'signedLine'];
+// Fields stored as 0..1 ratios on the backend and edited as 0..100% in the UI.
+// Note: rarcPct is stored directly in percentage points (e.g. 6.1 = +6.1%).
+const PCT_FIELDS: Field[] = ['rol', 'ripRate', 'brokeragePct', 'writtenLine', 'signedLine'];
 
 function initialText(layer: ContractLayer, field: Field): string {
-  const v = layer[field as keyof ContractLayer] as number | string | null;
+  const v = layer[field as keyof ContractLayer] as number | string | null | undefined;
   if (field === 'layerCode') return layer.layerCode ?? '';
   if (field === 'label') return layer.autoLabel ? layer.name : layer.label;
   if (v == null) return '';
@@ -92,6 +100,7 @@ interface NewLayerDraft {
   brokeragePct: string;
   writtenLine: string;
   signedLine: string;
+  rarcPct: string;
 }
 
 function blankLayer(layers: ContractLayer[]): NewLayerDraft {
@@ -110,6 +119,7 @@ function blankLayer(layers: ContractLayer[]): NewLayerDraft {
     brokeragePct: top ? String(Number((top.brokeragePct * 100).toFixed(4))) : '10',
     writtenLine: top ? String(Number((top.writtenLine * 100).toFixed(4))) : '100',
     signedLine: top ? String(Number((top.signedLine * 100).toFixed(4))) : '100',
+    rarcPct: '',
   };
 }
 
@@ -177,9 +187,8 @@ export function ContractLayersEditor({
       const v = num(f, base == null ? null : base * 100);
       return v == null ? null : v / 100;
     };
-    const authorized = pct('authorizedLine', layer.authorizedLine);
     const brokerage = pct('brokeragePct', layer.brokeragePct) ?? 0;
-    const tech = pct('technicalRol', layer.technicalRol);
+    const rarcPct = num('rarcPct', layer.rarcPct);
     const writtenPct = num('writtenLine', layer.writtenLine * 100);
     const signedPct = num('signedLine', layer.signedLine * 100);
     const written = writtenPct == null ? null : writtenPct / 100;
@@ -195,17 +204,32 @@ export function ContractLayersEditor({
     const terms = liveParams[layer.nodeType] ? nodeTerms(layer.nodeType, liveParams[layer.nodeType]) ?? layer.terms : layer.terms;
     const rol = limit ? premium / limit : null;
     const ourPremium = signed != null ? premium * signed : null;
+    const lossRatioInput: LayerLossRatioInput = {
+      savedExpectedLoss: layer.expectedLoss,
+      savedExpectedRip: layer.expectedRip,
+      savedLossRatio: layer.lossRatio,
+      savedDepositPremium: layer.depositPremium,
+      savedSignedLine: layer.signedLine,
+      liveDepositPremium: premium,
+      liveSignedLine: signed,
+    };
+    const lossRatio = computeLayerLossRatio(lossRatioInput);
+    const expectedLoss =
+      layer.expectedLoss != null && layer.signedLine > 0 && signed != null
+        ? (layer.expectedLoss / layer.signedLine) * signed
+        : layer.expectedLoss ?? null;
     return {
       terms,
       limit,
       premium,
-      authorized,
       written,
       signed,
       brokerage,
-      tech,
+      rarcPct,
       rol,
-      adequacy: rol != null && tech ? rol / tech : null,
+      lossRatio,
+      lossRatioInput,
+      expectedLoss,
       ourLimit: limit != null && signed != null ? limit * signed : null,
       ourPremium,
       ourNet: ourPremium != null ? ourPremium * (1 - brokerage) : null,
@@ -231,7 +255,6 @@ export function ContractLayersEditor({
     }
     const l = live(layer);
     for (const [name, v] of [
-      ['Authorised line', l.authorized],
       ['Written line', l.written],
       ['Signed line', l.signed],
     ] as const) {
@@ -240,34 +263,44 @@ export function ContractLayersEditor({
     }
     if (l.brokerage < 0 || l.brokerage > 0.9) problems.push(`${layer.label}: brokerage must be between 0% and 90%`);
     if (l.rol != null && (l.rol < 0 || l.rol > 5)) problems.push(`${layer.label}: ROL must be between 0% and 500%`);
+    if (l.rarcPct != null && (l.rarcPct < -100 || l.rarcPct > 500))
+      problems.push(`${layer.label}: RARC must be between -100% and 500%`);
     if (layer.editable.includes('limit') && (l.limit == null || l.limit <= 0)) problems.push(`${layer.label}: limit must be greater than 0`);
   }
   const warnings: string[] = [];
   for (const layer of layers) {
     const l = live(layer);
     if (l.written != null && l.signed != null && l.signed > l.written + 1e-9) warnings.push(`${layer.label}: signed line is above written line`);
-    if (l.authorized != null && l.written != null && l.written > l.authorized + 1e-9)
-      warnings.push(`${layer.label}: written line is above authorised line`);
-    if (l.adequacy != null && l.adequacy < 1) warnings.push(`${layer.label}: priced below technical ROL`);
   }
 
-  const totals = layers.reduce(
-    (acc, layer) => {
-      const l = live(layer);
+  const liveLayers = layers.map((layer) => ({ layer, live: live(layer) }));
+  // Match backend selective rollup: when explicit Pricing Output links exist, only linked layers roll up.
+  const hasLinkedLayers = liveLayers.some(({ layer }) => Boolean(layer.linkedPricingNodeId));
+  const rollupLayers = hasLinkedLayers
+    ? liveLayers.filter(({ layer }) => Boolean(layer.linkedPricingNodeId))
+    : liveLayers;
+  const totals = rollupLayers.reduce(
+    (acc, { live: l }) => {
       acc.limit += l.limit ?? 0;
       acc.premium += l.premium;
       acc.ourLimit += l.ourLimit ?? 0;
       acc.ourPremium += l.ourPremium ?? 0;
       acc.ourNet += l.ourNet ?? 0;
       acc.brokerage += l.premium * l.brokerage;
-      acc.authorized += (l.limit ?? 0) * (l.authorized ?? 0);
       acc.written += (l.limit ?? 0) * (l.written ?? 0);
-      if (l.tech == null) acc.techComplete = false;
-      else acc.tech += (l.limit ?? 0) * l.tech;
       return acc;
     },
-    { limit: 0, premium: 0, ourLimit: 0, ourPremium: 0, ourNet: 0, brokerage: 0, authorized: 0, written: 0, tech: 0, techComplete: layers.length > 0 },
+    { limit: 0, premium: 0, ourLimit: 0, ourPremium: 0, ourNet: 0, brokerage: 0, written: 0 },
   );
+  const weightedRarc = computeWeightedRarc(
+    rollupLayers.map(({ live: l }) => ({
+      limit: l.limit,
+      signedLine: l.signed,
+      writtenLine: l.written,
+      rarcPct: l.rarcPct,
+    })),
+  );
+  const totalLossRatio = computeTotalLossRatio(rollupLayers.map(({ live: l }) => l.lossRatioInput));
 
   const saveMut = useMutation({
     mutationFn: () => {
@@ -276,7 +309,7 @@ export function ContractLayersEditor({
         const out: Record<string, unknown> = { nodeId };
         if (d.layerCode !== undefined) out.layerCode = d.layerCode;
         if (d.label !== undefined) out.label = d.label;
-        for (const f of ['limit', 'attachment', 'depositPremium', 'reinstatements'] as const) {
+        for (const f of ['limit', 'attachment', 'depositPremium', 'reinstatements', 'rarcPct'] as const) {
           if (d[f] !== undefined) out[f] = parseNum(d[f]);
         }
         for (const f of PCT_FIELDS) {
@@ -310,19 +343,22 @@ export function ContractLayersEditor({
     const att = parseNum(newLayer.attachment);
     const w = parseNum(newLayer.writtenLine);
     const sg = parseNum(newLayer.signedLine);
+    const nr = parseNum(newLayer.rarcPct);
     if (lim == null || lim <= 0) newLayerProblems.push('limit must be greater than 0');
     if (att == null || att < 0) newLayerProblems.push('attachment must be 0 or more');
     if ((parseNum(newLayer.depositPremium) ?? 0) < 0) newLayerProblems.push('premium must be 0 or more');
     const b = parseNum(newLayer.brokeragePct) ?? 10;
     if (b < 0 || b > 90) newLayerProblems.push('brokerage must be 0–90%');
+    if (nr != null && (nr < -100 || nr > 500)) newLayerProblems.push('RARC must be between -100% and 500%');
     for (const [label, v] of [['written', w], ['signed', sg]] as const) {
       if (v == null || v < 0 || v > 100) newLayerProblems.push(`${label} line must be 0–100%`);
     }
   }
 
   const addMut = useMutation({
-    mutationFn: (nl: NewLayerDraft) =>
-      fetchJson<ContractLayer[]>(`/api/contracts/${programmeId}/layers`, {
+    mutationFn: (nl: NewLayerDraft) => {
+      const parsedRarc = parseNum(nl.rarcPct);
+      return fetchJson<ContractLayer[]>(`/api/contracts/${programmeId}/layers`, {
         method: 'POST',
         body: JSON.stringify({
           layerCode: nl.layerCode.trim() || undefined,
@@ -335,8 +371,10 @@ export function ContractLayersEditor({
           brokeragePct: (parseNum(nl.brokeragePct) ?? 10) / 100,
           writtenLine: (parseNum(nl.writtenLine) ?? 100) / 100,
           signedLine: (parseNum(nl.signedLine) ?? 100) / 100,
+          rarcPct: parsedRarc ?? undefined,
         }),
-      }),
+      });
+    },
     onSuccess: (updated) => {
       qc.setQueryData(['contractLayers', programmeId], updated);
       qc.invalidateQueries({ queryKey: ['graphTemplates'] });
@@ -374,7 +412,11 @@ export function ContractLayersEditor({
       />
     );
 
-  const cell = (layer: ContractLayer, field: Field, opts: { width?: number; step?: string; suffix?: string } = {}) => {
+  const cell = (
+    layer: ContractLayer,
+    field: Field,
+    opts: { width?: number; step?: string; suffix?: string; ariaLabel?: string; placeholder?: string } = {},
+  ) => {
     if (!layer.editable.includes(field)) {
       const v = initialText(layer, field);
       return <span style={{ color: 'var(--text-faint)' }}>{v === '' ? '—' : opts.suffix ? `${v}${opts.suffix}` : v}</span>;
@@ -385,6 +427,8 @@ export function ContractLayersEditor({
       <input
         type={isText ? 'text' : 'number'}
         step={opts.step ?? 'any'}
+        aria-label={opts.ariaLabel}
+        placeholder={opts.placeholder}
         value={text(layer, field)}
         onChange={(e) => setField(layer.nodeId, field, e.target.value)}
         className={`cell-input ${changed ? 'changed' : ''}${field === 'layerCode' ? ' mono' : ''}`}
@@ -404,7 +448,7 @@ export function ContractLayersEditor({
             Layer Terms &amp; Lines
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            Limits, attachments and premiums are $M at 100%. Open a row for technical ROL, reinstatements, RIP and the pricing link. Our share = 100% × signed line ({currency}).
+            Limits, attachments and premiums are $M at 100%. Open a row for modelled EL, reinstatements, RIP and the pricing link. Our share = 100% × signed line ({currency}).
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -454,6 +498,8 @@ export function ContractLayersEditor({
               <col className="col-xs" />
               <col className="col-price" />
               <col className="col-lines" />
+              <col className="col-rarc" />
+              <col className="col-lr" />
               <col className="col-ours" />
               <col className="col-act" />
             </colgroup>
@@ -465,14 +511,15 @@ export function ContractLayersEditor({
                 <th title="Layer type">Type</th>
                 <th title="Limit and attachment, $M at 100%">Limit xs att</th>
                 <th title="Deposit premium $M at 100%, and rate on line">Prem / ROL</th>
-                <th title="Authorised, written and signed line, and brokerage, percent">A / W / S / Br</th>
+                <th title="Written and signed line, and brokerage, percent">W / S / Br</th>
+                <th className="num" title="Risk-adjusted rate change for this layer, percent">RARC %</th>
+                <th className="num" title="Read-only modelled Loss Ratio: Adjusted EL / (Deposit Premium + Expected RIP)">Loss Ratio</th>
                 <th title="Our limit, premium and premium net of brokerage">Ours</th>
                 <th aria-label="Actions" />
               </tr>
             </thead>
             <tbody>
-              {layers.map((layer) => {
-                const l = live(layer);
+              {liveLayers.map(({ layer, live: l }) => {
                 const open = Boolean(openRows[layer.nodeId]);
                 const fullLabel = l.terms ? composeLabel(text(layer, 'label'), l.terms) : layer.label;
                 const linkTitle = layer.linkedPricingLabel
@@ -489,7 +536,7 @@ export function ContractLayersEditor({
                           className="icon-btn"
                           aria-expanded={open}
                           aria-label={`${open ? 'Hide' : 'Show'} detail for ${layer.label}`}
-                          title="Technical ROL, reinstatements, RIP and the pricing link"
+                          title="Modelled EL, Loss Ratio, reinstatements, RIP and the pricing link"
                           onClick={() => setOpenRows((rows) => ({ ...rows, [layer.nodeId]: !rows[layer.nodeId] }))}
                         >
                           {open ? '▾' : '▸'}
@@ -533,11 +580,20 @@ export function ContractLayersEditor({
                       </td>
                       <td>
                         <div className="layer-cluster">
-                          {cell(layer, 'authorizedLine', { step: '0.5' })}
-                          {cell(layer, 'writtenLine', { step: '0.5' })}
-                          {cell(layer, 'signedLine', { step: '0.5' })}
-                          {cell(layer, 'brokeragePct', { step: '0.5' })}
+                          {cell(layer, 'writtenLine', { step: '0.5', ariaLabel: `Written line for ${layer.label}` })}
+                          {cell(layer, 'signedLine', { step: '0.5', ariaLabel: `Signed line for ${layer.label}` })}
+                          {cell(layer, 'brokeragePct', { step: '0.5', ariaLabel: `Brokerage for ${layer.label}` })}
                         </div>
+                      </td>
+                      <td className="num">
+                        {cell(layer, 'rarcPct', { step: '0.1', ariaLabel: `RARC for ${layer.label}`, placeholder: '—' })}
+                      </td>
+                      <td
+                        className="num"
+                        title="Read-only modelled Loss Ratio: Adjusted EL / (Deposit Premium + Expected RIP)"
+                        style={{ color: l.lossRatio == null ? 'var(--text-faint)' : 'var(--text)', fontWeight: 600 }}
+                      >
+                        {l.lossRatio == null ? '—' : fmtRatioPct(l.lossRatio, 1)}
                       </td>
                       <td className="ours">
                         <span title="Our limit">{l.ourLimit == null ? '—' : fmtMoneyM(l.ourLimit, 1)}</span>
@@ -562,16 +618,16 @@ export function ContractLayersEditor({
                     </tr>
                     {open && (
                       <tr className="layer-detail">
-                        <td colSpan={9}>
+                        <td colSpan={11}>
                           <div className="layer-detail-grid">
-                            <label>
-                              Technical ROL %
-                              {cell(layer, 'technicalRol', { step: '0.25' })}
-                            </label>
                             <div>
-                              <span>Adequacy</span>
-                              <b style={{ color: l.adequacy == null ? undefined : l.adequacy >= 1 ? 'var(--positive)' : 'var(--negative)' }}>
-                                {l.adequacy == null ? '—' : fmtRatioPct(l.adequacy, 0)}
+                              <span>Loss Ratio</span>
+                              <b>{l.lossRatio == null ? '—' : fmtRatioPct(l.lossRatio, 1)}</b>
+                            </div>
+                            <div>
+                              <span>Modelled EL (Adj)</span>
+                              <b style={{ color: 'var(--accent)' }}>
+                                {l.expectedLoss == null ? '—' : fmtMoneyM(l.expectedLoss, 3)}
                               </b>
                             </div>
                             <label>
@@ -652,11 +708,14 @@ export function ContractLayersEditor({
                       </td>
                       <td>
                         <div className="layer-cluster">
-                          <span title="Authorised line defaults to 100%">100</span>
                           {nlField('writtenLine', { step: '0.5' })}
                           {nlField('signedLine', { step: '0.5' })}
                           {nlField('brokeragePct', { step: '0.5' })}
                         </div>
+                      </td>
+                      <td className="num">{nlField('rarcPct', { step: '0.1', placeholder: '0' })}</td>
+                      <td className="num" style={{ color: 'var(--text-faint)' }}>
+                        —
                       </td>
                       <td className="ours">
                         <span title="Our limit">{lim != null && sg != null ? fmtMoneyM((lim * sg) / 100, 1) : '—'}</span>
@@ -675,7 +734,7 @@ export function ContractLayersEditor({
                       </td>
                     </tr>
                     <tr className="layer-detail">
-                      <td colSpan={9}>
+                      <td colSpan={11}>
                         <div className="layer-detail-grid">
                           <label>
                             Reinstatements
@@ -686,12 +745,8 @@ export function ContractLayersEditor({
                             <b>{newLayer.layerType === 'OCC_XL' ? '100%' : '—'}</b>
                           </div>
                           <div>
-                            <span>Technical ROL</span>
-                            <b>—</b>
-                          </div>
-                          <div>
-                            <span>Adequacy</span>
-                            <b>—</b>
+                            <span>Loss Ratio</span>
+                            <b>Computed after add</b>
                           </div>
                         </div>
                       </td>
@@ -709,19 +764,31 @@ export function ContractLayersEditor({
                   {fmtMoneyM(totals.premium, 1)}
                   <div className="layer-terms-line">
                     {totals.limit ? fmtRatioPct(totals.premium / totals.limit, 1) : '—'}
-                    {' · tech '}
-                    {totals.limit && totals.techComplete ? fmtRatioPct(totals.tech / totals.limit, 1) : '—'}
-                    {' · '}
-                    {totals.limit && totals.techComplete && totals.tech ? fmtRatioPct(totals.premium / totals.tech, 0) : '—'}
                   </div>
                 </td>
-                <td title="Limit-weighted authorised, written and signed lines, and premium-weighted brokerage">
+                <td title="Limit-weighted written and signed lines, and premium-weighted brokerage">
                   <div className="layer-cluster">
-                    <span>{totals.limit ? fmtNum((totals.authorized / totals.limit) * 100, 0) : '—'}</span>
                     <span>{totals.limit ? fmtNum((totals.written / totals.limit) * 100, 0) : '—'}</span>
                     <span>{totals.limit ? fmtNum((totals.ourLimit / totals.limit) * 100, 0) : '—'}</span>
                     <span>{totals.premium ? fmtNum((totals.brokerage / totals.premium) * 100, 0) : '—'}</span>
                   </div>
+                </td>
+                <td
+                  className="num"
+                  title="Line-size-weighted average RARC across layers (weighted by limit × signed line)"
+                  style={{
+                    color: weightedRarc == null ? 'var(--text-faint)' : weightedRarc >= 0 ? 'var(--positive)' : 'var(--negative)',
+                    fontWeight: 600,
+                  }}
+                >
+                  {weightedRarc == null ? '—' : fmtPct(weightedRarc, 1, { signed: true })}
+                </td>
+                <td
+                  className="num"
+                  title="Programme Loss Ratio: sum(Adjusted EL) / sum(Our Deposit Premium + Expected RIP)"
+                  style={{ fontWeight: 600 }}
+                >
+                  {totalLossRatio == null ? '—' : fmtRatioPct(totalLossRatio, 1)}
                 </td>
                 <td className="ours">
                   <span title="Our limit">{fmtMoneyM(totals.ourLimit, 1)}</span>
@@ -735,8 +802,7 @@ export function ContractLayersEditor({
         </div>
       )}
       <div style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 8 }}>
-        Programme totals roll up from the layers: lines and technical ROL are limit-weighted, brokerage is premium-weighted. Saving creates a new version of the
-        programme's structure.
+        Programme totals roll up from the layers: lines are limit-weighted, brokerage is premium-weighted, RARC is line-size-weighted (limit × signed line), and Loss Ratio is derived from modelled expected loss / (deposit premium + RIP). Saving creates a new version of the programme's structure.
       </div>
     </div>
   );

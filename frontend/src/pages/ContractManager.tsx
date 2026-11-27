@@ -46,6 +46,7 @@ interface NewDealLayer {
   brokeragePct: number;
   writtenPct: number;
   signedPct: number;
+  rarcPct: string;
 }
 
 function nextLayer(prev: NewDealLayer, all: NewDealLayer[]): NewDealLayer {
@@ -59,6 +60,7 @@ function nextLayer(prev: NewDealLayer, all: NewDealLayer[]): NewDealLayer {
     brokeragePct: prev.brokeragePct,
     writtenPct: prev.writtenPct,
     signedPct: prev.signedPct,
+    rarcPct: prev.rarcPct,
   };
 }
 
@@ -108,6 +110,7 @@ interface ContractDossier {
     graphId: string;
     graphVersion: number;
     computeMs: number;
+    programmeLossRatio?: number | null;
     unadjustedNodes: any[];
     adjustedNodes: any[];
   };
@@ -144,7 +147,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   const [cedentName, setCedentName] = useState('Coastal Shield Ins');
   const [programmeName, setProgrammeName] = useState('FL Peak Cat XL 2027');
   const [newLayers, setNewLayers] = useState<NewDealLayer[]>([
-    { layerCode: 'L1', name: '', layerType: 'OCC_XL', limit: 25, attachment: 90, rolPct: 21, brokeragePct: 10, writtenPct: 15, signedPct: 10 },
+    { layerCode: 'L1', name: '', layerType: 'OCC_XL', limit: 25, attachment: 90, rolPct: 21, brokeragePct: 10, writtenPct: 15, signedPct: 10, rarcPct: '' },
   ]);
   const [regionPeril, setRegionPeril] = useState('US-FL-WS');
 
@@ -153,7 +156,6 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   const [dossierTab, setDossierTab] = useState<DossierTab>('profile');
   const [draftProfile, setDraftProfile] = useState<ProgrammeProfile | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
-  const [rarcInput, setRarcInput] = useState('');
 
   // Underwriting notes composer
   const [noteScope, setNoteScope] = useState<'programme' | 'cedent'>('programme');
@@ -207,7 +209,6 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   useEffect(() => {
     if (dossierQ.data?.contract?.profile) {
       setDraftProfile(dossierQ.data.contract.profile);
-      setRarcInput(String(dossierQ.data.contract.profile.rarcTotalPct ?? 0));
       setSavedMsg(null);
     }
   }, [dossierQ.data?.contract?.programmeId, dossierQ.data?.contract?.version]);
@@ -218,13 +219,25 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
     attachment: Math.min(...newLayers.map((l) => l.attachment || 0)),
   };
   const pctOk = (v: number, max = 100) => Number.isFinite(v) && v >= 0 && v <= max;
+  const rarcOk = (raw: string) => {
+    if (raw.trim() === '') return true;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= -100 && n <= 500;
+  };
   const newLayerCodesNormalized = newLayers.map((l) => l.layerCode.trim().toLowerCase());
   const newLayerCodesUnique =
     newLayerCodesNormalized.every(Boolean) && new Set(newLayerCodesNormalized).size === newLayerCodesNormalized.length;
   const newDealValid =
     newLayerCodesUnique &&
     newLayers.every(
-      (l) => l.limit > 0 && l.attachment >= 0 && l.rolPct >= 0 && pctOk(l.brokeragePct, 90) && pctOk(l.writtenPct) && pctOk(l.signedPct),
+      (l) =>
+        l.limit > 0 &&
+        l.attachment >= 0 &&
+        l.rolPct >= 0 &&
+        pctOk(l.brokeragePct, 90) &&
+        pctOk(l.writtenPct) &&
+        pctOk(l.signedPct) &&
+        rarcOk(l.rarcPct),
     ) &&
     cedentName.trim() &&
     programmeName.trim();
@@ -259,6 +272,7 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
           brokeragePct: l.brokeragePct / 100,
           writtenLine: l.writtenPct / 100,
           signedLine: l.signedPct / 100,
+          rarcPct: l.rarcPct.trim() === '' ? undefined : Number(l.rarcPct),
         })),
         regionPerils: [regionPeril],
         perils: [regionPeril.endsWith('EQ') ? 'EQ' : 'WS'],
@@ -354,6 +368,8 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
   );
   const unadjById = Object.fromEntries((d?.pricingLink.unadjustedNodes ?? []).map((n) => [n.nodeId, n]));
   const totalAdjEl = termAdjNodes.reduce((s, n) => s + Number(n.el ?? 0), 0);
+  const programmeLossRatio: number | null = d?.pricingLink.programmeLossRatio ?? null;
+  const programmeRarc = Number(d?.contract.profile?.rarcTotalPct ?? 0);
 
   return (
     <>
@@ -472,6 +488,10 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                   <label>
                     Signed (%)
                     <input type="number" step="0.5" value={l.signedPct} onChange={(e) => setNewLayer(i, { signedPct: Number(e.target.value) })} style={{ width: 64 }} />
+                  </label>
+                  <label>
+                    RARC (%)
+                    <input type="number" step="0.1" placeholder="0" value={l.rarcPct} onChange={(e) => setNewLayer(i, { rarcPct: e.target.value })} style={{ width: 64 }} />
                   </label>
                   <span style={{ fontSize: 11, color: 'var(--text-muted)', paddingBottom: 8, minWidth: 120, lineHeight: 1.4 }}>
                     Prem {fmtMoneyM((l.limit * l.rolPct) / 100, 2)}
@@ -691,16 +711,17 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
               <div className="kpi-val">{fmtMoneyM(d.contract.depositPremium, 2)}</div>
             </div>
             <div className="kpi">
-              <div className="kpi-label">ROL / Tech ROL</div>
+              <div className="kpi-label">ROL / Loss Ratio</div>
               <div className="kpi-val">
                 {fmtRatioPct(d.contract.rol, 1)}
-                {d.contract.technicalRol ? ` / ${fmtRatioPct(d.contract.technicalRol, 1)}` : ''}
+                {' / '}
+                {programmeLossRatio != null ? fmtRatioPct(programmeLossRatio, 1) : '—'}
               </div>
             </div>
             <div className="kpi">
               <div className="kpi-label">Risk-Adj Rate Change (RARC)</div>
-              <div className="kpi-val" style={{ color: draftProfile.rarcTotalPct >= 0 ? 'var(--positive)' : 'var(--negative)' }}>
-                {fmtPct(draftProfile.rarcTotalPct, 2, { signed: true })}
+              <div className="kpi-val" style={{ color: programmeRarc >= 0 ? 'var(--positive)' : 'var(--negative)' }}>
+                {fmtPct(programmeRarc, 2, { signed: true })}
               </div>
             </div>
             <div className="kpi">
@@ -868,32 +889,43 @@ export function ContractManager({ onSelectProgramme }: { onSelectProgramme: (id:
                       {saveProfileMut.isPending ? 'Saving…' : 'Save Programme Profile'}
                     </button>
                   </div>
-                  <label style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
-                    Risk-Adjusted Rate Change (RARC) %
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4 }}>
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={rarcInput}
-                        onChange={(e) => {
-                          setRarcInput(e.target.value);
-                          const n = Number(e.target.value);
-                          if (e.target.value.trim() !== '' && Number.isFinite(n)) {
-                            setDraftProfile({ ...draftProfile, rarcTotalPct: n });
-                          }
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      Risk-Adjusted Rate Change (RARC) — Programme Rollup
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 4, flexWrap: 'wrap' }}>
+                      <span
+                        data-testid="programme-rarc-readonly"
+                        style={{
+                          fontSize: 18,
+                          fontWeight: 700,
+                          fontVariantNumeric: 'tabular-nums',
+                          color: programmeRarc >= 0 ? 'var(--positive)' : 'var(--negative)',
                         }}
-                        style={{ width: 140, fontWeight: 600, textAlign: 'right' }}
-                      />
+                      >
+                        {fmtPct(programmeRarc, 2, { signed: true })}
+                      </span>
                       <span
                         style={{
                           fontSize: 12,
-                          color: draftProfile.rarcTotalPct >= 0 ? 'var(--positive)' : 'var(--negative)',
+                          color: programmeRarc >= 0 ? 'var(--positive)' : 'var(--negative)',
                         }}
                       >
-                        {draftProfile.rarcTotalPct >= 0 ? 'Rate increase' : 'Rate decrease'} vs prior year
+                        {programmeRarc >= 0 ? 'Rate increase' : 'Rate decrease'} vs prior year
                       </span>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        style={{ height: 24, padding: '0 8px', fontSize: 11, marginLeft: 'auto' }}
+                        onClick={() => setDossierTab('layers')}
+                      >
+                        Edit per layer →
+                      </button>
                     </div>
-                  </label>
+                    <div style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 3 }}>
+                      Computed automatically as the line-size-weighted average (limit × signed line) of layer RARCs.
+                    </div>
+                  </div>
 
                   <div className="table-wrap"><table>
                     <thead>

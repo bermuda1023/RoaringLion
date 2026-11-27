@@ -5,7 +5,7 @@
 
 import type { GraphNodeSpec, GraphSpec } from '../types/contracts';
 
-export const CMS_LAYER_PRICE_KEYS = new Set(['depositPremium', 'technicalRol', 'rol']);
+export const CMS_LAYER_PRICE_KEYS = new Set(['depositPremium', 'technicalRol', 'rol', 'authorizedLine', 'rarcPct']);
 
 export interface LayerPremiumFact {
   pricingNodeId: string;
