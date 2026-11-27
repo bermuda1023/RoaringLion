@@ -175,6 +175,7 @@ function candidateUrls(): URLSearchParams[] {
 interface ExplorePayload {
   includedStatuses: ProgrammeStatus[] | null;
   mode: string;
+  objective?: string;
   layerBounds: { layerKey: string; minShare: number; maxShare: number; locked: boolean }[];
 }
 
@@ -394,5 +395,203 @@ describe('PortfolioOptimizer deal status selection', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(screen.queryByText('Could not reach backend API')).toBeNull());
     expect(await screen.findByText(/Point #1/)).toBeTruthy();
+  });
+});
+
+describe('PortfolioOptimizer Return / Risk views and peak jump', () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  function renderWithMultiPointFrontier() {
+    const layers = dealsIn(['BOUND', 'QUOTED']).map((d) => ({
+      layerKey: `${d.programmeId}::lyr`,
+      programmeId: d.programmeId,
+      layerId: 'lyr',
+      cedentName: d.cedentName,
+      programmeName: 'Cat XL',
+      layerName: '1st Cat XL',
+      direction: 'ASSUMED',
+      status: d.status,
+      regionPerils: ['US-FL-WS'],
+      currentShare: 0.5,
+      optimalShare: 0.75,
+      deltaShare: 0.25,
+      optimalLimitM: 15,
+      optimalPremiumM: 2.25,
+      optimalElM: 0.75,
+      optimalExpectedProfitM: 1.5,
+      coTvar100M: 5,
+      coTvar250M: 8,
+      coTvar250Pct: 30,
+      coVar250M: 7,
+      coVar250Pct: 30,
+    }));
+
+    const multiResp = {
+      mode: 'FORWARD_PLANNING',
+      granularity: 'LAYER',
+      view: 'ADJUSTED',
+      includedStatuses: defaultStatusesForMode('FORWARD_PLANNING'),
+      computeMs: 18,
+      initialPortfolio: {
+        ...METRICS,
+        expectedProfitM: 25.0,
+        tvar100M: 60.0,
+        tvar250M: 80.0,
+        tvar1000M: 95.0,
+        stdDevM: 10.0,
+        riskRewardRatio: 0.3125,
+        returnToTvar100: 0.4167,
+        returnToTvar250: 0.3125,
+        returnToTvar500: 0.28,
+        returnToTvar1000: 0.2632,
+        returnToStdDev: 2.5,
+      },
+      initialLayers: layers,
+      recommendedIndex: 2,
+      peakReturnToTvar100Index: 1,
+      peakReturnToTvar250Index: 1,
+      peakReturnToTvar1000Index: 2,
+      peakReturnToStdDevIndex: 2,
+      frontier: [
+        {
+          pointIndex: 0,
+          targetTvar250M: 35,
+          status: 'Optimal',
+          solver: 'HiGHS LP',
+          metrics: {
+            ...METRICS,
+            expectedProfitM: 15.0,
+            meanRocPct: 12.38,
+            tvar100M: 32.0,
+            tvar250M: 35.0,
+            tvar1000M: 50.0,
+            stdDevM: 5.5,
+            riskRewardRatio: 0.4286,
+            returnToTvar100: 0.4688,
+            returnToTvar250: 0.4286,
+            returnToTvar500: 0.35,
+            returnToTvar1000: 0.3,
+            returnToStdDev: 2.73,
+          },
+          layers,
+          constraints: [],
+          returnPeriodContributions: [],
+        },
+        {
+          pointIndex: 1,
+          targetTvar250M: 52,
+          status: 'Optimal',
+          solver: 'HiGHS LP',
+          metrics: {
+            ...METRICS,
+            expectedProfitM: 23.0,
+            meanRocPct: 17.38,
+            tvar100M: 48.0,
+            tvar250M: 52.0,
+            tvar1000M: 74.0,
+            stdDevM: 8.1,
+            riskRewardRatio: 0.4423,
+            returnToTvar100: 0.4792,
+            returnToTvar250: 0.4423,
+            returnToTvar500: 0.36,
+            returnToTvar1000: 0.3108,
+            returnToStdDev: 2.84,
+          },
+          layers,
+          constraints: [],
+          returnPeriodContributions: [],
+        },
+        {
+          pointIndex: 2,
+          targetTvar250M: 75,
+          status: 'Optimal',
+          solver: 'HiGHS LP',
+          metrics: {
+            ...METRICS,
+            expectedProfitM: 28.5,
+            meanRocPct: 20.81,
+            tvar100M: 60.5,
+            tvar250M: 74.5,
+            tvar1000M: 89.0,
+            stdDevM: 9.4,
+            riskRewardRatio: 0.3826,
+            returnToTvar100: 0.4711,
+            returnToTvar250: 0.3826,
+            returnToTvar500: 0.34,
+            returnToTvar1000: 0.3202,
+            returnToStdDev: 3.03,
+          },
+          layers,
+          constraints: [],
+          returnPeriodContributions: [],
+        },
+      ],
+    };
+
+    fetchMock.mockImplementation(async (url: string) => candidatesPage(url) as never);
+    postMock.mockImplementation(async () => multiResp as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <PortfolioOptimizer />
+      </QueryClientProvider>,
+    );
+  }
+
+  it('displays Return / TVaR ratios on KPI strip and jumps directly to the peak point', async () => {
+    renderWithMultiPointFrontier();
+    await screen.findByText(/Point #3 \/ 3/);
+
+    // KPI strip displays Return / TVaR 100, 250, 1000 and Ret / Std Dev
+    const kpiStrip = document.querySelector('.grid-kpi') as HTMLElement;
+    expect(within(kpiStrip).getByText('Ret / TVaR 100')).toBeTruthy();
+    expect(within(kpiStrip).getByText('Ret / TVaR 250')).toBeTruthy();
+    expect(within(kpiStrip).getByText('Ret / TVaR 1000')).toBeTruthy();
+    expect(within(kpiStrip).getByText('Ret / Std Dev')).toBeTruthy();
+    expect(within(kpiStrip).getByText('38.3%')).toBeTruthy();
+
+    // Jump to Peak button moves from Point #3 (38.3%) to Point #2 (44.2%)
+    const jumpBtn = screen.getByRole('button', { name: /Jump to Peak Ret\/TVaR 250 \(#2 · 44\.2%\)/ });
+    fireEvent.click(jumpBtn);
+
+    expect(await screen.findByText(/Point #2 \/ 3/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /At Peak Ret\/TVaR 250 \(#2 · 44\.2%\)/ })).toBeTruthy();
+    expect(screen.getByText('44.2%')).toBeTruthy();
+  });
+
+  it('switches chart presets, toggles the tangent line on Return vs TVaR, and supports Max Return/TVaR objective', async () => {
+    renderWithMultiPointFrontier();
+    await screen.findByText(/Point #3 \/ 3/);
+
+    const ySelect = screen.getByLabelText('Y-axis metric') as HTMLSelectElement;
+    const xSelect = screen.getByLabelText('X-axis metric') as HTMLSelectElement;
+    expect(ySelect.value).toBe('returnToTvar250');
+    expect(xSelect.value).toBe('tvar250M');
+    expect(screen.queryByLabelText(/Tangent/)).toBeNull();
+
+    // Switch to Return vs TVaR preset -> enables Tangent toggle
+    fireEvent.click(screen.getByRole('button', { name: 'Return vs TVaR' }));
+    expect(ySelect.value).toBe('expectedProfitM');
+    expect(xSelect.value).toBe('tvar250M');
+    const tangentBox = screen.getByLabelText(/Tangent/) as HTMLInputElement;
+    expect(tangentBox.checked).toBe(true);
+
+    // Switch to Ret / Std Dev preset -> active peak updates to Ret/Std Dev (#3 · 3.03×)
+    fireEvent.click(screen.getByRole('button', { name: 'Ret / Std Dev' }));
+    expect(ySelect.value).toBe('returnToStdDev');
+    expect(xSelect.value).toBe('stdDevM');
+    expect(screen.getByRole('button', { name: /At Peak Ret\/Std Dev \(#3 · 3\.03×\)/ })).toBeTruthy();
+
+    // Choose Max Return / TVaR 1-in-250 objective in Config and run
+    fireEvent.click(screen.getByRole('button', { name: '1. Optimization Config' }));
+    fireEvent.change(screen.getByLabelText(/Primary Objective/), {
+      target: { value: 'MAX_RETURN_ON_TVAR_250' },
+    });
+    expect(screen.getByText(/fractional LP\/MILP/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Run Frontier Explorer' }));
+    await waitFor(() => expect(lastExplorePayload().objective).toBe('MAX_RETURN_ON_TVAR_250'));
   });
 });
