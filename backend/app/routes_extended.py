@@ -23,12 +23,18 @@ from app.engine.burn_cost import BurnCostRequest, BurnCostResponse, evaluate_bur
 from app.engine.optimizer import (
     FrontierExplorerResponse,
     FrontierPoint,
+    OptimizerCandidatesPage,
     OptimizerLayerCatalogItem,
+    OptimizerMode,
     OptimizerRequest,
     OptimizerResponse,
+    OptimizerStatusCount,
     compute_efficient_frontier,
+    default_optimizer_statuses,
     explore_efficient_frontier,
     list_optimizable_layers,
+    optimizer_link_target_statuses,
+    resolve_optimizer_statuses,
     solve_portfolio_optimization,
 )
 from app.engine.pricing_periods_fx import (
@@ -44,8 +50,8 @@ from app.engine.pricing_periods_fx import (
 )
 from app.engine.slice_runner import evaluate_portfolio_rollup, evaluate_programme_dag
 from app.engine.synthetic import SyntheticLossRequest, generate_synthetic_freq_sev
-from app.models.domain import DeterministicRunResponse
-from app.models.enums import ProgrammeStatus, StructureType, ViewOfRisk
+from app.models.domain import DeterministicRunResponse, ProgrammeDeal
+from app.models.enums import NodeType, ProgrammeStatus, StructureType, ViewOfRisk
 from app.models.phase1 import (
     ContractFull,
     ContractNoteCreate,
@@ -105,13 +111,58 @@ def create_extended_router(
             if c.structure != StructureType.ILW
         ]
 
-    def _all_non_ilw_deals():
-        inactive = {ProgrammeStatus.EXPIRED, ProgrammeStatus.DECLINED, ProgrammeStatus.NTU}
-        return [
-            contract_to_programme_deal(c)
-            for c in contract_store.list_contracts()
-            if c.structure != StructureType.ILW and c.status not in inactive
-        ]
+    def _optimizer_universe(
+        mode: OptimizerMode,
+        included_statuses: list[ProgrammeStatus] | None,
+        *,
+        search: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[ProgrammeDeal], dict[str, ProgrammeDeal], int]:
+        """Non-ILW deals in the selected statuses, filtered (and optionally searched and paged) in SQL.
+
+        Returns the deals, a lookup that also holds the contracts their Pricing Outputs link to, and the
+        number of deals matching before paging.
+        """
+        contracts, total = contract_store.query_contracts(
+            statuses=resolve_optimizer_statuses(mode, included_statuses),
+            exclude_structures=[StructureType.ILW],
+            search=search,
+            order_by="RECENT" if limit is None else "NAME",
+            limit=limit,
+            offset=offset,
+        )
+        deals = [contract_to_programme_deal(c) for c in contracts]
+        lookup = {d.programme_id: d for d in deals}
+        linked_ids = {
+            str(n.params.get("contractId") or "").strip()
+            for d in deals
+            for n in d.graph.nodes
+            if n.node_type == NodeType.PRICING_OUTPUT
+        } - set(lookup) - {""}
+        if linked_ids:
+            targets, _ = contract_store.query_contracts(
+                statuses=optimizer_link_target_statuses(included_statuses),
+                programme_ids=linked_ids,
+                exclude_structures=[StructureType.ILW],
+            )
+            lookup.update({c.programme_id: contract_to_programme_deal(c) for c in targets})
+        return deals, lookup, total
+
+    def _run_optimizer(fn, req: OptimizerRequest, **kwargs):
+        deals, lookup, _ = _optimizer_universe(req.mode, req.included_statuses)
+        try:
+            return fn(
+                req=req,
+                programmes=deals,
+                yelt=sim_store.get_yelt(base_sim_id),
+                ind_yelt=sim_store.get_yelt(ind_sim_id),
+                lineage=lineage,
+                all_programmes=lookup,
+                **kwargs,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # ── Phase 2b: Burn Cost & Live Claims ──
 
@@ -231,37 +282,83 @@ def create_extended_router(
 
     @router.post("/api/optimizer/solve", response_model=OptimizerResponse)
     def run_optimizer(req: OptimizerRequest) -> OptimizerResponse:
-        return solve_portfolio_optimization(
-            req=req,
-            programmes=_all_non_ilw_deals(),
-            yelt=sim_store.get_yelt(base_sim_id),
-            ind_yelt=sim_store.get_yelt(ind_sim_id),
-            lineage=lineage,
-        )
+        return _run_optimizer(solve_portfolio_optimization, req)
 
     @router.post("/api/optimizer/frontier", response_model=list[FrontierPoint])
     def run_frontier(req: OptimizerRequest, num_points: int = Query(default=6, ge=2, le=12)) -> list[FrontierPoint]:
-        return compute_efficient_frontier(
-            req=req,
-            programmes=_all_non_ilw_deals(),
-            yelt=sim_store.get_yelt(base_sim_id),
-            ind_yelt=sim_store.get_yelt(ind_sim_id),
-            lineage=lineage,
-            num_points=num_points,
-        )
+        return _run_optimizer(compute_efficient_frontier, req, num_points=num_points)
 
     @router.get("/api/optimizer/layers", response_model=list[OptimizerLayerCatalogItem])
     def get_optimizer_layers(
         view: ViewOfRisk = Query(default=ViewOfRisk.ADJUSTED),
         mode: str = Query(default="FORWARD_PLANNING"),
+        included_statuses: list[ProgrammeStatus] | None = Query(default=None, alias="includedStatuses"),
     ) -> list[OptimizerLayerCatalogItem]:
-        safe_mode = "CURRENT" if mode == "CURRENT" else "FORWARD_PLANNING"
+        """Every layer of every deal in the selected statuses, unpaged. Prefer `/api/optimizer/candidates`."""
+        safe_mode: OptimizerMode = "CURRENT" if mode == "CURRENT" else "FORWARD_PLANNING"
+        deals, lookup, _ = _optimizer_universe(safe_mode, included_statuses or None)
         return list_optimizable_layers(
-            programmes=_all_non_ilw_deals(),
+            programmes=deals,
             yelt=sim_store.get_yelt(base_sim_id),
             ind_yelt=sim_store.get_yelt(ind_sim_id),
             view=view,
             mode=safe_mode,
+            included_statuses=included_statuses or None,
+            all_programmes=lookup,
+        )
+
+    @router.get("/api/optimizer/candidates", response_model=OptimizerCandidatesPage)
+    def get_optimizer_candidates(
+        view: ViewOfRisk = Query(default=ViewOfRisk.ADJUSTED),
+        mode: OptimizerMode = Query(default="FORWARD_PLANNING"),
+        included_statuses: list[ProgrammeStatus] | None = Query(default=None, alias="includedStatuses"),
+        search: str = Query(default="", max_length=120),
+        limit: int = Query(default=25, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ) -> OptimizerCandidatesPage:
+        """One page of the deals a portfolio is built from, with their layers and per-status deal counts.
+
+        Only the page's programmes are loaded and evaluated; `search` matches cedent, programme, broker
+        or programme id. Layers are worked out from the page's own graphs, so a layer that another
+        programme's graph prices is listed with that programme and can also show on its own contract's page.
+        """
+        chosen = included_statuses or None
+        statuses = resolve_optimizer_statuses(mode, chosen)
+        defaults = default_optimizer_statuses(mode)
+        counts = contract_store.count_by_status(exclude_structures=[StructureType.ILW])
+        deals, lookup, matched = _optimizer_universe(mode, chosen, search=search, limit=limit, offset=offset)
+        layers = list_optimizable_layers(
+            programmes=deals,
+            yelt=sim_store.get_yelt(base_sim_id),
+            ind_yelt=sim_store.get_yelt(ind_sim_id),
+            view=view,
+            mode=mode,
+            included_statuses=chosen,
+            all_programmes=lookup,
+        )
+        return OptimizerCandidatesPage(
+            mode=mode,
+            view=view.value,
+            included_statuses=statuses,
+            default_statuses=defaults,
+            uses_default_statuses=chosen is None,
+            status_counts=[
+                OptimizerStatusCount(
+                    status=s,
+                    programmes=counts.get(s, 0),
+                    included=s in statuses,
+                    default_included=s in defaults,
+                )
+                for s in ProgrammeStatus
+            ],
+            universe_programmes=sum(counts.get(s, 0) for s in statuses),
+            matched_programmes=matched,
+            search=search.strip(),
+            limit=limit,
+            offset=offset,
+            programme_ids=[d.programme_id for d in deals],
+            layers=[l for l in layers if l.direction != "EXTERNAL_RETRO"],
+            retro_candidate=next((l for l in layers if l.direction == "EXTERNAL_RETRO"), None),
         )
 
     @router.post("/api/optimizer/explore", response_model=FrontierExplorerResponse)
@@ -269,14 +366,7 @@ def create_extended_router(
         req: OptimizerRequest,
         num_points: int = Query(default=12, ge=4, le=20),
     ) -> FrontierExplorerResponse:
-        return explore_efficient_frontier(
-            req=req,
-            programmes=_all_non_ilw_deals(),
-            yelt=sim_store.get_yelt(base_sim_id),
-            ind_yelt=sim_store.get_yelt(ind_sim_id),
-            lineage=lineage,
-            num_points=num_points,
-        )
+        return _run_optimizer(explore_efficient_frontier, req, num_points=num_points)
 
     # ── Phase 5: Cat Model API Orchestrator & Synthetic Freq-Sev Generator ──
 

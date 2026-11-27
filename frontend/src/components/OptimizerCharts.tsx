@@ -26,6 +26,8 @@ export interface OptimizedLayerRow {
   programmeName: string;
   layerName: string;
   direction: string;
+  /** The deal's `ProgrammeStatus`. */
+  status: string;
   regionPerils: string[];
   currentShare: number;
   optimalShare: number;

@@ -11,11 +11,11 @@ import roaring_lion_engine as rle
 from pydantic import Field, model_validator
 
 from app.engine.ilw import evaluate_ilw_trial_payouts
-from app.engine.pricing_link import extract_rollup_layers
+from app.engine.pricing_link import LAYER_NODE_TYPES, _layer_share_and_premium, extract_rollup_layers
 from app.engine.sim_generator import YeltTable
-from app.engine.slice_runner import evaluate_programme_dag
+from app.engine.slice_runner import evaluate_programme_dag, validate_dag_acyclic
 from app.models.common import CamelModel
-from app.models.domain import BreadcrumbStep, ProgrammeDeal, RunManifest
+from app.models.domain import BreadcrumbStep, GraphNodeSpec, ProgrammeDeal, RunManifest
 from app.models.enums import ContractDirection, IlwTriggerType, NodeType, ProgrammeStatus, ViewOfRisk
 from app.models.phase1 import IlwPriceRequest
 from app.services.lineage import LineageRegistry, canonical_hash
@@ -29,6 +29,44 @@ TERM_NODE_TYPES = (
     NodeType.CASCADING_TOWER,
 )
 STACK_RETURN_PERIODS = [2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0]
+
+OptimizerMode = Literal["CURRENT", "FORWARD_PLANNING"]
+
+# Deal statuses each horizon mode builds its portfolio from when the request names none.
+CURRENT_MODE_STATUSES = frozenset({ProgrammeStatus.QUOTED, ProgrammeStatus.FIRM_ORDER, ProgrammeStatus.BOUND})
+FORWARD_MODE_EXCLUDED_STATUSES = frozenset({ProgrammeStatus.DECLINED, ProgrammeStatus.NTU, ProgrammeStatus.EXPIRED})
+NO_DEALS_MESSAGE = (
+    "No programmes match the selected deal statuses, or none of them has a layer that rolls up, "
+    "so there is no portfolio to optimize"
+)
+
+
+def default_optimizer_statuses(mode: OptimizerMode) -> list[ProgrammeStatus]:
+    """Statuses a mode includes by default, in `ProgrammeStatus` order."""
+    if mode == "CURRENT":
+        return [s for s in ProgrammeStatus if s in CURRENT_MODE_STATUSES]
+    return [s for s in ProgrammeStatus if s not in FORWARD_MODE_EXCLUDED_STATUSES]
+
+
+def resolve_optimizer_statuses(
+    mode: OptimizerMode, included_statuses: list[ProgrammeStatus] | None
+) -> list[ProgrammeStatus]:
+    """Statuses whose deals form the portfolio: the explicit selection, else the mode's defaults."""
+    if included_statuses is None:
+        return default_optimizer_statuses(mode)
+    chosen = set(included_statuses)
+    return [s for s in ProgrammeStatus if s in chosen]
+
+
+def optimizer_link_target_statuses(included_statuses: list[ProgrammeStatus] | None) -> set[ProgrammeStatus]:
+    """Statuses a Pricing Output's linked contract may have for its layer to roll up.
+
+    With an explicit selection a linked layer follows the same filter as every other deal. Without one,
+    links resolve as they always have: against every programme that is not declined, NTU or expired.
+    """
+    if included_statuses is not None:
+        return set(included_statuses)
+    return set(default_optimizer_statuses("FORWARD_PLANNING"))
 
 
 class RegionPerilCap(CamelModel):
@@ -56,7 +94,9 @@ class TvarCapConstraint(CamelModel):
 
 
 class OptimizerRequest(CamelModel):
-    mode: Literal["CURRENT", "FORWARD_PLANNING"] = "CURRENT"
+    mode: OptimizerMode = "CURRENT"
+    # Deal statuses to build the portfolio from. None keeps the mode's defaults; any status may be listed.
+    included_statuses: list[ProgrammeStatus] | None = None
     granularity: Literal["DEAL", "LAYER"] = "DEAL"
     objective: Literal["MAX_EXPECTED_PROFIT", "MIN_TVAR_250", "MAX_RISK_ADJUSTED_RETURN"] = "MAX_EXPECTED_PROFIT"
     risk_aversion_lambda: float = Field(default=0.15, ge=0, le=2, allow_inf_nan=False)
@@ -86,6 +126,10 @@ class OptimizerRequest(CamelModel):
             raise ValueError("minDeployedCollateral must be <= maxDeployedCollateral")
         if self.min_line_size_share > self.max_line_size_share:
             raise ValueError("minLineSizeShare must be <= maxLineSizeShare")
+        if self.included_statuses is not None:
+            if not self.included_statuses:
+                raise ValueError("includedStatuses must name at least one status (omit it to use the mode's defaults)")
+            self.included_statuses = resolve_optimizer_statuses(self.mode, self.included_statuses)
         return self
 
 
@@ -109,6 +153,32 @@ class OptimizerLayerCatalogItem(CamelModel):
     default_max_share: float
 
 
+class OptimizerStatusCount(CamelModel):
+    status: ProgrammeStatus
+    programmes: int
+    included: bool
+    default_included: bool
+
+
+class OptimizerCandidatesPage(CamelModel):
+    """One page of the deals a portfolio would be built from, with each deal's layers."""
+
+    mode: str
+    view: str
+    included_statuses: list[ProgrammeStatus]
+    default_statuses: list[ProgrammeStatus]
+    uses_default_statuses: bool
+    status_counts: list[OptimizerStatusCount]
+    universe_programmes: int
+    matched_programmes: int
+    search: str
+    limit: int
+    offset: int
+    programme_ids: list[str]
+    layers: list[OptimizerLayerCatalogItem]
+    retro_candidate: OptimizerLayerCatalogItem | None = None
+
+
 class OptimizedDealRow(CamelModel):
     programme_id: str
     layer_key: str = ""
@@ -116,6 +186,7 @@ class OptimizedDealRow(CamelModel):
     cedent_name: str
     programme_name: str
     direction: str
+    status: str = ""
     current_share: float
     optimal_share: float
     delta_share: float
@@ -146,6 +217,7 @@ class OptimizerResponse(CamelModel):
     after_tvar_250_m: float
     before_mean_roc_pct: float
     after_mean_roc_pct: float
+    included_statuses: list[ProgrammeStatus] = []
     deals: list[OptimizedDealRow]
     constraints: list[ConstraintDiagnostic]
     manifest: RunManifest
@@ -185,6 +257,7 @@ class OptimizedLayerRow(CamelModel):
     programme_name: str
     layer_name: str
     direction: str
+    status: str = ""
     region_perils: list[str]
     current_share: float
     optimal_share: float
@@ -221,6 +294,7 @@ class FrontierExplorerResponse(CamelModel):
     mode: str
     granularity: str
     view: str
+    included_statuses: list[ProgrammeStatus] = []
     compute_ms: float
     initial_portfolio: PortfolioMetricsSnapshot
     initial_layers: list[OptimizedLayerRow]
@@ -229,37 +303,132 @@ class FrontierExplorerResponse(CamelModel):
     manifest: RunManifest
 
 
+# A layer recorded at a 0% line (usual for a declined or NTU deal) is "unplaced".
+_UNPLACED_SHARE = 1e-9
+
+
+def _is_unplaced(node: GraphNodeSpec, programme_signed_line: float) -> bool:
+    """True for a layer whose share, as the rollup reads it, is 0%."""
+    if node.node_type not in LAYER_NODE_TYPES:
+        return False
+    return _layer_share_and_premium(node, programme_signed_line)[0] <= _UNPLACED_SHARE
+
+
+def _at_full_share(node: GraphNodeSpec) -> GraphNodeSpec:
+    params = dict(node.params)
+    if node.node_type == NodeType.CASCADING_TOWER:
+        # The rollup treats a tower as one layer at its first sub-layer's share.
+        params["layers"] = [{**l, "placedShare": 1.0} for l in params.get("layers") or []]
+    else:
+        params["placedShare"] = 1.0
+    return node.model_copy(update={"params": params})
+
+
+def _with_full_share(programme: ProgrammeDeal, layer_ids: frozenset[str] | set[str]) -> ProgrammeDeal:
+    nodes = [_at_full_share(n) if n.node_id in layer_ids else n for n in programme.graph.nodes]
+    return programme.model_copy(update={"graph": programme.graph.model_copy(update={"nodes": nodes})})
+
+
+def _evaluate_for_rollup(
+    programme: ProgrammeDeal, yelt: YeltTable, view: ViewOfRisk
+) -> tuple[ProgrammeDeal, dict[str, np.ndarray], dict[str, np.ndarray], set[str]]:
+    """Evaluate a programme's graph and make its unplaced layers scalable.
+
+    Losses come out of the graph at each layer's placed share, and the optimizer restates them to 100%
+    by dividing by that share. A layer at a 0% line has no loss to restate, which would leave it with
+    premium and no risk. So an unplaced layer is re-run at 100%, together with any unplaced layer
+    above it, and the result replaces the zero vectors of that layer and of each Pricing Output its
+    loss reaches without passing through another layer (directly, or through a combination). Every
+    other node, including a held layer and whatever it feeds, keeps the vectors of the stored graph.
+
+    Returns the programme with its unplaced layers at 100%, the annual and RIP vectors by node, and
+    the ids of the unplaced layers, whose current share stays 0.
+    """
+    _, out = evaluate_programme_dag(programme, yelt, LineageRegistry(persist=False), views=[view])
+    ann, rip = out["annual"][view.value], out["rip"][view.value]
+    unplaced = {n.node_id for n in programme.graph.nodes if _is_unplaced(n, programme.signed_line)}
+    if not unplaced:
+        return programme, ann, rip, unplaced
+
+    nodes_by_id = {n.node_id: n for n in programme.graph.nodes}
+    sources: dict[str, list[str]] = {}
+    for e in programme.graph.edges:
+        sources.setdefault(e.target, []).append(e.source)
+
+    nothing: frozenset[str] = frozenset()
+    above: dict[str, frozenset[str]] = {}  # every unplaced layer upstream of a node
+    reached_by: dict[str, frozenset[str]] = {}  # unplaced layers whose loss reaches a node layer-free
+    ann, rip = dict(ann), dict(rip)
+    runs: dict[frozenset[str], dict[str, dict[str, dict[str, np.ndarray]]]] = {}
+    for node_id in validate_dag_acyclic(programme.graph):
+        srcs = sources.get(node_id, [])
+        above[node_id] = nothing.union(*(above[s] | ({s} & unplaced) for s in srcs))
+        if node_id in unplaced:
+            reached_by[node_id] = frozenset({node_id})
+        elif nodes_by_id[node_id].node_type in LAYER_NODE_TYPES:
+            reached_by[node_id] = nothing
+        else:
+            reached_by[node_id] = nothing.union(*(reached_by[s] for s in srcs))
+        # Only layers and Pricing Outputs roll up, so other nodes keep the stored graph's vectors.
+        rolls_up = node_id in unplaced or nodes_by_id[node_id].node_type == NodeType.PRICING_OUTPUT
+        if not (rolls_up and reached_by[node_id]):
+            continue
+        at_full = reached_by[node_id].union(*(above[z] for z in reached_by[node_id]))
+        if at_full not in runs:
+            _, runs[at_full] = evaluate_programme_dag(
+                _with_full_share(programme, at_full), yelt, LineageRegistry(persist=False), views=[view]
+            )
+        ann[node_id] = runs[at_full]["annual"][view.value][node_id]
+        rip[node_id] = runs[at_full]["rip"][view.value][node_id]
+    return _with_full_share(programme, unplaced), ann, rip, unplaced
+
+
 def _build_vectors(
     programmes: list[ProgrammeDeal],
     yelt: YeltTable,
     ind_yelt: YeltTable,
     req: OptimizerRequest,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
 ) -> tuple[list[dict[str, Any]], np.ndarray]:
-    """Build 100%-share annual loss vectors (M x N) at either DEAL or LAYER granularity + optional retro ILW."""
+    """Build 100%-share annual loss vectors (M x N) at either DEAL or LAYER granularity + optional retro ILW.
+
+    `programmes` are the candidate deals; only those whose status is selected (`req.included_statuses`,
+    else the mode's defaults) enter the portfolio. `all_programmes` resolves the contract a Pricing Output
+    links to, and defaults to `programmes`.
+    """
     items: list[dict[str, Any]] = []
     vecs: list[np.ndarray] = []
 
-    active_progs = [
-        p
-        for p in programmes
-        if not (
-            req.mode == "CURRENT"
-            and p.status not in (ProgrammeStatus.BOUND, ProgrammeStatus.QUOTED, ProgrammeStatus.FIRM_ORDER)
-        )
-    ]
+    allowed = set(resolve_optimizer_statuses(req.mode, req.included_statuses))
+    active_progs = [p for p in programmes if p.status in allowed]
+    link_allowed = optimizer_link_target_statuses(req.included_statuses)
+    link_source = all_programmes if all_programmes is not None else {p.programme_id: p for p in programmes}
+    link_targets = {pid: p for pid, p in link_source.items() if p.status in link_allowed}
     ann_by_prog: dict[str, dict[str, np.ndarray]] = {}
     rip_by_prog: dict[str, dict[str, np.ndarray]] = {}
+    rollup_progs: list[ProgrammeDeal] = []
+    unplaced_layers: set[tuple[str, str]] = set()
     for p in active_progs:
-        _, out = evaluate_programme_dag(p, yelt, LineageRegistry(persist=False), views=[req.view])
-        ann_by_prog[p.programme_id] = out["annual"][req.view.value]
-        rip_by_prog[p.programme_id] = out["rip"][req.view.value]
+        restated, ann, rip, unplaced = _evaluate_for_rollup(p, yelt, req.view)
+        rollup_progs.append(restated)
+        ann_by_prog[p.programme_id] = ann
+        rip_by_prog[p.programme_id] = rip
+        unplaced_layers.update((p.programme_id, layer_id) for layer_id in unplaced)
 
     rollup_entries = extract_rollup_layers(
-        active_progs,
+        rollup_progs,
         ann_by_prog,
         rip_by_prog,
-        all_programmes={p.programme_id: p for p in programmes},
+        all_programmes=link_targets,
     )
+    for entry in rollup_entries:
+        if (entry.programme_id, entry.layer_id) in unplaced_layers:
+            # Restated at 100% above; the line actually held is still 0.
+            entry.signed_line = 0.0
+            entry.limit = 0.0
+            entry.premium = 0.0
+            entry.loss_vec = np.zeros_like(entry.loss_vec_1x)
+            entry.rip_vec = np.zeros_like(entry.rip_vec_1x)
 
     if req.granularity == "LAYER":
         for entry in rollup_entries:
@@ -294,14 +463,27 @@ def _build_vectors(
                 continue
             ann_total = np.zeros(yelt.num_trials, dtype=np.float64)
             rip_total = np.zeros(yelt.num_trials, dtype=np.float64)
-            for entry in p_entries:
-                ann_total += entry.loss_vec
-                rip_total += entry.rip_vec
-            scale = 1.0 / max(p.signed_line, 1e-6)
-            loss_1x = ann_total * scale
-            rip_1x = float(np.mean(rip_total * scale))
-            prem_1x = p.deposit_premium * scale
-            lim_1x = p.limit * scale
+            no_line_held = p.signed_line <= _UNPLACED_SHARE or all(
+                entry.signed_line <= _UNPLACED_SHARE for entry in p_entries
+            )
+            if no_line_held:
+                # No line is held, so there is no current mix to scale: 100% means 100% of every layer.
+                for entry in p_entries:
+                    ann_total += entry.loss_vec_1x
+                    rip_total += entry.rip_vec_1x
+                loss_1x = ann_total
+                rip_1x = float(np.mean(rip_total))
+                prem_1x = sum(entry.prem_1x for entry in p_entries)
+                lim_1x = sum(entry.limit_1x for entry in p_entries)
+            else:
+                for entry in p_entries:
+                    ann_total += entry.loss_vec
+                    rip_total += entry.rip_vec
+                scale = 1.0 / max(p.signed_line, 1e-6)
+                loss_1x = ann_total * scale
+                rip_1x = float(np.mean(rip_total * scale))
+                prem_1x = p.deposit_premium * scale
+                lim_1x = p.limit * scale
             el_1x = float(np.mean(loss_1x))
             items.append({
                 "layer_key": p.programme_id,
@@ -312,7 +494,7 @@ def _build_vectors(
                 "layer_name": p.programme_name,
                 "direction": "ASSUMED",
                 "status": p.status.value,
-                "current_share": p.signed_line,
+                "current_share": 0.0 if no_line_held else p.signed_line,
                 "limit_1x": lim_1x,
                 "prem_1x": prem_1x,
                 "el_1x": el_1x,
@@ -365,11 +547,19 @@ def list_optimizable_layers(
     yelt: YeltTable,
     ind_yelt: YeltTable,
     view: ViewOfRisk = ViewOfRisk.ADJUSTED,
-    mode: Literal["CURRENT", "FORWARD_PLANNING"] = "FORWARD_PLANNING",
+    mode: OptimizerMode = "FORWARD_PLANNING",
+    included_statuses: list[ProgrammeStatus] | None = None,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
 ) -> list[OptimizerLayerCatalogItem]:
     """Return every layer-level decision variable with 1x economics and default participation bounds."""
-    req = OptimizerRequest(mode=mode, granularity="LAYER", view=view, include_retro_ilw_candidate=True)
-    items, _ = _build_vectors(programmes, yelt, ind_yelt, req)
+    req = OptimizerRequest(
+        mode=mode,
+        granularity="LAYER",
+        view=view,
+        include_retro_ilw_candidate=True,
+        included_statuses=included_statuses,
+    )
+    items, _ = _build_vectors(programmes, yelt, ind_yelt, req, all_programmes)
     out: list[OptimizerLayerCatalogItem] = []
     for it in items:
         rol_pct = (it["prem_1x"] / it["limit_1x"]) * 100.0 if it["limit_1x"] > 0 else (req.retro_ilw_rol * 100.0)
@@ -467,6 +657,7 @@ def _compute_portfolio_snapshot(
                 programme_name=it["programme_name"],
                 layer_name=it["layer_name"],
                 direction=it["direction"],
+                status=it["status"],
                 region_perils=it["region_perils"],
                 current_share=round(it["current_share"], 4),
                 optimal_share=round(w, 4),
@@ -767,13 +958,14 @@ def solve_portfolio_optimization(
     yelt: YeltTable,
     ind_yelt: YeltTable,
     lineage: LineageRegistry,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
 ) -> OptimizerResponse:
     """Solve constrained portfolio optimization via HiGHS LP/MILP with tail-scenario reduction & shadow prices."""
     t0 = time.perf_counter()
-    items, mat = _build_vectors(programmes, yelt, ind_yelt, req)
+    items, mat = _build_vectors(programmes, yelt, ind_yelt, req, all_programmes)
     m, n_trials = mat.shape
-    if m == 0:
-        raise ValueError("No candidate deals available for optimization")
+    if not any(it["direction"] == "ASSUMED" for it in items):
+        raise ValueError(NO_DEALS_MESSAGE)
 
     cur_w = np.array([it["current_share"] for it in items], dtype=np.float64)
     _, base_tvar_250, _ = rle.euler_cotvar(np.ascontiguousarray(mat * cur_w[:, None], dtype=np.float64), 250.0)
@@ -804,6 +996,7 @@ def solve_portfolio_optimization(
                 cedent_name=it["cedent_name"],
                 programme_name=it["programme_name"],
                 direction=it["direction"],
+                status=it["status"],
                 current_share=round(it["current_share"], 4),
                 optimal_share=round(w, 4),
                 delta_share=round(w - it["current_share"], 4),
@@ -815,10 +1008,13 @@ def solve_portfolio_optimization(
         )
 
     compute_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    included_statuses = resolve_optimizer_statuses(req.mode, req.included_statuses)
     manifest = lineage.record_manifest(
         run_type="PORTFOLIO_OPTIMIZER",
         input_hashes={"sim_set": yelt.content_hash, "req": canonical_hash(req.model_dump())},
-        parameters=req.model_dump(),
+        # `included_statuses` is what was asked for (None = the mode's defaults); `effective_statuses` is
+        # what that meant at run time, so the record stays readable if the defaults ever change.
+        parameters={**req.model_dump(), "effective_statuses": [s.value for s in included_statuses]},
         output_payload={"status": status_str, "after_expected_profit_m": round(opt_profit, 4), "after_tvar_250_m": round(float(opt_tvar_250), 4)},
         breadcrumb=[BreadcrumbStep(entity_type="SIM_SET", entity_id=yelt.sim_set_id, label=yelt.name, content_hash=yelt.content_hash)],
     )
@@ -835,6 +1031,7 @@ def solve_portfolio_optimization(
         after_tvar_250_m=round(float(opt_tvar_250), 4),
         before_mean_roc_pct=round(base_roc, 2),
         after_mean_roc_pct=round(opt_roc, 2),
+        included_statuses=included_statuses,
         deals=deal_rows,
         constraints=diags,
         manifest=manifest,
@@ -849,6 +1046,7 @@ def compute_efficient_frontier(
     ind_yelt: YeltTable,
     lineage: LineageRegistry,
     num_points: int = 6,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
 ) -> list[FrontierPoint]:
     """Sweep 1-in-250 TVaR budgets to generate the Pareto Efficient Frontier."""
     tvar_grid = np.linspace(max(40.0, req.max_tvar_250_m * 0.45), req.max_tvar_250_m * 1.25, num_points)
@@ -861,6 +1059,7 @@ def compute_efficient_frontier(
             yelt=yelt,
             ind_yelt=ind_yelt,
             lineage=LineageRegistry(persist=False),
+            all_programmes=all_programmes,
         )
         dep = sum(d.optimal_limit_m for d in res.deals if d.direction == "ASSUMED")
         points.append(
@@ -884,14 +1083,16 @@ def explore_efficient_frontier(
     ind_yelt: YeltTable,
     lineage: LineageRegistry,
     num_points: int = 12,
+    all_programmes: dict[str, ProgrammeDeal] | None = None,
 ) -> FrontierExplorerResponse:
     """Build full interactive Pareto Frontier Explorer with per-point layer shares, Euler Co-TVaR, Co-VaR, and RP stacks."""
     t0 = time.perf_counter()
     layer_req = req.model_copy(update={"granularity": req.granularity})
-    items, mat = _build_vectors(programmes, yelt, ind_yelt, layer_req)
+    items, mat = _build_vectors(programmes, yelt, ind_yelt, layer_req, all_programmes)
     m, n_trials = mat.shape
-    if m == 0:
-        raise ValueError("No candidate layers available for frontier exploration")
+    if not any(it["direction"] == "ASSUMED" for it in items):
+        raise ValueError(NO_DEALS_MESSAGE)
+    included_statuses = resolve_optimizer_statuses(req.mode, req.included_statuses)
 
     cur_w = np.array([it["current_share"] for it in items], dtype=np.float64)
     init_snap, init_layers, _ = _compute_portfolio_snapshot(items, mat, cur_w, req.total_capital)
@@ -947,7 +1148,14 @@ def explore_efficient_frontier(
     manifest = lineage.record_manifest(
         run_type="FRONTIER_EXPLORER",
         input_hashes={"sim_set": yelt.content_hash, "req": canonical_hash(req.model_dump())},
-        parameters={"num_points": num_points, "granularity": req.granularity, "mode": req.mode, "view": req.view.value},
+        parameters={
+            "num_points": num_points,
+            "granularity": req.granularity,
+            "mode": req.mode,
+            "view": req.view.value,
+            "included_statuses": None if req.included_statuses is None else [s.value for s in req.included_statuses],
+            "effective_statuses": [s.value for s in included_statuses],
+        },
         output_payload={
             "points": len(frontier_pts),
             "recommended_index": rec_idx,
@@ -961,6 +1169,7 @@ def explore_efficient_frontier(
         mode=req.mode,
         granularity=req.granularity,
         view=req.view.value,
+        included_statuses=included_statuses,
         compute_ms=compute_ms,
         initial_portfolio=init_snap,
         initial_layers=init_layers,

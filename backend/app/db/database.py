@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
@@ -36,6 +36,14 @@ def init_engine(db_url: str | None = None):
     url = db_url or get_database_url()
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
     _engine = create_engine(url, connect_args=connect_args, future=True)
+    if url.startswith("sqlite"):
+        # SQLite's own lower() only folds ASCII, so a case-insensitive search would miss "Élan" for "élan".
+        @event.listens_for(_engine, "connect")
+        def _unicode_lower(dbapi_connection, _record) -> None:
+            dbapi_connection.create_function(
+                "lower", 1, lambda v: v.lower() if isinstance(v, str) else v, deterministic=True
+            )
+
     _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, expire_on_commit=False)
     Base.metadata.create_all(bind=_engine)
     # Lightweight additive column check so existing local SQLite DBs pick up new columns seamlessly

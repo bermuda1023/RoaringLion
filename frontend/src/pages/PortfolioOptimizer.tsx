@@ -1,7 +1,28 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
 import { fetchJson, postJson } from '../api/client';
-import { fmtMoneyM, fmtNum, fmtPct, fmtRatioPct } from '../utils/format';
+import { DealStatusBadge, LayerStatusBadge } from '../components/DealStatusBadge';
+import {
+  OptimizerCandidatesTable,
+  listedLayers,
+  type LayerBoundState,
+} from '../components/OptimizerCandidatesTable';
+import { OptimizerStatusFilter } from '../components/OptimizerStatusFilter';
+import {
+  PROGRAMME_STATUSES,
+  type OptimizerCandidatesPage,
+  type OptimizerMode,
+  type ProgrammeStatus,
+} from '../types/contracts';
+import { fmtInt, fmtMoneyM, fmtNum, fmtPct, fmtRatioPct } from '../utils/format';
+import {
+  candidatesUrl,
+  countProgrammesByStatus,
+  defaultStatusesForMode,
+  isOffRiskStatus,
+  sameStatuses,
+  toggleStatus,
+} from '../utils/optimizerStatuses';
 import {
   LayerContributionBarChart,
   ParetoFrontierChart,
@@ -14,41 +35,17 @@ import {
   type YAxisKey,
 } from '../components/OptimizerCharts';
 
-interface OptimizerLayerCatalogItem {
-  layerKey: string;
-  programmeId: string;
-  layerId: string;
-  cedentName: string;
-  programmeName: string;
-  layerName: string;
-  direction: string;
-  status: string;
-  regionPerils: string[];
-  currentShare: number;
-  limit1xM: number;
-  premium1xM: number;
-  el1xM: number;
-  expectedProfit1xM: number;
-  rolPct: number;
-  defaultMinShare: number;
-  defaultMaxShare: number;
-}
-
 interface FrontierExplorerResponse {
   mode: string;
   granularity: string;
   view: string;
+  /** Deal statuses the portfolio was built from. */
+  includedStatuses?: ProgrammeStatus[];
   computeMs: number;
   initialPortfolio: PortfolioMetricsSnapshot;
   initialLayers: OptimizedLayerRow[];
   recommendedIndex: number;
   frontier: FrontierExplorerPoint[];
-}
-
-interface LayerBoundState {
-  minPct: number;
-  maxPct: number;
-  locked: boolean;
 }
 
 type DynamicConstraint =
@@ -60,6 +57,42 @@ type DynamicConstraint =
 type SubTab = 'results' | 'config' | 'portfolio';
 
 const REGION_PERILS = ['US-FL-WS', 'US-TX-WS', 'US-SE-WS', 'US-CA-EQ', 'JP-KANTO-EQ', 'EU-DE-WS'];
+
+const MODE_LABELS: Record<OptimizerMode, string> = {
+  FORWARD_PLANNING: 'Forward-Looking Planning',
+  CURRENT: 'Current Portfolio Rebalance',
+};
+
+/** Programmes listed per page of the deal table. */
+const CANDIDATE_PAGE_SIZE = 25;
+
+/** How many deals of each status a frontier point holds, so declined deals are visible at a glance. */
+function PortfolioStatusSummary({ layers, stale }: { layers: OptimizedLayerRow[]; stale: boolean }) {
+  const counts = countProgrammesByStatus(layers.filter((l) => l.status));
+  const offRisk = counts.filter((c) => isOffRiskStatus(c.status));
+  if (counts.length === 0 && !stale) return null;
+  return (
+    <div className="status-summary">
+      {counts.length > 0 && <span>Deals in this portfolio by status:</span>}
+      {counts.map((c) => (
+        <span key={c.status} className="deal-name">
+          <DealStatusBadge status={c.status} /> {fmtInt(c.programmes)}
+        </span>
+      ))}
+      {offRisk.length > 0 && (
+        <div className="warning-banner" role="note">
+          This portfolio includes deals that are not on risk ({offRisk.map((c) => `${fmtInt(c.programmes)} ${c.status}`).join(', ')}).
+          Their rows are marked below.
+        </div>
+      )}
+      {stale && (
+        <div className="warning-banner" role="note">
+          The status selection changed after this run. Run Frontier Explorer to apply it.
+        </div>
+      )}
+    </div>
+  );
+}
 
 function DeltaBar({ deltaShare, maxAbsDelta }: { deltaShare: number; maxAbsDelta: number }) {
   const pct = deltaShare * 100;
@@ -122,7 +155,7 @@ export function PortfolioOptimizer() {
   const [subTab, setSubTab] = useState<SubTab>('results');
 
   // Core Optimization Config state
-  const [mode, setMode] = useState<'CURRENT' | 'FORWARD_PLANNING'>('FORWARD_PLANNING');
+  const [mode, setMode] = useState<OptimizerMode>('FORWARD_PLANNING');
   const [view, setView] = useState<'ADJUSTED' | 'UNADJUSTED'>('ADJUSTED');
   const [objective, setObjective] = useState<'MAX_EXPECTED_PROFIT' | 'MIN_TVAR_250' | 'MAX_RISK_ADJUSTED_RETURN'>(
     'MAX_EXPECTED_PROFIT',
@@ -144,8 +177,14 @@ export function PortfolioOptimizer() {
     { id: 'c-el', kind: 'EL_CAP', maxRatio: 0.35 },
   ]);
 
-  // Per-layer participation bounds
+  // Per-layer participation bounds the user has set; any other layer keeps the solver's defaults
   const [layerBounds, setLayerBounds] = useState<Record<string, LayerBoundState>>({});
+
+  // Deal statuses in the portfolio. null follows the horizon mode's defaults.
+  const [customStatuses, setCustomStatuses] = useState<ProgrammeStatus[] | null>(null);
+  const [search, setSearch] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [offset, setOffset] = useState(0);
 
   // Frontier Explorer interactive selection & axis selectors
   const [selectedIdx, setSelectedIdx] = useState<number>(0);
@@ -153,28 +192,52 @@ export function PortfolioOptimizer() {
   const [yKey, setYKey] = useState<YAxisKey>('expectedProfitM');
   const [forkedBranchMsg, setForkedBranchMsg] = useState<string | null>(null);
 
-  const layersQ = useQuery({
-    queryKey: ['optimizerLayers', view, mode],
-    queryFn: () => fetchJson<OptimizerLayerCatalogItem[]>(`/api/optimizer/layers?view=${view}&mode=${mode}`),
-  });
-
-  // Initialize editable layer bounds whenever the catalog loads
   useEffect(() => {
-    if (!layersQ.data) return;
-    setLayerBounds((prev) => {
-      const next: Record<string, LayerBoundState> = { ...prev };
-      for (const l of layersQ.data) {
-        if (!next[l.layerKey]) {
-          next[l.layerKey] = {
-            minPct: Math.round(l.defaultMinShare * 100),
-            maxPct: Math.round(l.defaultMaxShare * 100),
-            locked: false,
-          };
-        }
-      }
-      return next;
-    });
-  }, [layersQ.data]);
+    const timer = setTimeout(() => {
+      setSearchTerm(search.trim());
+      setOffset(0);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  // One page of the deals in the selected statuses; the server filters, searches and pages them.
+  const candidatesQ = useQuery({
+    queryKey: ['optimizerCandidates', view, mode, customStatuses, searchTerm, offset],
+    queryFn: () =>
+      fetchJson<OptimizerCandidatesPage>(
+        candidatesUrl({
+          view,
+          mode,
+          includedStatuses: customStatuses,
+          search: searchTerm,
+          limit: CANDIDATE_PAGE_SIZE,
+          offset,
+        }),
+      ),
+    placeholderData: keepPreviousData,
+  });
+  const candidates = candidatesQ.data;
+
+  const defaultStatuses =
+    candidates && candidates.mode === mode ? candidates.defaultStatuses : defaultStatusesForMode(mode);
+  const selectedStatuses = customStatuses ?? defaultStatuses;
+  const statusCounts = useMemo(
+    () =>
+      candidates
+        ? (Object.fromEntries(candidates.statusCounts.map((c) => [c.status, c.programmes])) as Partial<
+            Record<ProgrammeStatus, number>
+          >)
+        : undefined,
+    [candidates],
+  );
+  const universeProgrammes = statusCounts
+    ? selectedStatuses.reduce((n, s) => n + (statusCounts[s] ?? 0), 0)
+    : undefined;
+
+  const changeStatuses = (next: ProgrammeStatus[] | null) => {
+    setCustomStatuses(next);
+    setOffset(0);
+  };
 
   const buildPayload = () => {
     const regionPerilCaps = constraints
@@ -203,6 +266,7 @@ export function PortfolioOptimizer() {
 
     return {
       mode,
+      includedStatuses: customStatuses,
       granularity: 'LAYER',
       objective,
       riskAversionLambda: riskLambda,
@@ -296,24 +360,28 @@ export function PortfolioOptimizer() {
   };
 
   const applyLayerPreset = (preset: 'open' | 'band25' | 'lockAll') => {
-    if (!layersQ.data) return;
-    const next: Record<string, LayerBoundState> = {};
-    for (const l of layersQ.data) {
-      const cur = Math.round(l.currentShare * 100);
-      if (preset === 'open') {
-        next[l.layerKey] = { minPct: 0, maxPct: l.direction === 'EXTERNAL_RETRO' ? 200 : 150, locked: false };
-      } else if (preset === 'band25') {
-        next[l.layerKey] = {
-          minPct: Math.max(0, cur - 25),
-          maxPct: Math.min(200, cur + 25),
-          locked: false,
-        };
-      } else {
-        next[l.layerKey] = { minPct: cur, maxPct: cur, locked: true };
-      }
+    if (preset === 'open') {
+      // Dropping every override returns all layers, on every page, to the solver's open defaults.
+      setLayerBounds({});
+      return;
     }
-    setLayerBounds(next);
+    const listed = listedLayers(candidates);
+    setLayerBounds((prev) => {
+      const next = { ...prev };
+      for (const l of listed) {
+        const cur = Math.round(l.currentShare * 100);
+        next[l.layerKey] =
+          preset === 'band25'
+            ? { minPct: Math.max(0, cur - 25), maxPct: Math.min(200, cur + 25), locked: false }
+            : { minPct: cur, maxPct: cur, locked: true };
+      }
+      return next;
+    });
   };
+
+  const morePagesThanListed = !!candidates && candidates.matchedProgrammes > candidates.programmeIds.length;
+  const resultIsStale =
+    !!data?.includedStatuses && !exploreMut.isPending && !sameStatuses(data.includedStatuses, selectedStatuses);
 
   return (
     <>
@@ -405,18 +473,29 @@ export function PortfolioOptimizer() {
                     Horizon Mode
                     <select
                       value={mode}
-                      onChange={(e) => setMode(e.target.value as any)}
+                      onChange={(e) => {
+                        const next = e.target.value as OptimizerMode;
+                        setMode(next);
+                        // A selection that is exactly the new mode's defaults means "defaults" again.
+                        if (customStatuses && sameStatuses(customStatuses, defaultStatusesForMode(next))) {
+                          setCustomStatuses(null);
+                        }
+                        setOffset(0);
+                      }}
                       style={{ width: '100%', marginTop: 4 }}
                     >
-                      <option value="FORWARD_PLANNING">Forward-Looking Planning</option>
-                      <option value="CURRENT">Current Portfolio Rebalance</option>
+                      <option value="FORWARD_PLANNING">{MODE_LABELS.FORWARD_PLANNING}</option>
+                      <option value="CURRENT">{MODE_LABELS.CURRENT}</option>
                     </select>
                   </label>
                   <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                     View of Risk
                     <select
                       value={view}
-                      onChange={(e) => setView(e.target.value as any)}
+                      onChange={(e) => {
+                        setView(e.target.value as any);
+                        setOffset(0);
+                      }}
                       style={{ width: '100%', marginTop: 4 }}
                     >
                       <option value="ADJUSTED">ADJUSTED (House Uplifts)</option>
@@ -727,8 +806,23 @@ export function PortfolioOptimizer() {
               </div>
             </div>
 
-            {/* Right: Layer Participation Constraints Table (Analyze Re-style) */}
+            {/* Right: which deals are in the portfolio, and each layer's participation bounds */}
             <div className="panel">
+              <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 10 }}>
+                Deals in Portfolio
+              </div>
+              <OptimizerStatusFilter
+                modeLabel={MODE_LABELS[mode]}
+                selected={selectedStatuses}
+                isCustom={customStatuses !== null}
+                counts={statusCounts}
+                universeProgrammes={universeProgrammes}
+                onToggle={(status) => changeStatuses(toggleStatus(customStatuses, defaultStatuses, status))}
+                onSelectAll={() =>
+                  changeStatuses(sameStatuses(PROGRAMME_STATUSES, defaultStatuses) ? null : [...PROGRAMME_STATUSES])
+                }
+                onReset={() => changeStatuses(null)}
+              />
               <div
                 style={{
                   display: 'flex',
@@ -754,86 +848,26 @@ export function PortfolioOptimizer() {
                   </button>
                 </div>
               </div>
-              <div className="table-wrap"><table>
-                <thead>
-                  <tr>
-                    <th>Layer</th>
-                    <th className="num">Cur %</th>
-                    <th className="num">Min %</th>
-                    <th className="num">Max %</th>
-                    <th className="num">Lock</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(layersQ.data ?? []).map((l) => {
-                    const b = layerBounds[l.layerKey] ?? {
-                      minPct: Math.round(l.defaultMinShare * 100),
-                      maxPct: Math.round(l.defaultMaxShare * 100),
-                      locked: false,
-                    };
-                    return (
-                      <tr key={l.layerKey}>
-                        <td>
-                          <div style={{ fontWeight: 600, fontSize: 12 }}>{l.cedentName}</div>
-                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                            {l.layerName} · ${l.limit1xM.toFixed(0)}m lim · EL ${l.el1xM.toFixed(2)}m
-                          </div>
-                        </td>
-                        <td className="num">{(l.currentShare * 100).toFixed(0)}%</td>
-                        <td className="num">
-                          <input
-                            type="number"
-                            min={0}
-                            max={300}
-                            disabled={b.locked}
-                            value={b.minPct}
-                            onChange={(e) =>
-                              setLayerBounds((prev) => ({
-                                ...prev,
-                                [l.layerKey]: { ...b, minPct: Number(e.target.value) },
-                              }))
-                            }
-                            style={{ width: 58, textAlign: 'right', color: b.minPct > 0 ? 'var(--negative)' : 'var(--text)' }}
-                          />
-                        </td>
-                        <td className="num">
-                          <input
-                            type="number"
-                            min={0}
-                            max={300}
-                            disabled={b.locked}
-                            value={b.maxPct}
-                            onChange={(e) =>
-                              setLayerBounds((prev) => ({
-                                ...prev,
-                                [l.layerKey]: { ...b, maxPct: Number(e.target.value) },
-                              }))
-                            }
-                            style={{ width: 58, textAlign: 'right' }}
-                          />
-                        </td>
-                        <td className="num">
-                          <input
-                            type="checkbox"
-                            checked={b.locked}
-                            onChange={(e) => {
-                              const cur = Math.round(l.currentShare * 100);
-                              setLayerBounds((prev) => ({
-                                ...prev,
-                                [l.layerKey]: {
-                                  minPct: e.target.checked ? cur : b.minPct,
-                                  maxPct: e.target.checked ? cur : b.maxPct,
-                                  locked: e.target.checked,
-                                },
-                              }));
-                            }}
-                          />
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table></div>
+              {morePagesThanListed && (
+                <div className="deal-sub" style={{ marginBottom: 8 }}>
+                  ±25% Band and Lock All apply to the layers listed on this page. 0–150% Open clears every
+                  bound. Layers you have not changed stay open.
+                </div>
+              )}
+              <OptimizerCandidatesTable
+                page={candidates}
+                isPreviousPage={candidatesQ.isPlaceholderData}
+                offset={offset}
+                pageSize={CANDIDATE_PAGE_SIZE}
+                isFetching={candidatesQ.isFetching}
+                error={candidatesQ.error}
+                onRetry={() => void candidatesQ.refetch()}
+                search={search}
+                onSearch={setSearch}
+                onPage={setOffset}
+                bounds={layerBounds}
+                onBoundChange={(layerKey, next) => setLayerBounds((prev) => ({ ...prev, [layerKey]: next }))}
+              />
             </div>
           </div>
         )}
@@ -892,6 +926,8 @@ export function PortfolioOptimizer() {
                     </button>
                   </div>
                 </div>
+
+                <PortfolioStatusSummary layers={activePoint.layers} stale={resultIsStale} />
 
                 {/* Top KPI Strip */}
                 <div className="grid-kpi">
@@ -980,9 +1016,12 @@ export function PortfolioOptimizer() {
                       </thead>
                       <tbody>
                         {sortedShareRows.map((r) => (
-                          <tr key={r.layerKey}>
+                          <tr key={r.layerKey} className={isOffRiskStatus(r.status) ? 'row-off-risk' : undefined}>
                             <td>
-                              <div style={{ fontWeight: 600, fontSize: 12 }}>{r.cedentName}</div>
+                              <div className="deal-name">
+                                {r.cedentName}
+                                <LayerStatusBadge status={r.status} direction={r.direction} />
+                              </div>
                               <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{r.layerName}</div>
                             </td>
                             <td className="num" style={{ fontWeight: 700, color: 'var(--accent)' }}>
@@ -1098,6 +1137,7 @@ export function PortfolioOptimizer() {
         {/* ══════════════════ TAB 3: PORTFOLIO DASHBOARD (LAYER CONTRIBUTION DEEP-DIVE) ══════════════════ */}
         {subTab === 'portfolio' && data && activePoint && (
           <>
+            <PortfolioStatusSummary layers={activePoint.layers} stale={resultIsStale} />
             <div className="panel" style={{ marginBottom: 14 }}>
               <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-soft)', marginBottom: 8 }}>
                 Layer Summary — Frontier Point #{activePoint.pointIndex + 1} (TVaR 250: $
@@ -1107,6 +1147,7 @@ export function PortfolioOptimizer() {
                 <thead>
                   <tr>
                     <th>Layer</th>
+                    <th title="Deal status">Status</th>
                     <th className="num" title="Share">Share</th>
                     <th title="Share change versus the initial portfolio">Δ</th>
                     <th className="num" title="Limit, $M">Lim</th>
@@ -1119,10 +1160,13 @@ export function PortfolioOptimizer() {
                 </thead>
                 <tbody>
                   {sortedShareRows.map((r) => (
-                    <tr key={r.layerKey}>
+                    <tr key={r.layerKey} className={isOffRiskStatus(r.status) ? 'row-off-risk' : undefined}>
                       <td>
                         <div style={{ fontWeight: 600, fontSize: 12 }}>{r.cedentName}</div>
                         <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{r.layerName}</div>
+                      </td>
+                      <td>
+                        <LayerStatusBadge status={r.status} direction={r.direction} />
                       </td>
                       <td className="num" style={{ fontWeight: 700, color: 'var(--accent)' }}>
                         {fmtRatioPct(r.optimalShare, 1)}

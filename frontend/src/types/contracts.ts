@@ -316,3 +316,68 @@ export interface GraphTemplate {
   /** The suggestion's pricing output is already bound, so it is not offered. */
   pricingBound?: boolean;
 }
+
+/** `ProgrammeStatus` wire enum, in the order of docs/CONTRACTS.md §5. */
+export const PROGRAMME_STATUSES = [
+  'SUBMISSION',
+  'INDICATIVE',
+  'QUOTED',
+  'AUTHORIZED',
+  'FIRM_ORDER',
+  'BOUND',
+  'BOUND_FOR_OPS',
+  'DECLINED',
+  'NTU',
+  'EXPIRED',
+  'PLANNED',
+] as const;
+
+export type ProgrammeStatus = (typeof PROGRAMME_STATUSES)[number];
+
+export type OptimizerMode = 'CURRENT' | 'FORWARD_PLANNING';
+
+/** One layer-level decision variable of the optimizer, at 100% share. `status` is the deal's status. */
+export interface OptimizerLayerCatalogItem {
+  layerKey: string;
+  programmeId: string;
+  layerId: string;
+  cedentName: string;
+  programmeName: string;
+  layerName: string;
+  direction: string;
+  status: string;
+  regionPerils: string[];
+  currentShare: number;
+  limit1xM: number;
+  premium1xM: number;
+  el1xM: number;
+  expectedProfit1xM: number;
+  rolPct: number;
+  defaultMinShare: number;
+  defaultMaxShare: number;
+}
+
+export interface OptimizerStatusCount {
+  status: ProgrammeStatus;
+  programmes: number;
+  included: boolean;
+  defaultIncluded: boolean;
+}
+
+/** `GET /api/optimizer/candidates`: one page of the deals a portfolio is built from. */
+export interface OptimizerCandidatesPage {
+  mode: OptimizerMode;
+  view: ViewOfRisk;
+  includedStatuses: ProgrammeStatus[];
+  defaultStatuses: ProgrammeStatus[];
+  usesDefaultStatuses: boolean;
+  statusCounts: OptimizerStatusCount[];
+  universeProgrammes: number;
+  matchedProgrammes: number;
+  search: string;
+  limit: number;
+  offset: number;
+  programmeIds: string[];
+  layers: OptimizerLayerCatalogItem[];
+  retroCandidate: OptimizerLayerCatalogItem | null;
+}
