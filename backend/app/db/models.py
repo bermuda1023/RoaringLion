@@ -55,6 +55,7 @@ class ContractRecord(Base):
     sim_set_id: Mapped[str] = mapped_column(String(80), index=True)
     portfolio_snapshot_date: Mapped[str | None] = mapped_column(String(30), nullable=True)
     exposure_eclipse_programme_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    watched_folder: Mapped[str | None] = mapped_column(String(260), nullable=True)
 
     region_perils_json: Mapped[str] = mapped_column(Text, default="[]")
     perils_json: Mapped[str] = mapped_column(Text, default="[]")
@@ -171,4 +172,36 @@ class ScenarioRecord(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     losses_json: Mapped[str] = mapped_column(Text, default="[]")
     content_hash: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class SubmissionDraftRecord(Base):
+    __tablename__ = "submission_drafts"
+
+    draft_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    door: Mapped[str] = mapped_column(String(20), index=True)  # DROP_IN | EMAIL | FOLDER
+    status: Mapped[str] = mapped_column(String(30), index=True, default="PENDING_REVIEW")  # PENDING_REVIEW | CONFIRMED | DISCARDED
+    target_programme_id: Mapped[str | None] = mapped_column(String(80), index=True, nullable=True)
+    confirmed_programme_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    source_filename: Mapped[str] = mapped_column(String(260))
+    source_file_type: Mapped[str] = mapped_column(String(20))  # YELT | ELT | PDF | EXCEL | TEXT
+    source_ref: Mapped[str] = mapped_column(String(300), default="")
+    source_hash: Mapped[str] = mapped_column(String(64), default="")
+    sim_set_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    overall_confidence: Mapped[float] = mapped_column(Float, default=0.5)
+    extracted_json: Mapped[str] = mapped_column(Text, default="{}")
+    graph_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WatchedIngestionRecord(Base):
+    __tablename__ = "watched_ingestions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    door: Mapped[str] = mapped_column(String(20), index=True)  # FOLDER | EMAIL
+    programme_id: Mapped[str | None] = mapped_column(String(80), index=True, nullable=True)
+    external_key: Mapped[str] = mapped_column(String(400), unique=True, index=True)
+    draft_id: Mapped[str] = mapped_column(String(80), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

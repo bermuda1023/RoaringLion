@@ -73,6 +73,7 @@ from app.services.portfolio_snapshot import (
 )
 from app.services.sim_sets import SimSetStore
 from app.routes_extended import create_extended_router
+from app.routes_intake import create_intake_router
 
 logger = logging.getLogger(__name__)
 
@@ -973,5 +974,15 @@ app.include_router(
         lineage=LINEAGE,
         base_sim_id=_base_yelt.sim_set_id,
         ind_sim_id=_ind_yelt.sim_set_id,
+    )
+)
+
+app.include_router(
+    create_intake_router(
+        contract_store=CONTRACT_STORE,
+        sim_store=SIM_STORE,
+        lineage=LINEAGE,
+        base_sim_id=_base_yelt.sim_set_id,
+        on_cms_mutated=_sync_memory_aliases,
     )
 )

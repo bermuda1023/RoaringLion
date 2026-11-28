@@ -1,0 +1,1868 @@
+"""Tests for the unified Submission Intake Pipeline (Drop-in, Email, Folder + Confirm/Discard gate)."""
+
+from __future__ import annotations
+
+import base64
+import io
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from app.main import app
+
+client = TestClient(app)
+
+
+def _make_minimal_pdf(lines: list[str]) -> bytes:
+    """Build a tiny, valid single-page PDF containing the given text lines (no external deps)."""
+    def _esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+    text_ops = ["BT", "/F1 10 Tf", "50 750 Td", "14 TL"]
+    for idx, line in enumerate(lines):
+        if idx == 0:
+            text_ops.append(f"({_esc(line)}) Tj")
+        else:
+            text_ops.append(f"T* ({_esc(line)}) Tj")
+    text_ops.append("ET")
+    stream = "\n".join(text_ops).encode("latin-1")
+
+    objs: list[bytes] = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+        b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        b"5 0 obj\n<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream\nendobj\n",
+    ]
+
+    buf = io.BytesIO()
+    buf.write(b"%PDF-1.4\n")
+    offsets: list[int] = [0]
+    for obj in objs:
+        offsets.append(buf.tell())
+        buf.write(obj)
+    xref_pos = buf.tell()
+    buf.write(f"xref\n0 {len(objs) + 1}\n".encode("ascii"))
+    buf.write(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        buf.write(f"{off:010d} 00000 n \n".encode("ascii"))
+    buf.write(
+        f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode("ascii")
+    )
+    return buf.getvalue()
+
+
+def _make_sample_xlsx() -> bytes:
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Submission"
+    ws.append(["Cedent", "Apex Coastal Mutual"])
+    ws.append(["Programme", "Florida Peak Cat XL 2027"])
+    ws.append(["Broker", "Guy Carpenter"])
+    ws.append(["Inception", "2027-01-01"])
+    ws.append(["Expiry", "2027-12-31"])
+    ws.append(["Currency", "USD"])
+    ws.append(["Region/Peril", "US-FL-WS, US-TX-WS"])
+    ws.append([])
+    ws.append(["Layer", "Name", "Type", "Limit", "Attachment", "Premium", "ROL", "Line"])
+    ws.append(["L1", "Primary Cat XL", "OCC_XL", 20, 40, 4.4, "22%", "15%"])
+    ws.append(["L2", "Top Cat XL", "OCC_XL", 30, 60, 4.2, "14%", "10%"])
+    ws.append([])
+    ws.append(["Year", "Event", "Ground Up Loss", "Region Peril"])
+    ws.append([2022, "Hurricane Ian", 88.5, "US-FL-WS"])
+    ws.append([2017, "Hurricane Irma", 54.0, "US-FL-WS"])
+
+    out = io.BytesIO()
+    wb.save(out)
+    wb.close()
+    return out.getvalue()
+
+
+def _make_yelt_csv() -> bytes:
+    lines = [
+        "trial_id,event_id,day_of_year,region_peril_key,loss_amount",
+        "1,1001,235,US-FL-WS,18.5",
+        "2,1002,260,US-FL-WS,42.0",
+        "5,1003,210,US-TX-WS,27.5",
+        "10,1004,280,US-FL-WS,65.0",
+    ]
+    return "\n".join(lines).encode("utf-8")
+
+
+def _make_elt_csv() -> bytes:
+    lines = [
+        "event_id,annual_rate,mean_loss,sd_indep,region_peril_key",
+        "5001,0.02,35.0,8.0,US-FL-WS",
+        "5002,0.01,60.0,15.0,US-TX-WS",
+    ]
+    return "\n".join(lines).encode("utf-8")
+
+
+def test_yelt_csv_routes_to_existing_ingest_and_attaches_to_draft():
+    before_contracts = len(client.get("/api/contracts").json())
+    res = client.post(
+        "/api/intake/drop-in",
+        files={"file": ("coastal_yelt.csv", _make_yelt_csv(), "text/csv")},
+    )
+    assert res.status_code == 200, res.text
+    draft = res.json()
+
+    assert draft["door"] == "DROP_IN"
+    assert draft["status"] == "PENDING_REVIEW"
+    assert draft["sourceFileType"] == "YELT"
+    assert draft["simSetId"] and draft["simSetId"].startswith("sim-")
+    assert len(draft["lossFiles"]) >= 1
+    assert draft["overallConfidence"] >= 0.9
+
+    # Verify sim set was registered in the existing catalog
+    sim_sets = client.get("/api/sim-sets").json()
+    assert any(s["simSetId"] == draft["simSetId"] for s in sim_sets)
+
+    # Verify sketched graph wires LOSS_SOURCE -> REGION_PERIL_FILTER -> layer -> PRICING_OUTPUT
+    node_types = {n["nodeType"] for n in draft["graph"]["nodes"]}
+    assert "LOSS_SOURCE" in node_types
+    assert "PRICING_OUTPUT" in node_types
+    loss_src = next(n for n in draft["graph"]["nodes"] if n["nodeType"] == "LOSS_SOURCE")
+    assert loss_src["params"]["simSetId"] == draft["simSetId"]
+
+    # Draft only: CMS must NOT have been mutated yet
+    assert len(client.get("/api/contracts").json()) == before_contracts
+
+    # Clean up by discarding
+    disc = client.post(f"/api/intake/drafts/{draft['draftId']}/discard")
+    assert disc.status_code == 200
+    assert disc.json()["status"] == "DISCARDED"
+    assert len(client.get("/api/contracts").json()) == before_contracts
+
+
+def test_elt_csv_routes_to_existing_ingest():
+    res = client.post(
+        "/api/intake/drop-in",
+        files={"file": ("florida_elt.csv", _make_elt_csv(), "text/csv")},
+    )
+    assert res.status_code == 200, res.text
+    draft = res.json()
+    assert draft["sourceFileType"] == "ELT"
+    assert draft["simSetId"] and draft["simSetId"].startswith("sim-elt-")
+    assert len(draft["lossFiles"]) >= 1
+
+    client.post(f"/api/intake/drafts/{draft['draftId']}/discard")
+
+
+def test_pdf_extraction_draft_confirm_and_discard():
+    pdf_bytes = _make_minimal_pdf([
+        "Cedent: Pelican Bay Assurance",
+        "Programme: Gulf Coast Cat XL 2027",
+        "Broker: Aon Reinsurance",
+        "Inception: 2027-01-01",
+        "Region: Florida Wind US-FL-WS",
+        "Layer 1: $25M xs $50M | Premium $4.5M | ROL 18% | Line 12%",
+        "Layer 2: $40M xs $75M | Premium $4.8M | ROL 12% | Line 10%",
+        "2022 Hurricane Ian: $92M",
+        "2017 Hurricane Irma: $61M",
+    ])
+    before_contracts = len(client.get("/api/contracts").json())
+
+    res = client.post(
+        "/api/intake/drop-in",
+        files={"file": ("pelican_slip.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert res.status_code == 200, res.text
+    draft = res.json()
+    ext = draft["extracted"]
+
+    assert draft["sourceFileType"] == "PDF"
+    assert draft["status"] == "PENDING_REVIEW"
+    assert "Pelican Bay Assurance" in ext["cedentName"]
+    assert "Gulf Coast Cat XL 2027" in ext["programmeName"]
+    assert ext["inceptionDate"] == "2027-01-01"
+    assert "US-FL-WS" in ext["regionPerils"]
+    assert len(ext["layers"]) == 2
+    assert ext["layers"][0]["limit"] == 25.0
+    assert ext["layers"][0]["attachment"] == 50.0
+    assert ext["layers"][0]["depositPremium"] == 4.5
+    assert abs(ext["layers"][0]["signedLine"] - 0.12) < 1e-4
+    assert len(ext["lossHistory"]) == 2
+    assert ext["lossHistory"][0]["eventName"] == "Hurricane Ian"
+    assert ext["lossHistory"][0]["groundUpLossM"] == 92.0
+
+    # Sketched graph has Loss Source, 2 layers, 2 Pricing Outputs, and Programme YELT
+    nodes = draft["graph"]["nodes"]
+    assert sum(1 for n in nodes if n["nodeType"] == "OCC_XL") == 2
+    assert sum(1 for n in nodes if n["nodeType"] == "PRICING_OUTPUT") == 2
+
+    # CMS untouched before confirm
+    assert len(client.get("/api/contracts").json()) == before_contracts
+
+    # Confirm writes a SUBMISSION draft programme (never BOUND)
+    conf = client.post(f"/api/intake/drafts/{draft['draftId']}/confirm", json={})
+    assert conf.status_code == 200, conf.text
+    body = conf.json()
+    assert body["action"] == "CREATED_DRAFT_PROGRAMME"
+    assert body["contract"]["status"] == "SUBMISSION"
+    assert body["contract"]["cedentName"] == "Pelican Bay Assurance"
+    assert body["draft"]["status"] == "CONFIRMED"
+    assert body["manifest"]["runType"] == "SUBMISSION_INTAKE_CONFIRM"
+
+    # CMS and health counts stay synced
+    after_contracts = client.get("/api/contracts").json()
+    health = client.get("/api/health").json()
+    assert len(after_contracts) == before_contracts + 1
+    assert health["programmesLoaded"] == len(after_contracts)
+
+    # Double-confirm is rejected with 409
+    again = client.post(f"/api/intake/drafts/{draft['draftId']}/confirm", json={})
+    assert again.status_code == 409
+
+
+def test_excel_extraction_and_discard_leaves_cms_unchanged():
+    before_ids = {c["programmeId"] for c in client.get("/api/contracts").json()}
+    xlsx_bytes = _make_sample_xlsx()
+
+    res = client.post(
+        "/api/intake/drop-in",
+        files={
+            "file": (
+                "apex_submission.xlsx",
+                xlsx_bytes,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert res.status_code == 200, res.text
+    draft = res.json()
+    ext = draft["extracted"]
+
+    assert draft["sourceFileType"] == "EXCEL"
+    assert ext["cedentName"] == "Apex Coastal Mutual"
+    assert ext["programmeName"] == "Florida Peak Cat XL 2027"
+    assert ext["inceptionDate"] == "2027-01-01"
+    assert "US-FL-WS" in ext["regionPerils"]
+    assert len(ext["layers"]) == 2
+    assert ext["layers"][0]["limit"] == 20.0
+    assert ext["layers"][0]["attachment"] == 40.0
+    assert len(ext["lossHistory"]) == 2
+    assert ext["lossHistory"][0]["groundUpLossM"] == 88.5
+
+    # Discard must leave CMS completely untouched
+    disc = client.post(f"/api/intake/drafts/{draft['draftId']}/discard")
+    assert disc.status_code == 200
+    assert disc.json()["status"] == "DISCARDED"
+    after_ids = {c["programmeId"] for c in client.get("/api/contracts").json()}
+    assert after_ids == before_ids
+
+
+def test_email_door_status_and_fixture_matching(monkeypatch):
+    monkeypatch.delenv("ROARING_LION_EMAIL_IMAP_HOST", raising=False)
+    monkeypatch.delenv("ROARING_LION_EMAIL_USERNAME", raising=False)
+    monkeypatch.delenv("ROARING_LION_EMAIL_PASSWORD", raising=False)
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "test-poll-secret")
+
+    status = client.get("/api/intake/email/status").json()
+    assert status["connected"] is False
+    assert status["inboxAddress"] == "submissions@roaringlion.test"
+    assert "not connected" in status["message"].lower()
+
+    poll = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "test-poll-secret"}).json()
+    assert poll["connected"] is False
+    assert poll["processedCount"] == 0
+
+    # Fixture email matching existing programme prog-farmers-us-27 with a YELT attachment
+    yelt_b64 = base64.b64encode(_make_yelt_csv()).decode("ascii")
+    ingest = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "fixture-msg-farmers-001",
+            "sender": "broker@guycarp.example",
+            "subject": "RE: prog-farmers-us-27 updated Florida YELT submission",
+            "bodyText": "Please find attached updated YELT for Farmers US Cat XL.",
+            "attachments": [
+                {"filename": "farmers_yelt_2027.csv", "contentBase64": yelt_b64, "contentType": "text/csv"}
+            ],
+        },
+    )
+    assert ingest.status_code == 200, ingest.text
+    drafts = ingest.json()
+    assert len(drafts) == 1
+    d = drafts[0]
+    assert d["door"] == "EMAIL"
+    assert d["targetProgrammeId"] == "prog-farmers-us-27"
+    assert d["sourceFileType"] == "YELT"
+    assert d["simSetId"] and d["simSetId"].startswith("sim-")
+
+    # Re-ingesting the exact same messageId returns the existing draft without creating duplicates
+    before_drafts = len(client.get("/api/intake/drafts").json())
+    dup = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "fixture-msg-farmers-001",
+            "sender": "broker@guycarp.example",
+            "subject": "RE: prog-farmers-us-27 updated Florida YELT submission",
+            "bodyText": "Duplicate",
+            "attachments": [
+                {"filename": "farmers_yelt_2027.csv", "contentBase64": yelt_b64, "contentType": "text/csv"}
+            ],
+        },
+    )
+    assert dup.status_code == 200
+    assert len(dup.json()) == 1
+    assert dup.json()[0]["draftId"] == d["draftId"]
+    assert len(client.get("/api/intake/drafts").json()) == before_drafts
+
+    # Confirming attaches the simSetId to prog-farmers-us-27 WITHOUT altering its status
+    orig = next(c for c in client.get("/api/contracts").json() if c["programmeId"] == "prog-farmers-us-27")
+    conf = client.post(f"/api/intake/drafts/{d['draftId']}/confirm", json={"mode": "ATTACH_EXISTING"})
+    assert conf.status_code == 200, conf.text
+    assert conf.json()["action"] == "UPDATED_PROGRAMME"
+    assert conf.json()["contract"]["programmeId"] == "prog-farmers-us-27"
+    assert conf.json()["contract"]["simSetId"] == d["simSetId"]
+    assert conf.json()["contract"]["status"] == orig["status"]
+
+    # Restore original simSetId on prog-farmers-us-27 so other tests see seeded state
+    client.patch("/api/contracts/prog-farmers-us-27", json={"simSetId": orig["simSetId"]})
+
+    # Unmatched email creates a draft with targetProgrammeId=None that can be confirmed as a new SUBMISSION draft
+    unmatched_pdf = base64.b64encode(
+        _make_minimal_pdf([
+            "Cedent: Meridian Coastal Re",
+            "Programme: Southeast Wind Cat XL 2027",
+            "Inception: 2027-06-01",
+            "Region: Southeast Wind US-SE-WS",
+            "Layer 1: $15M xs $30M | ROL 19% | Line 10%",
+        ])
+    ).decode("ascii")
+    unmatched = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "fixture-msg-unmatched-002",
+            "sender": "submissions@broker.example",
+            "subject": "New Business: Meridian Coastal Re 2027 Cat XL",
+            "bodyText": "Attached slip for new cedent Meridian Coastal Re.",
+            "attachments": [
+                {"filename": "meridian_slip.pdf", "contentBase64": unmatched_pdf, "contentType": "application/pdf"}
+            ],
+        },
+    )
+    assert unmatched.status_code == 200, unmatched.text
+    u_drafts = unmatched.json()
+    assert len(u_drafts) == 1
+    assert u_drafts[0]["targetProgrammeId"] is None
+    assert u_drafts[0]["extracted"]["cedentName"] == "Meridian Coastal Re"
+    client.post(f"/api/intake/drafts/{u_drafts[0]['draftId']}/discard")
+
+
+def test_watched_folder_door_pickup_and_idempotency(tmp_path: Path, monkeypatch):
+    watch_root = tmp_path / "submissions_watch"
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_FOLDER_ROOT", str(watch_root))
+
+    # Reject path traversal
+    bad = client.put(
+        "/api/intake/programmes/prog-farmers-us-27/watched-folder",
+        json={"watchedFolder": "../../etc"},
+    )
+    assert bad.status_code == 422
+
+    # Assign a watched folder to prog-farmers-us-27
+    ok = client.put(
+        "/api/intake/programmes/prog-farmers-us-27/watched-folder",
+        json={"watchedFolder": "farmers-2027"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["watchedFolder"] == "farmers-2027"
+
+    prog_dir = watch_root / "farmers-2027"
+    assert prog_dir.is_dir()
+
+    # Drop an Excel submission into the watched folder
+    (prog_dir / "renewal_schedule.xlsx").write_bytes(_make_sample_xlsx())
+
+    # Scan picks it up as a FOLDER draft filed onto prog-farmers-us-27
+    scan1 = client.post("/api/intake/folder/scan?programmeId=prog-farmers-us-27")
+    assert scan1.status_code == 200, scan1.text
+    res1 = scan1.json()
+    assert res1["scannedProgrammes"] == 1
+    assert res1["pickedUpCount"] == 1
+    assert len(res1["drafts"]) == 1
+    draft = res1["drafts"][0]
+    assert draft["door"] == "FOLDER"
+    assert draft["targetProgrammeId"] == "prog-farmers-us-27"
+    assert draft["sourceFileType"] == "EXCEL"
+
+    # Re-scanning skips already-picked-up file
+    scan2 = client.post("/api/intake/folder/scan?programmeId=prog-farmers-us-27")
+    assert scan2.status_code == 200
+    assert scan2.json()["pickedUpCount"] == 0
+    assert scan2.json()["skippedCount"] == 1
+
+    # Clean up draft & folder binding
+    client.post(f"/api/intake/drafts/{draft['draftId']}/discard")
+    client.put("/api/intake/programmes/prog-farmers-us-27/watched-folder", json={"watchedFolder": None})
+
+
+def test_poll_email_inbox_uses_body_peek_verified_tls_and_handles_oversized_and_transient_errors(monkeypatch):
+    """Bugbot #1 + #7 + #9: IMAP uses verified TLS (CERT_REQUIRED + check_hostname), fetches with
+    BODY.PEEK[], skips oversized attachments while ingesting valid siblings and marking \\Seen,
+    and leaves transient ingest failures UNSEEN for retry."""
+    import ssl
+    from email.message import EmailMessage
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "ops-secret-123")
+
+    # Message 1: transient ingest failure -> must remain UNSEEN
+    msg_transient = EmailMessage()
+    msg_transient["Message-ID"] = "<imap-transient-001@test>"
+    msg_transient["From"] = "broker@example.com"
+    msg_transient["Subject"] = "Transient failure message"
+    msg_transient.set_content("Body that triggers transient error")
+
+    # Message 2: oversized attachment + valid sibling YELT -> skip oversized, ingest sibling, mark \Seen
+    msg_mixed = EmailMessage()
+    msg_mixed["Message-ID"] = "<imap-mixed-002@test>"
+    msg_mixed["From"] = "broker@example.com"
+    msg_mixed["Subject"] = "Mixed oversized and valid sibling"
+    msg_mixed.set_content("Contains one oversized PDF and one valid YELT CSV.")
+    msg_mixed.add_attachment(b"x" * 400, maintype="application", subtype="pdf", filename="huge_slip.pdf")
+    msg_mixed.add_attachment(
+        b"trial_id,event_id,loss_amount\n1,1001,25.0\n",
+        maintype="text",
+        subtype="csv",
+        filename="valid_sibling.csv",
+    )
+
+    # Message 3: normal valid message -> ingested and marked \Seen (not starved by msg 2)
+    msg_ok = EmailMessage()
+    msg_ok["Message-ID"] = "<imap-ok-003@test>"
+    msg_ok["From"] = "broker@example.com"
+    msg_ok["Subject"] = "Valid submission"
+    msg_ok.set_content("Cedent: Beacon Re\nProgramme: Beacon FL Cat XL 2027\nInception: 2027-01-01\nRegion: US-FL-WS\nLayer 1: $10M xs $20M | ROL 15%")
+
+    raw_by_num = {
+        b"1": msg_transient.as_bytes(),
+        b"2": msg_mixed.as_bytes(),
+        b"3": msg_ok.as_bytes(),
+    }
+    fetch_commands: list[str] = []
+    marked_seen: list[bytes] = []
+    captured_ssl: list[ssl.SSLContext | None] = []
+
+    class FakeIMAP:
+        def __init__(self, host: str, port: int, ssl_context: ssl.SSLContext | None = None):
+            self.host = host
+            self.port = port
+            captured_ssl.append(ssl_context)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"Logged in"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"3"])
+
+        def search(self, charset, criterion: str):
+            assert criterion == "UNSEEN"
+            return ("OK", [b"1 2 3"])
+
+        def fetch(self, num: bytes, cmd: str):
+            fetch_commands.append(cmd)
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [f"{num.decode()} (RFC822.SIZE {len(raw_by_num[num])})".encode("ascii")])
+            return ("OK", [(b"1 (BODY[] {100})", raw_by_num[num])])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                marked_seen.append(num)
+            return ("OK", [])
+
+    import app.services.intake as intake_mod
+
+    orig_parts = intake_mod.SubmissionIntakeService._ingest_email_parts
+
+    def flaky_parts(self, **kwargs):
+        if kwargs.get("message_id") == "<imap-transient-001@test>":
+            raise RuntimeError("Simulated transient DB failure")
+        return orig_parts(self, **kwargs)
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeIMAP)
+    monkeypatch.setattr(intake_mod.SubmissionIntakeService, "_ingest_email_parts", flaky_parts)
+    # Cap at 200 bytes so 400-byte huge_slip.pdf is skipped while valid_sibling.csv & msg_ok succeed
+    monkeypatch.setattr(intake_mod, "MAX_UPLOAD_BYTES", 200)
+
+    res = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "ops-secret-123"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["connected"] is True
+    assert body["processedCount"] == 2
+    assert body["skippedCount"] == 1
+
+    # Verified TLS context passed to IMAP4_SSL
+    assert len(captured_ssl) == 1 and captured_ssl[0] is not None
+    assert captured_ssl[0].verify_mode == ssl.CERT_REQUIRED
+    assert captured_ssl[0].check_hostname is True
+
+    # Must check RFC822.SIZE before BODY.PEEK[] (never RFC822)
+    assert fetch_commands == [
+        "(RFC822.SIZE)", "(BODY.PEEK[])",
+        "(RFC822.SIZE)", "(BODY.PEEK[])",
+        "(RFC822.SIZE)", "(BODY.PEEK[])",
+    ]
+    # Message 1 (transient error) remains UNSEEN; Messages 2 & 3 are marked \Seen
+    assert marked_seen == [b"2", b"3"]
+
+    # Message 2 ingested the valid sibling CSV and recorded a warning about huge_slip.pdf
+    sibling_draft = next(d for d in body["drafts"] if d["sourceFilename"] == "valid_sibling.csv")
+    assert sibling_draft["sourceFileType"] == "YELT"
+    assert any("huge_slip.pdf" in w for w in sibling_draft["extracted"]["warnings"])
+
+    for d in body["drafts"]:
+        client.post(f"/api/intake/drafts/{d['draftId']}/discard")
+
+
+def test_email_ingest_caps_attachment_count_and_rejects_oversized_before_decode(monkeypatch):
+    """Bugbot #8: /api/intake/email/ingest returns 413 on attachment-count or pre-decode size overflow."""
+    import app.services.intake as intake_mod
+
+    # 1. Attachment count limit -> 413
+    monkeypatch.setattr(intake_mod, "MAX_EMAIL_ATTACHMENTS", 2)
+    tiny_b64 = base64.b64encode(b"hello").decode("ascii")
+    too_many = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "cap-count-001",
+            "sender": "broker@example.com",
+            "subject": "Too many attachments",
+            "attachments": [
+                {"filename": f"f{i}.txt", "contentBase64": tiny_b64}
+                for i in range(3)
+            ],
+        },
+    )
+    assert too_many.status_code == 413
+
+    # 2. Oversized payload rejected BEFORE base64.b64decode is called -> 413
+    monkeypatch.setattr(intake_mod, "MAX_UPLOAD_BYTES", 64)
+    decode_called = {"n": 0}
+    orig_b64decode = intake_mod.base64.b64decode
+
+    def spy_b64decode(*args, **kwargs):
+        decode_called["n"] += 1
+        return orig_b64decode(*args, **kwargs)
+
+    monkeypatch.setattr(intake_mod.base64, "b64decode", spy_b64decode)
+
+    oversized_b64 = "A" * 200  # > max_base64_chars(64) = 88
+    too_big = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "cap-size-002",
+            "sender": "broker@example.com",
+            "subject": "Oversized attachment",
+            "attachments": [{"filename": "huge.pdf", "contentBase64": oversized_b64}],
+        },
+    )
+    assert too_big.status_code == 413
+    assert decode_called["n"] == 0
+
+
+def test_email_poll_requires_poll_secret_and_refuses_imap_without_it(monkeypatch):
+    """Security review: /api/intake/email/poll refuses without ROARING_LION_INTAKE_POLL_SECRET and never opens IMAP."""
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+
+    imap_opened = {"n": 0}
+
+    def fail_if_imap_opened(*args, **kwargs):
+        imap_opened["n"] += 1
+        raise AssertionError("IMAP4_SSL must not be opened when poll secret is missing or invalid")
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", fail_if_imap_opened)
+
+    # 1. Env var unset -> 503 and IMAP never opened
+    monkeypatch.delenv("ROARING_LION_INTAKE_POLL_SECRET", raising=False)
+    r1 = client.post("/api/intake/email/poll")
+    assert r1.status_code == 503
+    assert imap_opened["n"] == 0
+
+    # 2. Env var set, missing header -> 401 and IMAP never opened
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "top-secret-poll-key")
+    r2 = client.post("/api/intake/email/poll")
+    assert r2.status_code == 401
+    assert imap_opened["n"] == 0
+
+    # 3. Env var set, wrong header -> 401 and IMAP never opened
+    r3 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "wrong-key"})
+    assert r3.status_code == 401
+    assert imap_opened["n"] == 0
+
+
+def test_imap_poll_defers_in_limit_attachments_across_polls_without_marking_seen_or_mislabelling(monkeypatch):
+    """Bugbot #10: In-limit attachments hitting per-poll count/byte cap stay UNSEEN until all are stored."""
+    from email.message import EmailMessage
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "batch-secret")
+
+    msg = EmailMessage()
+    msg["Message-ID"] = "<imap-batch-001@test>"
+    msg["From"] = "broker@example.com"
+    msg["Subject"] = "Three valid YELT attachments"
+    msg.set_content("All three files are within the per-file size limit.")
+    for i in range(1, 4):
+        msg.add_attachment(
+            f"trial_id,event_id,loss_amount\n1,{2000 + i},{10 * i}.0\n".encode("utf-8"),
+            maintype="text",
+            subtype="csv",
+            filename=f"part_{i}.csv",
+        )
+    raw_msg = msg.as_bytes()
+    seen_flags: set[bytes] = set()
+
+    class FakeBatchIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            unseen = [b"1"] if b"1" not in seen_flags else []
+            return ("OK", [b" ".join(unseen)])
+
+        def fetch(self, num: bytes, cmd: str):
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [f"{num.decode()} (RFC822.SIZE {len(raw_msg)})".encode("ascii")])
+            assert cmd == "(BODY.PEEK[])"
+            return ("OK", [(b"1 (BODY[] {100})", raw_msg)])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                seen_flags.add(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeBatchIMAP)
+    # Limit to 2 attachments per poll so part_3.csv is deferred to poll 2
+    monkeypatch.setattr(intake_mod, "MAX_EMAIL_ATTACHMENTS", 2)
+
+    # Poll 1: ingests part_1.csv and part_2.csv; leaves message UNSEEN; does NOT mislabel part_3.csv as oversized
+    p1 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "batch-secret"})
+    assert p1.status_code == 200, p1.text
+    d1 = p1.json()["drafts"]
+    assert sorted(d["sourceFilename"] for d in d1) == ["part_1.csv", "part_2.csv"]
+    assert b"1" not in seen_flags
+    for d in d1:
+        assert not any("part_3.csv" in w for w in d["extracted"]["warnings"])
+
+    # Poll 2: skips already-ingested part_1 & part_2, ingests part_3.csv, and now marks \Seen
+    p2 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "batch-secret"})
+    assert p2.status_code == 200, p2.text
+    d2 = p2.json()["drafts"]
+    assert [d["sourceFilename"] for d in d2] == ["part_3.csv"]
+    assert b"1" in seen_flags
+
+    for d in d1 + d2:
+        client.post(f"/api/intake/drafts/{d['draftId']}/discard")
+
+
+def test_imap_second_poll_of_fully_ingested_unseen_message_creates_no_body_draft(monkeypatch):
+    """Bugbot #11: Re-polling an already-ingested UNSEEN message must not create a spurious email_body.txt draft."""
+    from email.message import EmailMessage
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "repoll-secret")
+
+    msg = EmailMessage()
+    msg["Message-ID"] = "<imap-already-ingested-001@test>"
+    msg["From"] = "broker@example.com"
+    msg["Subject"] = "Already ingested submission"
+    msg.set_content("Cover email body text")
+    msg.add_attachment(
+        b"trial_id,event_id,loss_amount\n1,3001,15.0\n",
+        maintype="text",
+        subtype="csv",
+        filename="already_stored.csv",
+    )
+    raw_msg = msg.as_bytes()
+
+    # First ingest via webhook so the attachment is already in watched_ingestions
+    yelt_b64 = base64.b64encode(b"trial_id,event_id,loss_amount\n1,3001,15.0\n").decode("ascii")
+    w = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "<imap-already-ingested-001@test>",
+            "sender": "broker@example.com",
+            "subject": "Already ingested submission",
+            "bodyText": "Cover email body text",
+            "attachments": [{"filename": "already_stored.csv", "contentBase64": yelt_b64}],
+        },
+    )
+    assert w.status_code == 200
+    before_drafts = client.get("/api/intake/drafts").json()
+    seen_flags: set[bytes] = set()
+
+    class FakeRepollIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            return ("OK", [b"1"])
+
+        def fetch(self, num: bytes, cmd: str):
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [f"{num.decode()} (RFC822.SIZE {len(raw_msg)})".encode("ascii")])
+            return ("OK", [(b"1 (BODY[] {100})", raw_msg)])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                seen_flags.add(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeRepollIMAP)
+    poll = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "repoll-secret"})
+    assert poll.status_code == 200
+    assert poll.json()["drafts"] == []
+    assert b"1" in seen_flags
+
+    after_drafts = client.get("/api/intake/drafts").json()
+    assert len(after_drafts) == len(before_drafts)
+    assert not any(
+        d["sourceFilename"] == "email_body.txt" and "Already ingested submission" in d["sourceRef"]
+        for d in after_drafts
+    )
+
+    for d in w.json():
+        client.post(f"/api/intake/drafts/{d['draftId']}/discard")
+
+
+def test_imap_split_polls_link_yelt_sim_set_to_pdf_slip_in_both_orders(monkeypatch):
+    """Bugbot #12: When YELT and PDF are split across polls, the PDF draft still receives the YELT simSetId."""
+    from email.message import EmailMessage
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "split-secret")
+
+    pdf_bytes = _make_minimal_pdf([
+        "Cedent: Split Poll Assurance",
+        "Programme: Split Poll Wind XL 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $20M xs $40M | Premium $3.6M",
+    ])
+    yelt_bytes = _make_yelt_csv()
+
+    # Case A: YELT lands in poll 1, PDF lands in poll 2
+    msg_a = EmailMessage()
+    msg_a["Message-ID"] = "<imap-split-yelt-first@test>"
+    msg_a["From"] = "broker@example.com"
+    msg_a["Subject"] = "Split Poll YELT First"
+    msg_a.set_content("YELT then PDF")
+    msg_a.add_attachment(yelt_bytes, maintype="text", subtype="csv", filename="split_yelt.csv")
+    msg_a.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename="split_slip.pdf")
+
+    # Case B (reverse): PDF lands in poll 1, YELT lands in poll 2
+    msg_b = EmailMessage()
+    msg_b["Message-ID"] = "<imap-split-pdf-first@test>"
+    msg_b["From"] = "broker@example.com"
+    msg_b["Subject"] = "Split Poll PDF First"
+    msg_b.set_content("PDF then YELT")
+    msg_b.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename="rev_slip.pdf")
+    msg_b.add_attachment(yelt_bytes, maintype="text", subtype="csv", filename="rev_yelt.csv")
+
+    raw_by_num = {b"1": msg_a.as_bytes(), b"2": msg_b.as_bytes()}
+    seen_flags: set[bytes] = set()
+
+    class FakeSplitIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"2"])
+
+        def search(self, charset, criterion: str):
+            unseen = [n for n in (b"1", b"2") if n not in seen_flags]
+            return ("OK", [b" ".join(unseen)])
+
+        def fetch(self, num: bytes, cmd: str):
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [f"{num.decode()} (RFC822.SIZE {len(raw_by_num[num])})".encode("ascii")])
+            return ("OK", [(b"1 (BODY[] {100})", raw_by_num[num])])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                seen_flags.add(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeSplitIMAP)
+    # Force 1 attachment per poll so YELT and PDF always land on separate polls
+    monkeypatch.setattr(intake_mod, "MAX_EMAIL_ATTACHMENTS", 1)
+
+    p1 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "split-secret"})
+    assert p1.status_code == 200, p1.text
+    d1 = p1.json()["drafts"]
+    assert len(d1) == 2
+    assert seen_flags == set()
+
+    p2 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "split-secret"})
+    assert p2.status_code == 200, p2.text
+    d2 = p2.json()["drafts"]
+    assert len(d2) == 2
+    assert seen_flags == {b"1", b"2"}
+
+    # Verify Case A: split_slip.pdf received split_yelt.csv's simSetId
+    yelt_a = next(d for d in d1 if d["sourceFilename"] == "split_yelt.csv")
+    slip_a = next(d for d in d2 if d["sourceFilename"] == "split_slip.pdf")
+    assert slip_a["simSetId"] == yelt_a["simSetId"]
+
+    # Verify Case B (reverse): rev_slip.pdf (from poll 1) was updated with rev_yelt.csv's simSetId (from poll 2)
+    slip_b_id = next(d["draftId"] for d in d1 if d["sourceFilename"] == "rev_slip.pdf")
+    yelt_b = next(d for d in d2 if d["sourceFilename"] == "rev_yelt.csv")
+    slip_b_refreshed = client.get(f"/api/intake/drafts/{slip_b_id}").json()
+    assert slip_b_refreshed["simSetId"] == yelt_b["simSetId"]
+    loss_src_b = next(n for n in slip_b_refreshed["graph"]["nodes"] if n["nodeType"] == "LOSS_SOURCE")
+    assert loss_src_b["params"]["simSetId"] == yelt_b["simSetId"]
+
+    for d in d1 + d2:
+        client.post(f"/api/intake/drafts/{d['draftId']}/discard")
+
+
+def test_imap_poll_checks_rfc822_size_and_skips_oversized_message_without_fetching_body(monkeypatch):
+    """Finding #3: poll_email_inbox checks RFC822.SIZE first and never downloads BODY.PEEK[] for oversized mail."""
+    from email.message import EmailMessage
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "size-secret")
+
+    msg_ok = EmailMessage()
+    msg_ok["Message-ID"] = "<imap-small-002@test>"
+    msg_ok["From"] = "broker@example.com"
+    msg_ok["Subject"] = "Small valid email"
+    msg_ok.set_content("Cedent: Small Re\nProgramme: Small Cat XL 2027\nInception: 2027-01-01\nRegion: US-FL-WS\nLayer 1: $10M xs $20M | Premium $2.0M")
+    raw_ok = msg_ok.as_bytes()
+
+    body_fetched_nums: list[bytes] = []
+    marked_seen: list[bytes] = []
+
+    class FakeSizeIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"2"])
+
+        def search(self, charset, criterion: str):
+            return ("OK", [b"1 2"])
+
+        def fetch(self, num: bytes, cmd: str):
+            if "RFC822.SIZE" in cmd:
+                if num == b"1":
+                    return ("OK", [b"1 (RFC822.SIZE 999999999)"])
+                return ("OK", [f"2 (RFC822.SIZE {len(raw_ok)})".encode("ascii")])
+            if "HEADER.FIELDS" in cmd:
+                return ("OK", [(b"1 (BODY[HEADER.FIELDS] {40})", b"Message-ID: <huge-no-bs@test>\r\nFrom: a@b.com\r\nSubject: Huge\r\n\r\n")])
+            if "BODYSTRUCTURE" in cmd:
+                # Unparseable/missing BODYSTRUCTURE on oversized message -> must skip & mark \Seen without BODY.PEEK[]
+                return ("OK", [b"1 ()"])
+            body_fetched_nums.append(num)
+            assert num == b"2", "Must NOT fetch BODY.PEEK[] for oversized message 1"
+            return ("OK", [(b"2 (BODY[] {100})", raw_ok)])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                marked_seen.append(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeSizeIMAP)
+    res = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "size-secret"})
+    assert res.status_code == 200, res.text
+    assert body_fetched_nums == [b"2"]
+    assert marked_seen == [b"1", b"2"]
+    assert res.json()["processedCount"] == 1
+    assert res.json()["skippedCount"] == 1
+
+    for d in res.json()["drafts"]:
+        client.post(f"/api/intake/drafts/{d['draftId']}/discard")
+
+
+def test_email_ingest_rejects_oversized_raw_body_before_pydantic_parses(monkeypatch):
+    """Finding #4: POST /api/intake/email/ingest rejects oversized JSON bodies with 413 before Pydantic parses."""
+    import app.routes_intake as routes_mod
+    import app.services.intake as intake_mod
+
+    monkeypatch.setattr(intake_mod, "MAX_UPLOAD_BYTES", 64)
+    parse_calls = {"n": 0}
+    orig_validate = routes_mod.EmailMessageInput.model_validate_json
+
+    def spy_validate(*args, **kwargs):
+        parse_calls["n"] += 1
+        return orig_validate(*args, **kwargs)
+
+    monkeypatch.setattr(routes_mod.EmailMessageInput, "model_validate_json", spy_validate)
+
+    huge_json = ('{"sender":"a@b.com","subject":"big","bodyText":"' + ("x" * 300_000) + '"}').encode("utf-8")
+    res = client.post("/api/intake/email/ingest", content=huge_json, headers={"Content-Type": "application/json"})
+    assert res.status_code == 413
+    assert parse_calls["n"] == 0
+
+
+def test_yelt_trial_id_above_1m_is_rejected_without_storing_sim_set():
+    """Security review: YELT CSV/Parquet with trial_id > 1,000,000 must be rejected and never persisted."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    before_sims = {s["simSetId"] for s in client.get("/api/sim-sets").json()}
+
+    # 1. Tiny CSV with trial_id = 5,000,000
+    bad_csv = b"trial_id,event_id,day_of_year,region_peril_key,loss_amount\n5000000,1001,240,US-FL-WS,10.0\n"
+    r_csv = client.post("/api/intake/drop-in", files={"file": ("oom_trials.csv", bad_csv, "text/csv")})
+    assert r_csv.status_code == 422
+    assert "1,000,000" in r_csv.json()["detail"]
+
+    # 2. Tiny Parquet with trial_id = 50,000,000
+    tbl = pa.table({
+        "trial_id": pa.array([1, 50_000_000], type=pa.uint32()),
+        "event_id": pa.array([101, 102], type=pa.uint64()),
+        "day_of_year": pa.array([210, 240], type=pa.uint16()),
+        "region_peril_key": pa.array(["US-FL-WS", "US-FL-WS"]),
+        "loss_amount": pa.array([10.0, 20.0], type=pa.float64()),
+    })
+    buf = io.BytesIO()
+    pq.write_table(tbl, buf)
+    r_pq = client.post("/api/intake/drop-in", files={"file": ("oom_trials.parquet", buf.getvalue(), "application/octet-stream")})
+    assert r_pq.status_code == 422
+    assert "1,000,000" in r_pq.json()["detail"]
+
+    # Verify zero sim sets were stored
+    after_sims = {s["simSetId"] for s in client.get("/api/sim-sets").json()}
+    assert after_sims == before_sims
+
+
+def test_email_ingest_string_too_long_maps_to_413():
+    """Bugbot: Pydantic string_too_long on body_text / filename must map to HTTP 413 (not 422)."""
+    res = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "str-too-long-001",
+            "sender": "broker@example.com",
+            "subject": "Oversized body_text",
+            "bodyText": "x" * 260_000,
+            "attachments": [],
+        },
+    )
+    assert res.status_code == 413
+
+
+def test_message_id_with_sql_wildcard_does_not_retarget_unrelated_pending_draft():
+    """Bugbot: '%' in messageId must be escaped in LIKE queries so unrelated pending slips are never rewritten."""
+    pdf_b64 = base64.b64encode(
+        _make_minimal_pdf([
+            "Cedent: Innocent Unrelated Mutual",
+            "Programme: Innocent Cat XL 2027",
+            "Inception: 2027-01-01",
+            "Region: US-FL-WS",
+            "Layer 1: $10M xs $20M | Premium $2.0M",
+        ])
+    ).decode("ascii")
+    r1 = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "innocent-email-001@test",
+            "sender": "broker@example.com",
+            "subject": "Innocent slip",
+            "attachments": [{"filename": "innocent.pdf", "contentBase64": pdf_b64}],
+        },
+    )
+    assert r1.status_code == 200
+    innocent_draft = r1.json()[0]
+    orig_sim_set_id = innocent_draft["simSetId"]
+
+    # Now ingest a YELT whose messageId contains SQL wildcard '%'
+    yelt_b64 = base64.b64encode(_make_yelt_csv()).decode("ascii")
+    r2 = client.post(
+        "/api/intake/email/ingest",
+        json={
+            "messageId": "%",
+            "sender": "attacker@example.com",
+            "subject": "Wildcard YELT",
+            "attachments": [{"filename": "wild_yelt.csv", "contentBase64": yelt_b64}],
+        },
+    )
+    assert r2.status_code == 200
+    wild_draft = r2.json()[0]
+    assert wild_draft["simSetId"] != orig_sim_set_id
+
+    # Innocent pending draft must NOT have been rewritten to wild_draft's simSetId
+    refreshed = client.get(f"/api/intake/drafts/{innocent_draft['draftId']}").json()
+    assert refreshed["simSetId"] == orig_sim_set_id
+
+    client.post(f"/api/intake/drafts/{innocent_draft['draftId']}/discard")
+    client.post(f"/api/intake/drafts/{wild_draft['draftId']}/discard")
+
+
+def test_imap_bodystructure_fetches_only_small_pdf_and_skips_500mb_part(monkeypatch):
+    """Bugbot: Large IMAP message uses BODYSTRUCTURE + per-part BODY.PEEK[section], never loading oversized parts."""
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "bs-secret")
+
+    small_pdf = _make_minimal_pdf([
+        "Cedent: Bodystructure Mutual",
+        "Programme: Florida Cat XL 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $15M xs $30M | Premium $2.7M",
+    ])
+    small_pdf_b64 = base64.b64encode(small_pdf)
+    plain_body = b"Please review attached Florida Cat XL slip."
+
+    bs_response = (
+        b'1 (BODYSTRUCTURE ('
+        b'("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 43 1 NIL NIL NIL)'
+        b'("APPLICATION" "PDF" ("NAME" "giant_500mb.pdf") NIL NIL "BASE64" 500000000 NIL ("ATTACHMENT" ("FILENAME" "giant_500mb.pdf")) NIL)'
+        + f'("APPLICATION" "PDF" ("NAME" "small_slip.pdf") NIL NIL "BASE64" {len(small_pdf_b64)} NIL ("ATTACHMENT" ("FILENAME" "small_slip.pdf")) NIL)'.encode("ascii")
+        + b' "MIXED" ("BOUNDARY" "bnd") NIL NIL))'
+    )
+
+    fetched_cmds: list[str] = []
+    marked_seen: list[bytes] = []
+
+    class FakeBodyStructureIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            return ("OK", [b"1"])
+
+        def fetch(self, num: bytes, cmd: str):
+            fetched_cmds.append(cmd)
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [b"1 (RFC822.SIZE 500005000)"])
+            if "HEADER.FIELDS" in cmd:
+                hdr = b"Message-ID: <imap-bs-500mb@test>\r\nFrom: broker@example.com\r\nSubject: Huge + Small PDF\r\n\r\n"
+                return ("OK", [(b"1 (BODY[HEADER.FIELDS] {90})", hdr)])
+            if "BODYSTRUCTURE" in cmd:
+                return ("OK", [bs_response])
+            if cmd == "(BODY.PEEK[1])":
+                return ("OK", [(b"1 (BODY[1] {43})", plain_body)])
+            if cmd == "(BODY.PEEK[3])":
+                return ("OK", [(b"1 (BODY[3] {999})", small_pdf_b64)])
+            raise AssertionError(f"Unexpected IMAP fetch command (must not download full message or 500MB part 2): {cmd}")
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                marked_seen.append(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeBodyStructureIMAP)
+
+    res = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "bs-secret"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["processedCount"] == 1
+    assert len(body["drafts"]) == 1
+
+    # Never downloaded full message or 500 MB part 2
+    assert "(BODY.PEEK[])" not in fetched_cmds
+    assert "(BODY.PEEK[2])" not in fetched_cmds
+    assert "(BODY.PEEK[3])" in fetched_cmds
+
+    draft = body["drafts"][0]
+    assert draft["sourceFilename"] == "small_slip.pdf"
+    assert draft["extracted"]["cedentName"] == "Bodystructure Mutual"
+    assert any("giant_500mb.pdf" in w for w in draft["extracted"]["warnings"])
+    assert marked_seen == [b"1"]
+
+    client.post(f"/api/intake/drafts/{draft['draftId']}/discard")
+
+
+def test_elt_enormous_annual_rate_is_rejected_before_poisson_and_stores_no_sim_set():
+    """Security review: Tiny ELT CSV with huge annual_rate must be rejected without OOM or storing a sim set."""
+    before_sims = {s["simSetId"] for s in client.get("/api/sim-sets").json()}
+    bad_elt = b"event_id,annual_rate,mean_loss,region_peril_key\n1001,1000000,25.0,US-FL-WS\n"
+    res = client.post("/api/intake/drop-in", files={"file": ("oom_elt.csv", bad_elt, "text/csv")})
+    assert res.status_code == 422
+    assert "annual_rate" in res.json()["detail"] or "1000" in res.json()["detail"]
+    after_sims = {s["simSetId"] for s in client.get("/api/sim-sets").json()}
+    assert after_sims == before_sims
+
+
+def test_imap_missing_rfc822_size_fails_closed_to_bodystructure(monkeypatch):
+    """Security review: Missing/unparsable RFC822.SIZE must NOT fall back to BODY.PEEK[]; use BODYSTRUCTURE."""
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "nosize-secret")
+
+    small_pdf = _make_minimal_pdf([
+        "Cedent: FailClosed Re",
+        "Programme: FailClosed Wind 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $10M xs $20M | Premium $2.0M",
+    ])
+    small_pdf_b64 = base64.b64encode(small_pdf)
+    bs_response = (
+        b'1 (BODYSTRUCTURE ('
+        + f'("APPLICATION" "PDF" ("NAME" "safe.pdf") NIL NIL "BASE64" {len(small_pdf_b64)} NIL ("ATTACHMENT" ("FILENAME" "safe.pdf")) NIL)'.encode("ascii")
+        + b' "MIXED" ("BOUNDARY" "b") NIL NIL))'
+    )
+    fetched_cmds: list[str] = []
+
+    class FakeNoSizeIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            return ("OK", [b"1"])
+
+        def fetch(self, num: bytes, cmd: str):
+            fetched_cmds.append(cmd)
+            if "RFC822.SIZE" in cmd:
+                # Missing / unparsable size response
+                return ("OK", [b"1 ()"])
+            if "HEADER.FIELDS" in cmd:
+                return ("OK", [(b"1 (BODY[HEADER.FIELDS] {80})", b"Message-ID: <nosize@test>\r\nFrom: a@b.com\r\nSubject: NoSize\r\n\r\n")])
+            if "BODYSTRUCTURE" in cmd:
+                return ("OK", [bs_response])
+            if cmd == "(BODY.PEEK[1])":
+                return ("OK", [(b"1 (BODY[1] {999})", small_pdf_b64)])
+            raise AssertionError(f"Must not call BODY.PEEK[] when RFC822.SIZE is missing: {cmd}")
+
+        def store(self, num: bytes, op: str, flags: str):
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeNoSizeIMAP)
+    res = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "nosize-secret"})
+    assert res.status_code == 200, res.text
+    assert "(BODY.PEEK[])" not in fetched_cmds
+    assert "(BODYSTRUCTURE)" in fetched_cmds
+    assert len(res.json()["drafts"]) == 1
+    client.post(f"/api/intake/drafts/{res.json()['drafts'][0]['draftId']}/discard")
+
+
+def test_imap_bodystructure_ignores_html_alternative_and_unnamed_inline_parts(monkeypatch):
+    """Bugbot: BODYSTRUCTURE must ignore text/html alternatives and unnamed inline parts; only real PDF becomes a draft."""
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "html-secret")
+
+    small_pdf = _make_minimal_pdf([
+        "Cedent: HtmlFilter Re",
+        "Programme: HtmlFilter Cat XL 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $10M xs $20M | Premium $2.0M",
+    ])
+    small_pdf_b64 = base64.b64encode(small_pdf)
+
+    # Multipart/mixed containing:
+    #   1: multipart/alternative -> 1.1 text/plain, 1.2 text/html (must NOT become a draft)
+    #   2: unnamed inline image/png (must NOT become a draft)
+    #   3: real PDF attachment (ONLY draft)
+    bs_response = (
+        b'1 (BODYSTRUCTURE ('
+        b'(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 25 1 NIL NIL NIL)'
+        b'("TEXT" "HTML" ("CHARSET" "utf-8") NIL NIL "7BIT" 60 2 NIL NIL NIL) "ALTERNATIVE" ("BOUNDARY" "alt") NIL NIL)'
+        b'("IMAGE" "PNG" NIL "<cid1>" NIL "BASE64" 500 NIL ("INLINE" NIL) NIL)'
+        + f'("APPLICATION" "PDF" ("NAME" "real_slip.pdf") NIL NIL "BASE64" {len(small_pdf_b64)} NIL ("ATTACHMENT" ("FILENAME" "real_slip.pdf")) NIL)'.encode("ascii")
+        + b' "MIXED" ("BOUNDARY" "mix") NIL NIL))'
+    )
+    fetched_cmds: list[str] = []
+
+    class FakeHtmlIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            return ("OK", [b"1"])
+
+        def fetch(self, num: bytes, cmd: str):
+            fetched_cmds.append(cmd)
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [b"1 (RFC822.SIZE 500000000)"])
+            if "HEADER.FIELDS" in cmd:
+                return ("OK", [(b"1 (BODY[HEADER.FIELDS] {80})", b"Message-ID: <html-alt@test>\r\nFrom: a@b.com\r\nSubject: Html Alt\r\n\r\n")])
+            if "BODYSTRUCTURE" in cmd:
+                return ("OK", [bs_response])
+            if cmd == "(BODY.PEEK[1.1])":
+                return ("OK", [(b"1 (BODY[1.1] {25})", b"Plain text cover message.")])
+            if cmd == "(BODY.PEEK[3])":
+                return ("OK", [(b"1 (BODY[3] {999})", small_pdf_b64)])
+            raise AssertionError(f"Should not fetch text/html (1.2) or unnamed inline image (2): {cmd}")
+
+        def store(self, num: bytes, op: str, flags: str):
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeHtmlIMAP)
+    res = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "html-secret"})
+    assert res.status_code == 200, res.text
+    drafts = res.json()["drafts"]
+    assert len(drafts) == 1
+    assert drafts[0]["sourceFilename"] == "real_slip.pdf"
+    assert "(BODY.PEEK[1.2])" not in fetched_cmds
+    assert "(BODY.PEEK[2])" not in fetched_cmds
+    client.post(f"/api/intake/drafts/{drafts[0]['draftId']}/discard")
+
+
+def test_imap_bodystructure_recurses_into_forwarded_message_rfc822(monkeypatch):
+    """Bugbot: Forwarded message/rfc822 wrapper in BODYSTRUCTURE must be walked so inner small PDFs are fetched."""
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "fwd-secret")
+
+    inner_pdf = _make_minimal_pdf([
+        "Cedent: Forwarded Mutual",
+        "Programme: Forwarded Wind XL 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $20M xs $40M | Premium $3.6M",
+    ])
+    inner_pdf_b64 = base64.b64encode(inner_pdf)
+
+    # Outer multipart/mixed:
+    #   1: text/plain ("FYI forwarding")
+    #   2: message/rfc822 (size 500MB wrapper!) containing inner multipart/mixed:
+    #        2.1: giant_forwarded.pdf (500MB - skipped without downloading)
+    #        2.2: inner_slip.pdf (small valid PDF - fetched via BODY.PEEK[2.2])
+    bs_response = (
+        b'1 (BODYSTRUCTURE ('
+        b'("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 15 1 NIL NIL NIL)'
+        b'("MESSAGE" "RFC822" NIL NIL NIL "7BIT" 500005000 '
+        b'("Fri, 27 Nov 2026 10:00:00 +0000" "Original Slip" NIL NIL NIL NIL NIL NIL NIL "<orig@test>") '
+        b'('
+        b'("APPLICATION" "PDF" ("NAME" "giant_forwarded.pdf") NIL NIL "BASE64" 500000000 NIL ("ATTACHMENT" ("FILENAME" "giant_forwarded.pdf")) NIL)'
+        + f'("APPLICATION" "PDF" ("NAME" "inner_slip.pdf") NIL NIL "BASE64" {len(inner_pdf_b64)} NIL ("ATTACHMENT" ("FILENAME" "inner_slip.pdf")) NIL)'.encode("ascii")
+        + b' "MIXED" ("BOUNDARY" "inner") NIL NIL) '
+        b'1000 NIL ("ATTACHMENT" NIL) NIL)'
+        b' "MIXED" ("BOUNDARY" "outer") NIL NIL))'
+    )
+    fetched_cmds: list[str] = []
+    marked_seen: list[bytes] = []
+
+    class FakeFwdIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            return ("OK", [b"1"])
+
+        def fetch(self, num: bytes, cmd: str):
+            fetched_cmds.append(cmd)
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [b"1 (RFC822.SIZE 500006000)"])
+            if "HEADER.FIELDS" in cmd:
+                return ("OK", [(b"1 (BODY[HEADER.FIELDS] {80})", b"Message-ID: <fwd-wrap@test>\r\nFrom: broker@example.com\r\nSubject: Fwd: Slip\r\n\r\n")])
+            if "BODYSTRUCTURE" in cmd:
+                return ("OK", [bs_response])
+            if cmd == "(BODY.PEEK[1])":
+                return ("OK", [(b"1 (BODY[1] {15})", b"FYI forwarding.")])
+            if cmd == "(BODY.PEEK[2.2])":
+                return ("OK", [(b"1 (BODY[2.2] {999})", inner_pdf_b64)])
+            raise AssertionError(f"Must not download full message, wrapper 2, or oversized 2.1: {cmd}")
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                marked_seen.append(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeFwdIMAP)
+    res = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "fwd-secret"})
+    assert res.status_code == 200, res.text
+    drafts = res.json()["drafts"]
+    assert len(drafts) == 1
+    assert drafts[0]["sourceFilename"] == "inner_slip.pdf"
+    assert drafts[0]["extracted"]["cedentName"] == "Forwarded Mutual"
+    assert any("giant_forwarded.pdf" in w for w in drafts[0]["extracted"]["warnings"])
+    assert "(BODY.PEEK[2.2])" in fetched_cmds
+    assert "(BODY.PEEK[2.1])" not in fetched_cmds
+    assert "(BODY.PEEK[2])" not in fetched_cmds
+    assert marked_seen == [b"1"]
+    client.post(f"/api/intake/drafts/{drafts[0]['draftId']}/discard")
+
+
+def test_imap_quarantines_deterministic_invalid_message_so_second_poll_advances_to_valid_mail(monkeypatch):
+    """Security review: Deterministically invalid mail (e.g. ELT rate cap ValueError) is quarantined & marked \\Seen."""
+    from email.message import EmailMessage
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "quar-secret")
+
+    msg_bad = EmailMessage()
+    msg_bad["Message-ID"] = "<imap-poison-elt-001@test>"
+    msg_bad["From"] = "bad@example.com"
+    msg_bad["Subject"] = "Poison ELT"
+    msg_bad.set_content("Bad ELT attachment")
+    msg_bad.add_attachment(
+        b"event_id,annual_rate,mean_loss,region_peril_key\n1001,1000000,25.0,US-FL-WS\n",
+        maintype="text",
+        subtype="csv",
+        filename="poison_elt.csv",
+    )
+
+    msg_good = EmailMessage()
+    msg_good["Message-ID"] = "<imap-good-after-poison-002@test>"
+    msg_good["From"] = "broker@example.com"
+    msg_good["Subject"] = "Good later submission"
+    msg_good.set_content("Cedent: Good Later Re\nProgramme: Good Later XL 2027\nInception: 2027-01-01\nRegion: US-FL-WS\nLayer 1: $10M xs $20M | Premium $2.0M")
+
+    raw_by_num = {b"1": msg_bad.as_bytes(), b"2": msg_good.as_bytes()}
+    seen_flags: set[bytes] = set()
+
+    class FakeQuarantineIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"2"])
+
+        def search(self, charset, criterion: str):
+            # Return at most 1 oldest UNSEEN message per poll to simulate prefix starvation
+            unseen = [n for n in (b"1", b"2") if n not in seen_flags][:1]
+            return ("OK", [b" ".join(unseen)])
+
+        def fetch(self, num: bytes, cmd: str):
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [f"{num.decode()} (RFC822.SIZE {len(raw_by_num[num])})".encode("ascii")])
+            return ("OK", [(b"1 (BODY[] {100})", raw_by_num[num])])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                seen_flags.add(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeQuarantineIMAP)
+
+    # Poll 1 hits poison message 1 -> quarantined & marked \Seen (no draft created)
+    p1 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "quar-secret"})
+    assert p1.status_code == 200, p1.text
+    assert p1.json()["processedCount"] == 0
+    assert p1.json()["skippedCount"] == 1
+    assert b"1" in seen_flags
+
+    # Poll 2 advances to valid message 2 instead of stalling on message 1
+    p2 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "quar-secret"})
+    assert p2.status_code == 200, p2.text
+    assert p2.json()["processedCount"] == 1
+    assert len(p2.json()["drafts"]) == 1
+    assert p2.json()["drafts"][0]["extracted"]["cedentName"] == "Good Later Re"
+    assert b"2" in seen_flags
+
+    for d in p2.json()["drafts"]:
+        client.post(f"/api/intake/drafts/{d['draftId']}/discard")
+
+
+def test_watched_folder_rejects_symlink_pointing_outside_root(tmp_path: Path, monkeypatch):
+    """Security review: Symlinks inside a watched folder pointing outside the root must not be ingested."""
+    watch_root = tmp_path / "submissions_watch"
+    outside_secret = tmp_path / "outside_secret.txt"
+    outside_secret.write_text("Cedent: Secret Leak\nProgramme: Should Never Be Read\n", encoding="utf-8")
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_FOLDER_ROOT", str(watch_root))
+
+    ok = client.put(
+        "/api/intake/programmes/prog-farmers-us-27/watched-folder",
+        json={"watchedFolder": "symlink-check"},
+    )
+    assert ok.status_code == 200
+    prog_dir = watch_root / "symlink-check"
+    (prog_dir / "leak.txt").symlink_to(outside_secret)
+
+    # Status must not count the symlink as a pending file
+    status = client.get("/api/intake/folder/status").json()
+    wp = next(w for w in status["watchedProgrammes"] if w["programmeId"] == "prog-farmers-us-27")
+    assert wp["pendingFiles"] == 0
+
+    # Scan must skip the symlink and create zero drafts
+    scan = client.post("/api/intake/folder/scan?programmeId=prog-farmers-us-27")
+    assert scan.status_code == 200, scan.text
+    assert scan.json()["pickedUpCount"] == 0
+    assert scan.json()["drafts"] == []
+    assert scan.json()["skippedCount"] == 1
+
+    client.put("/api/intake/programmes/prog-farmers-us-27/watched-folder", json={"watchedFolder": None})
+
+
+def test_imap_quarantines_poison_yelt_while_ingesting_valid_sibling_pdf(monkeypatch):
+    """Bugbot: Poison YELT on an IMAP message is quarantined per-attachment while valid sibling PDF still becomes a draft."""
+    from email.message import EmailMessage
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "sibling-secret")
+
+    valid_pdf = _make_minimal_pdf([
+        "Cedent: Sibling Survivor Mutual",
+        "Programme: Sibling Wind XL 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $12M xs $24M | Premium $2.2M",
+    ])
+    msg = EmailMessage()
+    msg["Message-ID"] = "<imap-poison-plus-pdf@test>"
+    msg["From"] = "broker@example.com"
+    msg["Subject"] = "Poison YELT + Valid PDF"
+    msg.set_content("Attached YELT and slip")
+    msg.add_attachment(
+        b"trial_id,event_id,loss_amount\n5000000,1001,10.0\n",
+        maintype="text",
+        subtype="csv",
+        filename="poison_yelt.csv",
+    )
+    msg.add_attachment(valid_pdf, maintype="application", subtype="pdf", filename="valid_sibling.pdf")
+    raw_msg = msg.as_bytes()
+    seen_flags: set[bytes] = set()
+    fetch_count = {"n": 0}
+
+    class FakeMixedPoisonIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            unseen = [b"1"] if b"1" not in seen_flags else []
+            return ("OK", [b" ".join(unseen)])
+
+        def fetch(self, num: bytes, cmd: str):
+            fetch_count["n"] += 1
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [f"1 (RFC822.SIZE {len(raw_msg)})".encode("ascii")])
+            return ("OK", [(b"1 (BODY[] {100})", raw_msg)])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                seen_flags.add(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeMixedPoisonIMAP)
+
+    # Poll 1: valid_sibling.pdf becomes a draft, poison_yelt.csv is quarantined, message marked \Seen
+    p1 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "sibling-secret"})
+    assert p1.status_code == 200, p1.text
+    drafts = p1.json()["drafts"]
+    assert len(drafts) == 1
+    assert drafts[0]["sourceFilename"] == "valid_sibling.pdf"
+    assert drafts[0]["extracted"]["cedentName"] == "Sibling Survivor Mutual"
+    assert any("poison_yelt.csv" in w for w in drafts[0]["extracted"]["warnings"])
+    assert b"1" in seen_flags
+
+    # Poll 2: message is already \Seen and not reprocessed
+    prev_fetches = fetch_count["n"]
+    p2 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "sibling-secret"})
+    assert p2.status_code == 200
+    assert p2.json()["processedCount"] == 0
+    assert fetch_count["n"] == prev_fetches
+
+    client.post(f"/api/intake/drafts/{drafts[0]['draftId']}/discard")
+
+
+def test_read_regular_file_nofollow_closes_fd_on_fstat_reject_and_no_double_close_on_read_error(tmp_path: Path, monkeypatch):
+    """Bugbot: _read_regular_file_nofollow must close fd on fstat reject and never double-close after fdopen."""
+    import os as _os
+    import stat as _stat
+    import app.services.intake as intake_mod
+
+    f = tmp_path / "sample.txt"
+    f.write_bytes(b"hello")
+
+    # 1. fstat reports size > max_bytes (file grew after lstat) -> os.close(fd) called exactly once
+    closed_fds: list[int] = []
+    orig_close = _os.close
+    orig_fstat = _os.fstat
+
+    def spy_close(fd: int):
+        closed_fds.append(fd)
+        return orig_close(fd)
+
+    class FakeOversizedStat:
+        st_mode = _stat.S_IFREG | 0o644
+        st_size = 999_999
+
+    monkeypatch.setattr(intake_mod.os, "close", spy_close)
+    monkeypatch.setattr(intake_mod.os, "fstat", lambda fd: FakeOversizedStat())
+    assert intake_mod._read_regular_file_nofollow(f, tmp_path, max_bytes=100) is None
+    assert len(closed_fds) == 1
+
+    # 2. Exception during read after os.fdopen takes ownership -> os.close NOT called directly (no double-close)
+    closed_fds.clear()
+    monkeypatch.setattr(intake_mod.os, "fstat", orig_fstat)
+
+    class FailingReader:
+        def __init__(self, real_fh):
+            self._real = real_fh
+            self.closed_count = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.closed_count += 1
+            self._real.close()
+            return False
+
+        def read(self, n: int = -1):
+            raise OSError("Simulated disk read error")
+
+    orig_fdopen = _os.fdopen
+    readers: list[FailingReader] = []
+
+    def spy_fdopen(fd: int, mode: str, closefd: bool = True):
+        r = FailingReader(orig_fdopen(fd, mode, closefd=closefd))
+        readers.append(r)
+        return r
+
+    monkeypatch.setattr(intake_mod.os, "fdopen", spy_fdopen)
+    assert intake_mod._read_regular_file_nofollow(f, tmp_path, max_bytes=100) is None
+    assert len(readers) == 1 and readers[0].closed_count == 1
+    assert closed_fds == []
+
+
+def test_parquet_yelt_reads_actual_trial_count():
+    """Bugbot #2: Parquet YELT detection must read actual trial count instead of hardcoding 10,000."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    tbl = pa.table({
+        "trial_id": pa.array([1, 25_000, 50_000], type=pa.uint32()),
+        "event_id": pa.array([101, 102, 103], type=pa.uint64()),
+        "day_of_year": pa.array([210, 240, 265], type=pa.uint16()),
+        "region_peril_key": pa.array(["US-FL-WS", "US-FL-WS", "US-TX-WS"]),
+        "loss_amount": pa.array([100.0, 150.0, 250.0], type=pa.float64()),
+    })
+    buf = io.BytesIO()
+    pq.write_table(tbl, buf)
+
+    res = client.post(
+        "/api/intake/drop-in",
+        files={"file": ("cat_50k.parquet", buf.getvalue(), "application/octet-stream")},
+    )
+    assert res.status_code == 200, res.text
+    draft = res.json()
+    assert draft["sourceFileType"] == "YELT"
+
+    sim_sets = client.get("/api/sim-sets").json()
+    sim = next(s for s in sim_sets if s["simSetId"] == draft["simSetId"])
+    assert sim["numTrials"] == 50_000
+    # Total loss = 500.0 across 50,000 trials -> AAL = 0.01 (not 0.05 from hardcoded 10,000)
+    assert sim["expectedAnnualLoss"] == 0.01
+
+    client.post(f"/api/intake/drafts/{draft['draftId']}/discard")
+
+
+def test_confirm_attach_existing_two_layers_succeeds_atomically():
+    """Bugbot #3: ATTACH_EXISTING with multiple layers must unpack ContractFull properly and commit atomically."""
+    # First create a clean target programme in CMS
+    base_pdf = _make_minimal_pdf([
+        "Cedent: Harbor MultiLayer Re",
+        "Programme: Harbor Base Cat XL 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $10M xs $20M | Premium $2.0M | Line 10%",
+    ])
+    d0 = client.post("/api/intake/drop-in", files={"file": ("base.pdf", base_pdf, "application/pdf")}).json()
+    prog_id = client.post(f"/api/intake/drafts/{d0['draftId']}/confirm", json={}).json()["contract"]["programmeId"]
+    before_layers = len(client.get(f"/api/contracts/{prog_id}/layers").json())
+
+    # Now drop a 2-layer Excel schedule targeted at that existing programme
+    d1 = client.post(
+        "/api/intake/drop-in",
+        data={"programme_id": prog_id},
+        files={
+            "file": (
+                "two_layers.xlsx",
+                _make_sample_xlsx(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    ).json()
+    assert len(d1["extracted"]["layers"]) == 2
+
+    conf = client.post(f"/api/intake/drafts/{d1['draftId']}/confirm", json={"mode": "ATTACH_EXISTING"})
+    assert conf.status_code == 200, conf.text
+    body = conf.json()
+    assert body["action"] == "UPDATED_PROGRAMME"
+    assert body["draft"]["status"] == "CONFIRMED"
+    assert body["contract"]["status"] == "SUBMISSION"
+
+    after_layers = client.get(f"/api/contracts/{prog_id}/layers").json()
+    assert len(after_layers) == before_layers + 2
+
+
+def test_confirm_edited_premium_wins_over_stale_rol():
+    """Bugbot #4: User-edited depositPremium on confirm must be stored in CMS (not overwritten by stale rol)."""
+    pdf_bytes = _make_minimal_pdf([
+        "Cedent: Summit Premium Test Re",
+        "Programme: Summit Cat XL 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $25M xs $50M | Premium $4.5M | ROL 18% | Line 10%",
+    ])
+    draft = client.post("/api/intake/drop-in", files={"file": ("summit.pdf", pdf_bytes, "application/pdf")}).json()
+    extracted = draft["extracted"]
+    assert extracted["layers"][0]["depositPremium"] == 4.5
+    assert extracted["layers"][0]["rol"] == 0.18
+
+    # User edits depositPremium to 6.25 while stale rol=0.18 is still present in payload
+    extracted["layers"][0]["depositPremium"] = 6.25
+
+    conf = client.post(f"/api/intake/drafts/{draft['draftId']}/confirm", json={"extracted": extracted})
+    assert conf.status_code == 200, conf.text
+    prog_id = conf.json()["contract"]["programmeId"]
+
+    layers = client.get(f"/api/contracts/{prog_id}/layers").json()
+    assert len(layers) == 1
+    assert abs(layers[0]["depositPremium"] - 6.25) < 1e-4
+    assert abs(layers[0]["rol"] - 0.25) < 1e-4
+
+
+def test_confirm_blocks_missing_region_perils_without_silent_substitution():
+    """Bugbot #5: Confirm must block (422) and name missing region/peril keys instead of silently substituting."""
+    # Ingest a US-FL-WS-only YELT sim set
+    fl_only_csv = b"trial_id,event_id,day_of_year,region_peril_key,loss_amount\n1,1001,240,US-FL-WS,20.0\n2,1002,250,US-FL-WS,35.0\n"
+    yelt_draft = client.post("/api/intake/drop-in", files={"file": ("fl_only.csv", fl_only_csv, "text/csv")}).json()
+    fl_sim_id = yelt_draft["simSetId"]
+    client.post(f"/api/intake/drafts/{yelt_draft['draftId']}/discard")
+
+    # Drop a PDF referencing JP-KANTO-EQ attached to the US-FL-WS-only sim set
+    pdf_bytes = _make_minimal_pdf([
+        "Cedent: Nippon Mismatch Re",
+        "Programme: Japan Quake XL 2027",
+        "Inception: 2027-01-01",
+        "Region: JP-KANTO-EQ",
+        "Layer 1: $20M xs $40M | Premium $3.0M",
+    ])
+    draft = client.post(
+        "/api/intake/drop-in",
+        data={"attach_sim_set_id": fl_sim_id},
+        files={"file": ("nippon.pdf", pdf_bytes, "application/pdf")},
+    ).json()
+
+    before_contracts = len(client.get("/api/contracts").json())
+    conf = client.post(f"/api/intake/drafts/{draft['draftId']}/confirm", json={})
+    assert conf.status_code == 422, conf.text
+    assert "JP-KANTO-EQ" in conf.json()["detail"]
+
+    # Draft remains PENDING_REVIEW and CMS is unchanged
+    still = client.get(f"/api/intake/drafts/{draft['draftId']}").json()
+    assert still["status"] == "PENDING_REVIEW"
+    assert len(client.get("/api/contracts").json()) == before_contracts
+
+    client.post(f"/api/intake/drafts/{draft['draftId']}/discard")
+
+
+def test_email_partial_failure_retry_does_not_duplicate_first_attachment(monkeypatch):
+    """Bugbot #6: Atomic dedup key ensures retrying a partially failed multi-attachment email creates no duplicates."""
+    yelt_b64 = base64.b64encode(_make_yelt_csv()).decode("ascii")
+    pdf_b64 = base64.b64encode(
+        _make_minimal_pdf([
+            "Cedent: Retry Guard Mutual",
+            "Programme: Retry Guard Cat XL 2027",
+            "Inception: 2027-01-01",
+            "Region: US-FL-WS",
+            "Layer 1: $15M xs $30M | Premium $2.5M",
+        ])
+    ).decode("ascii")
+
+    # First attempt: attachment 2 is invalid/oversized? Use a bad base64 or trigger failure on second ingest_file call
+    import app.services.intake as intake_mod
+
+    orig_ingest_file = intake_mod.SubmissionIntakeService.ingest_file
+    calls = {"n": 0}
+
+    def flaky_ingest_file(self, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ValueError("Simulated transient failure on second attachment")
+        return orig_ingest_file(self, **kwargs)
+
+    monkeypatch.setattr(intake_mod.SubmissionIntakeService, "ingest_file", flaky_ingest_file)
+
+    payload = {
+        "messageId": "fixture-msg-partial-crash-999",
+        "sender": "broker@example.com",
+        "subject": "Retry Guard Mutual 2027",
+        "bodyText": "Two attachments",
+        "attachments": [
+            {"filename": "retry_yelt.csv", "contentBase64": yelt_b64, "contentType": "text/csv"},
+            {"filename": "retry_slip.pdf", "contentBase64": pdf_b64, "contentType": "application/pdf"},
+        ],
+    }
+
+    fail_res = client.post("/api/intake/email/ingest", json=payload)
+    assert fail_res.status_code == 422
+
+    # Restore normal ingest_file and retry the exact same email messageId
+    monkeypatch.setattr(intake_mod.SubmissionIntakeService, "ingest_file", orig_ingest_file)
+    ok_res = client.post("/api/intake/email/ingest", json=payload)
+    assert ok_res.status_code == 200, ok_res.text
+    drafts = ok_res.json()
+    assert len(drafts) == 2
+
+    # Retry a third time: must return the exact same two draftIds and create zero extra drafts
+    again_res = client.post("/api/intake/email/ingest", json=payload)
+    assert again_res.status_code == 200
+    assert [d["draftId"] for d in again_res.json()] == [d["draftId"] for d in drafts]
+
+    all_matching = [
+        d for d in client.get("/api/intake/drafts").json() if d["sourceRef"].endswith("Retry Guard Mutual 2027")
+    ]
+    assert len(all_matching) == 2
+
+    for d in drafts:
+        client.post(f"/api/intake/drafts/{d['draftId']}/discard")
