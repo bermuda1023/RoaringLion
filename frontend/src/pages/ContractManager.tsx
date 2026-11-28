@@ -2,11 +2,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { api, apiUrl, fetchJson, postJson, type ContractFull, type ProgrammeProfile } from '../api/client';
 import { ContractLayersEditor } from '../components/ContractLayersEditor';
+import { ProgrammeIntakePanel } from '../components/ProgrammeIntakePanel';
 import { fmtInt, fmtMoneyB, fmtMoneyM, fmtPct, fmtPts, fmtRatioPct } from '../utils/format';
 import { nextLayerCode } from '../utils/nodeLabels';
 import { matchesNumberFilter, matchesTextFilter } from '../utils/tableFilter';
 
-type DossierTab = 'profile' | 'layers' | 'notes' | 'pricing' | 'exposure';
+type DossierTab = 'profile' | 'layers' | 'notes' | 'pricing' | 'exposure' | 'intake';
 
 interface LedgerColumn {
   key: string;
@@ -912,6 +913,12 @@ export function ContractManager({
               >
                 Exposure &amp; Audit
               </button>
+              <button
+                className={`tab ${dossierTab === 'intake' ? 'active' : ''}`}
+                onClick={() => setDossierTab('intake')}
+              >
+                Submissions Intake
+              </button>
             </div>
           </div>
 
@@ -1669,6 +1676,18 @@ export function ContractManager({
                 )}
               </div>
             </div>
+          )}
+
+          {dossierTab === 'intake' && (
+            <ProgrammeIntakePanel
+              programmeId={d.contract.programmeId}
+              programmeLabel={`${d.contract.cedentName} — ${d.contract.programmeName}`}
+              watchedFolder={d.contract.watchedFolder}
+              onProgrammeUpdated={() => {
+                qc.invalidateQueries({ queryKey: ['contractDossier', activeId] });
+                qc.invalidateQueries({ queryKey: ['contracts'] });
+              }}
+            />
           )}
         </div>
       )}

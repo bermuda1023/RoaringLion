@@ -651,3 +651,82 @@ export interface ConstraintConflict {
   message: string;
   offendingLayers: ConflictLayerDetail[];
 }
+
+export type DealStabilityBucket = 'CONSISTENT_GROW' | 'CONSISTENT_SHRINK' | 'UNSTABLE';
+
+export interface DealStabilityThresholds {
+  boundTolerance: number;
+  deltaTolerance: number;
+  consensusFraction: number;
+  dispersionIqrCutoff: number;
+  dispersionStdCutoff: number;
+}
+
+export interface DealStabilityRow {
+  layerKey: string;
+  programmeId: string;
+  layerId: string;
+  cedentName: string;
+  programmeName: string;
+  layerName: string;
+  direction: string;
+  status: string;
+  regionPerils: string[];
+  classification: DealStabilityBucket;
+  locked: boolean;
+  stabilityScore: number;
+  currentShare: number;
+  recommendedShare: number;
+  minShare: number;
+  medianShare: number;
+  maxShare: number;
+  meanShare: number;
+  stdShare: number;
+  iqrShare: number;
+  boundMinShare: number;
+  boundMaxShare: number;
+  medianDeltaShare: number;
+  pctAtMax: number;
+  pctAtMin: number;
+  pctGrown: number;
+  pctShrunk: number;
+  growSupport: number;
+  shrinkSupport: number;
+  currentCapitalM: number;
+  meanOptimalCapitalM: number;
+  currentExpectedProfitM: number;
+  meanOptimalExpectedProfitM: number;
+}
+
+export interface StabilityThemeItem {
+  dimension: 'CEDENT' | 'REGION' | 'PERIL';
+  key: string;
+  dealCount: number;
+  deployedCapitalM: number;
+  shareOfDeployedCapitalPct: number;
+  expectedReturnM: number;
+  shareOfExpectedReturnPct: number;
+}
+
+export interface StabilityBucketThemes {
+  dealCount: number;
+  deployedCapitalM: number;
+  shareOfDeployedCapitalPct: number;
+  expectedReturnM: number;
+  shareOfExpectedReturnPct: number;
+  topCedents: StabilityThemeItem[];
+  topRegions: StabilityThemeItem[];
+  topPerils: StabilityThemeItem[];
+}
+
+export interface DealStabilitySummary {
+  feasiblePointCount: number;
+  totalPointCount: number;
+  consistentGrowCount: number;
+  consistentShrinkCount: number;
+  unstableCount: number;
+  thresholds: DealStabilityThresholds;
+  growThemes: StabilityBucketThemes;
+  shrinkThemes: StabilityBucketThemes;
+  deals: DealStabilityRow[];
+}

@@ -8,9 +8,11 @@ import {
   type LayerBoundState,
 } from '../components/OptimizerCandidatesTable';
 import { OptimizerStatusFilter } from '../components/OptimizerStatusFilter';
+import { OptimizerStabilityPanel } from '../components/OptimizerStabilityPanel';
 import {
   PROGRAMME_STATUSES,
   type ConstraintConflict,
+  type DealStabilitySummary,
   type OptimizerCandidatesPage,
   type OptimizerLayerCatalogItem,
   type OptimizerMode,
@@ -75,6 +77,7 @@ interface FrontierExplorerResponse {
   peakReturnToTvar1000Index?: number;
   peakReturnToStdDevIndex?: number;
   frontier: FrontierExplorerPoint[];
+  dealStability?: DealStabilitySummary | null;
   conflicts?: ConstraintConflict[];
 }
 
@@ -1552,6 +1555,9 @@ export function PortfolioOptimizer({
                     <PortfolioRadarChart initial={data.initialPortfolio} proposed={activePoint.metrics} />
                   </div>
                 </div>
+
+                {/* Row 2b: AnalyzeRe-style Frontier Deal Stability & Theme Summary */}
+                <OptimizerStabilityPanel stability={data.dealStability} />
 
                 {/* Row 3: Constraint Diagnostics & LP Shadow Prices */}
                 <div className="panel">

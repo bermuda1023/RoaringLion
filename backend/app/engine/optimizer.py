@@ -22,6 +22,7 @@ from app.models.domain import BreadcrumbStep, GraphNodeSpec, ProgrammeDeal, RunM
 from app.models.enums import ContractDirection, IlwTriggerType, NodeType, ProgrammeStatus, ViewOfRisk, is_hedge_direction
 from app.models.phase1 import IlwPriceRequest
 from app.services.lineage import LineageRegistry, canonical_hash
+from app.services.loss_files import split_region_peril
 from app.services.portfolio_snapshot import compute_unl_portfolio_events, select_unl_snapshot_contracts
 from app.services.sim_sets import _trim_memory
 
@@ -384,6 +385,122 @@ class FrontierExplorerPoint(CamelModel):
     return_period_contributions: list[ReturnPeriodStackRow]
 
 
+# Deal-stability classification thresholds (AnalyzeRe-style frontier participation stability).
+# Derived strictly from the solver's actual participation vectors across feasible frontier points,
+# resolved participation bounds [lb, ub], and current_share (never heuristic deal re-scoring).
+#
+# Per-deal rule over K feasible frontier points with shares W = [w_1, ..., w_K]:
+#   1. Locked / zero-span bounds (locked or ub - lb <= 1e-6) -> UNSTABLE (not solver-decisive).
+#   2. Effective tolerances scale down for narrow bands so min/max bands stay disjoint:
+#        eff_bound_tol = min(STABILITY_BOUND_TOL, 0.20 * (ub - lb))
+#        eff_delta_tol = min(STABILITY_DELTA_TOL, 0.20 * (ub - lb))
+#   3. At each feasible frontier point k:
+#        at_max[k] = w_k >= ub - eff_bound_tol
+#        at_min[k] = w_k <= lb + eff_bound_tol
+#        grown[k]  = w_k >= current_share + eff_delta_tol
+#        shrunk[k] = w_k <= current_share - eff_delta_tol
+#        grow_signal[k]   = (at_max[k] and not shrunk[k]) or grown[k]
+#        shrink_signal[k] = (at_min[k] and not grown[k]) or shrunk[k]
+#      grow_support   = mean(grow_signal)
+#      shrink_support = mean(shrink_signal)
+#   4. Dispersion over W:
+#        iqr_share = Q3(W) - Q1(W)
+#        std_share = pstdev(W) (ddof=0)
+#      High dispersion iff iqr_share >= STABILITY_DISPERSION_IQR_CUTOFF
+#                       or std_share >= STABILITY_DISPERSION_STD_CUTOFF
+#   5. Final classification:
+#      - High dispersion -> UNSTABLE
+#      - grow_support >= STABILITY_CONSENSUS_FRACTION and shrink_support < 1 - STABILITY_CONSENSUS_FRACTION
+#          -> CONSISTENT_GROW
+#      - shrink_support >= STABILITY_CONSENSUS_FRACTION and grow_support < 1 - STABILITY_CONSENSUS_FRACTION
+#          -> CONSISTENT_SHRINK
+#      - Otherwise -> UNSTABLE
+STABILITY_BOUND_TOL = 0.02
+STABILITY_DELTA_TOL = 0.02
+STABILITY_CONSENSUS_FRACTION = 0.70
+STABILITY_DISPERSION_IQR_CUTOFF = 0.25
+STABILITY_DISPERSION_STD_CUTOFF = 0.30
+
+DealStabilityBucket = Literal["CONSISTENT_GROW", "CONSISTENT_SHRINK", "UNSTABLE"]
+
+
+class DealStabilityThresholds(CamelModel):
+    bound_tolerance: float = STABILITY_BOUND_TOL
+    delta_tolerance: float = STABILITY_DELTA_TOL
+    consensus_fraction: float = STABILITY_CONSENSUS_FRACTION
+    dispersion_iqr_cutoff: float = STABILITY_DISPERSION_IQR_CUTOFF
+    dispersion_std_cutoff: float = STABILITY_DISPERSION_STD_CUTOFF
+
+
+class DealStabilityRow(CamelModel):
+    layer_key: str
+    programme_id: str
+    layer_id: str
+    cedent_name: str
+    programme_name: str
+    layer_name: str
+    direction: str
+    status: str = ""
+    region_perils: list[str]
+    classification: DealStabilityBucket
+    locked: bool = False
+    stability_score: float
+    current_share: float
+    recommended_share: float
+    min_share: float
+    median_share: float
+    max_share: float
+    mean_share: float
+    std_share: float
+    iqr_share: float
+    bound_min_share: float
+    bound_max_share: float
+    median_delta_share: float
+    pct_at_max: float
+    pct_at_min: float
+    pct_grown: float
+    pct_shrunk: float
+    grow_support: float
+    shrink_support: float
+    current_capital_m: float
+    mean_optimal_capital_m: float
+    current_expected_profit_m: float
+    mean_optimal_expected_profit_m: float
+
+
+class StabilityThemeItem(CamelModel):
+    dimension: Literal["CEDENT", "REGION", "PERIL"]
+    key: str
+    deal_count: int
+    deployed_capital_m: float
+    share_of_deployed_capital_pct: float
+    expected_return_m: float
+    share_of_expected_return_pct: float
+
+
+class StabilityBucketThemes(CamelModel):
+    deal_count: int
+    deployed_capital_m: float
+    share_of_deployed_capital_pct: float
+    expected_return_m: float
+    share_of_expected_return_pct: float
+    top_cedents: list[StabilityThemeItem] = []
+    top_regions: list[StabilityThemeItem] = []
+    top_perils: list[StabilityThemeItem] = []
+
+
+class DealStabilitySummary(CamelModel):
+    feasible_point_count: int
+    total_point_count: int
+    consistent_grow_count: int
+    consistent_shrink_count: int
+    unstable_count: int
+    thresholds: DealStabilityThresholds
+    grow_themes: StabilityBucketThemes
+    shrink_themes: StabilityBucketThemes
+    deals: list[DealStabilityRow]
+
+
 class FrontierExplorerResponse(CamelModel):
     mode: str
     granularity: str
@@ -399,6 +516,7 @@ class FrontierExplorerResponse(CamelModel):
     peak_return_to_tvar_1000_index: int = 0
     peak_return_to_std_dev_index: int = 0
     frontier: list[FrontierExplorerPoint]
+    deal_stability: DealStabilitySummary | None = None
     conflicts: list[ConstraintConflict] = []
     manifest: RunManifest
 
@@ -2160,6 +2278,305 @@ def compute_efficient_frontier(
     return points
 
 
+_STABILITY_BUCKET_ORDER: dict[DealStabilityBucket, int] = {
+    "CONSISTENT_GROW": 0,
+    "CONSISTENT_SHRINK": 1,
+    "UNSTABLE": 2,
+}
+
+
+def _extract_regions_and_perils(region_perils: list[str]) -> tuple[list[str], list[str]]:
+    regions: list[str] = []
+    perils: list[str] = []
+    seen_r: set[str] = set()
+    seen_p: set[str] = set()
+    for rp in region_perils:
+        parsed = split_region_peril(rp)
+        if parsed is None:
+            continue
+        reg, per = parsed
+        if reg not in seen_r:
+            seen_r.add(reg)
+            regions.append(reg)
+        if per not in seen_p:
+            seen_p.add(per)
+            perils.append(per)
+    if not regions:
+        regions = ["MULTI"]
+    if not perils:
+        perils = ["MULTI"]
+    return regions, perils
+
+
+def _build_bucket_themes(
+    bucket_rows: list[DealStabilityRow],
+    *,
+    use_optimal: bool,
+    total_capital_denom: float,
+    total_return_denom: float,
+    top_n: int = 6,
+) -> StabilityBucketThemes:
+    """Aggregate cedent, region, and peril concentration from the participation-derived rows.
+
+    For CONSISTENT_GROW (`use_optimal=True`), capital and expected return use the frontier-mean
+    optimal deployment and expected profit, divided by the total frontier-mean portfolio values.
+    For CONSISTENT_SHRINK (`use_optimal=False`), capital and expected return use the current-book
+    exposure being reduced/dropped, divided by the initial portfolio values.
+    Multi-region or multi-peril layers apportion capital and return equally across their unique
+    regions / perils so dimension sums conserve exact bucket totals without double counting.
+    """
+    cap_fn = (lambda r: r.mean_optimal_capital_m) if use_optimal else (lambda r: r.current_capital_m)
+    ret_fn = (lambda r: r.mean_optimal_expected_profit_m) if use_optimal else (lambda r: r.current_expected_profit_m)
+
+    bucket_cap = sum(cap_fn(r) for r in bucket_rows)
+    bucket_ret = sum(ret_fn(r) for r in bucket_rows)
+    cap_denom = total_capital_denom if abs(total_capital_denom) > 1e-9 else 0.0
+    ret_denom = total_return_denom if abs(total_return_denom) > 1e-9 else 0.0
+
+    ced_acc: dict[str, list[float]] = {}
+    reg_acc: dict[str, list[float]] = {}
+    per_acc: dict[str, list[float]] = {}
+
+    for r in bucket_rows:
+        c_val = cap_fn(r)
+        p_val = ret_fn(r)
+
+        ced_key = r.cedent_name or "Unknown"
+        acc = ced_acc.setdefault(ced_key, [0.0, 0.0, 0.0])
+        acc[0] += 1.0
+        acc[1] += c_val
+        acc[2] += p_val
+
+        regions, perils = _extract_regions_and_perils(r.region_perils)
+        r_weight = 1.0 / len(regions)
+        for reg in regions:
+            racc = reg_acc.setdefault(reg, [0.0, 0.0, 0.0])
+            racc[0] += 1.0
+            racc[1] += c_val * r_weight
+            racc[2] += p_val * r_weight
+
+        p_weight = 1.0 / len(perils)
+        for per in perils:
+            pacc = per_acc.setdefault(per, [0.0, 0.0, 0.0])
+            pacc[0] += 1.0
+            pacc[1] += c_val * p_weight
+            pacc[2] += p_val * p_weight
+
+    def _finalize(
+        acc_map: dict[str, list[float]],
+        dimension: Literal["CEDENT", "REGION", "PERIL"],
+    ) -> list[StabilityThemeItem]:
+        items_out: list[StabilityThemeItem] = []
+        for key, (cnt, cap_sum, ret_sum) in acc_map.items():
+            items_out.append(
+                StabilityThemeItem(
+                    dimension=dimension,
+                    key=key,
+                    deal_count=int(cnt),
+                    deployed_capital_m=round(cap_sum, 4),
+                    share_of_deployed_capital_pct=round((cap_sum / cap_denom) * 100.0, 2) if cap_denom else 0.0,
+                    expected_return_m=round(ret_sum, 4),
+                    share_of_expected_return_pct=round((ret_sum / ret_denom) * 100.0, 2) if ret_denom else 0.0,
+                )
+            )
+        items_out.sort(key=lambda x: (-abs(x.deployed_capital_m), -x.deal_count, x.key))
+        return items_out[:top_n]
+
+    return StabilityBucketThemes(
+        deal_count=len(bucket_rows),
+        deployed_capital_m=round(bucket_cap, 4),
+        share_of_deployed_capital_pct=round((bucket_cap / cap_denom) * 100.0, 2) if cap_denom else 0.0,
+        expected_return_m=round(bucket_ret, 4),
+        share_of_expected_return_pct=round((bucket_ret / ret_denom) * 100.0, 2) if ret_denom else 0.0,
+        top_cedents=_finalize(ced_acc, "CEDENT"),
+        top_regions=_finalize(reg_acc, "REGION"),
+        top_perils=_finalize(per_acc, "PERIL"),
+    )
+
+
+def compute_deal_stability(
+    *,
+    initial_layers: list[OptimizedLayerRow],
+    frontier_pts: list[FrontierExplorerPoint],
+    resolved_bounds_by_key: dict[str, tuple[float, float, bool]],
+    recommended_index: int = 0,
+    thresholds: DealStabilityThresholds | None = None,
+) -> DealStabilitySummary:
+    """Classify every candidate deal across feasible frontier points from solver participation vectors.
+
+    Operates strictly on the already-computed `OptimizedLayerRow` vectors from the frontier points
+    and the initial book (no new dense trial matrices and no independent deal-scoring heuristics).
+    """
+    th = thresholds or DealStabilityThresholds()
+    feasible_pts = [p for p in frontier_pts if p.status in ("Optimal", "Feasible")]
+    if not feasible_pts or not initial_layers:
+        empty_themes = StabilityBucketThemes(
+            deal_count=0,
+            deployed_capital_m=0.0,
+            share_of_deployed_capital_pct=0.0,
+            expected_return_m=0.0,
+            share_of_expected_return_pct=0.0,
+        )
+        return DealStabilitySummary(
+            feasible_point_count=len(feasible_pts),
+            total_point_count=len(frontier_pts),
+            consistent_grow_count=0,
+            consistent_shrink_count=0,
+            unstable_count=0,
+            thresholds=th,
+            grow_themes=empty_themes,
+            shrink_themes=empty_themes,
+            deals=[],
+        )
+
+    layers_by_pt = [{l.layer_key: l for l in pt.layers} for pt in feasible_pts]
+    rec_layers_by_key: dict[str, OptimizedLayerRow] | None = None
+    if 0 <= recommended_index < len(frontier_pts) and frontier_pts[recommended_index].status in ("Optimal", "Feasible"):
+        rec_layers_by_key = {l.layer_key: l for l in frontier_pts[recommended_index].layers}
+
+    rows: list[DealStabilityRow] = []
+    for init_row in initial_layers:
+        key = init_row.layer_key
+        lb, ub, locked_flag = resolved_bounds_by_key.get(key, (0.0, 1.0, False))
+        bound_span = max(0.0, float(ub) - float(lb))
+        is_locked = bool(locked_flag) or bound_span <= 1e-6
+
+        pt_rows = [m[key] for m in layers_by_pt if key in m]
+        if not pt_rows:
+            continue
+
+        ws = np.array([float(r.optimal_share) for r in pt_rows], dtype=np.float64)
+        caps = np.array([float(r.optimal_capital_m) for r in pt_rows], dtype=np.float64)
+        profs = np.array([float(r.optimal_expected_profit_m) for r in pt_rows], dtype=np.float64)
+
+        cur_s = float(init_row.current_share)
+        min_s = float(np.min(ws))
+        med_s = float(np.median(ws))
+        max_s = float(np.max(ws))
+        mean_s = float(np.mean(ws))
+        std_s = float(np.std(ws))
+        q1, q3 = np.percentile(ws, [25.0, 75.0])
+        iqr_s = float(q3 - q1)
+        rec_s = float(rec_layers_by_key[key].optimal_share) if rec_layers_by_key and key in rec_layers_by_key else med_s
+
+        if is_locked:
+            pct_at_max = 0.0
+            pct_at_min = 0.0
+            pct_grown = 0.0
+            pct_shrunk = 0.0
+            grow_support = 0.0
+            shrink_support = 0.0
+            classification: DealStabilityBucket = "UNSTABLE"
+            stability_score = 0.0
+        else:
+            eff_btol = min(th.bound_tolerance, bound_span * 0.20)
+            eff_dtol = min(th.delta_tolerance, bound_span * 0.20)
+            at_max = ws >= (ub - eff_btol)
+            at_min = ws <= (lb + eff_btol)
+            grown = ws >= (cur_s + eff_dtol)
+            shrunk = ws <= (cur_s - eff_dtol)
+            grow_sig = (at_max & ~shrunk) | grown
+            shrink_sig = (at_min & ~grown) | shrunk
+
+            pct_at_max = float(np.mean(at_max))
+            pct_at_min = float(np.mean(at_min))
+            pct_grown = float(np.mean(grown))
+            pct_shrunk = float(np.mean(shrunk))
+            grow_support = float(np.mean(grow_sig))
+            shrink_support = float(np.mean(shrink_sig))
+
+            high_dispersion = iqr_s >= th.dispersion_iqr_cutoff or std_s >= th.dispersion_std_cutoff
+            if high_dispersion:
+                classification = "UNSTABLE"
+            elif grow_support >= th.consensus_fraction and shrink_support < (1.0 - th.consensus_fraction):
+                classification = "CONSISTENT_GROW"
+            elif shrink_support >= th.consensus_fraction and grow_support < (1.0 - th.consensus_fraction):
+                classification = "CONSISTENT_SHRINK"
+            else:
+                classification = "UNSTABLE"
+
+            direction_consensus = max(grow_support, shrink_support)
+            stability_score = max(0.0, min(1.0, direction_consensus * max(0.0, 1.0 - std_s)))
+
+        rows.append(
+            DealStabilityRow(
+                layer_key=key,
+                programme_id=init_row.programme_id,
+                layer_id=init_row.layer_id,
+                cedent_name=init_row.cedent_name,
+                programme_name=init_row.programme_name,
+                layer_name=init_row.layer_name,
+                direction=init_row.direction,
+                status=init_row.status,
+                region_perils=list(init_row.region_perils),
+                classification=classification,
+                locked=is_locked,
+                stability_score=round(stability_score, 4),
+                current_share=round(cur_s, 4),
+                recommended_share=round(rec_s, 4),
+                min_share=round(min_s, 4),
+                median_share=round(med_s, 4),
+                max_share=round(max_s, 4),
+                mean_share=round(mean_s, 4),
+                std_share=round(std_s, 4),
+                iqr_share=round(iqr_s, 4),
+                bound_min_share=round(float(lb), 4),
+                bound_max_share=round(float(ub), 4),
+                median_delta_share=round(med_s - cur_s, 4),
+                pct_at_max=round(pct_at_max, 4),
+                pct_at_min=round(pct_at_min, 4),
+                pct_grown=round(pct_grown, 4),
+                pct_shrunk=round(pct_shrunk, 4),
+                grow_support=round(grow_support, 4),
+                shrink_support=round(shrink_support, 4),
+                current_capital_m=round(float(init_row.optimal_capital_m), 4),
+                mean_optimal_capital_m=round(float(np.mean(caps)), 4),
+                current_expected_profit_m=round(float(init_row.optimal_expected_profit_m), 4),
+                mean_optimal_expected_profit_m=round(float(np.mean(profs)), 4),
+            )
+        )
+
+    rows.sort(
+        key=lambda r: (
+            _STABILITY_BUCKET_ORDER[r.classification],
+            -r.stability_score,
+            -abs(r.median_delta_share),
+            r.layer_key,
+        )
+    )
+
+    grow_rows = [r for r in rows if r.classification == "CONSISTENT_GROW"]
+    shrink_rows = [r for r in rows if r.classification == "CONSISTENT_SHRINK"]
+    unstable_rows = [r for r in rows if r.classification == "UNSTABLE"]
+
+    total_mean_opt_cap = sum(r.mean_optimal_capital_m for r in rows)
+    total_mean_opt_ret = sum(r.mean_optimal_expected_profit_m for r in rows)
+    total_cur_cap = sum(r.current_capital_m for r in rows)
+    total_cur_ret = sum(r.current_expected_profit_m for r in rows)
+
+    return DealStabilitySummary(
+        feasible_point_count=len(feasible_pts),
+        total_point_count=len(frontier_pts),
+        consistent_grow_count=len(grow_rows),
+        consistent_shrink_count=len(shrink_rows),
+        unstable_count=len(unstable_rows),
+        thresholds=th,
+        grow_themes=_build_bucket_themes(
+            grow_rows,
+            use_optimal=True,
+            total_capital_denom=total_mean_opt_cap,
+            total_return_denom=total_mean_opt_ret,
+        ),
+        shrink_themes=_build_bucket_themes(
+            shrink_rows,
+            use_optimal=False,
+            total_capital_denom=total_cur_cap,
+            total_return_denom=total_cur_ret,
+        ),
+        deals=rows,
+    )
+
+
 def explore_efficient_frontier(
     *,
     req: OptimizerRequest,
@@ -2246,6 +2663,12 @@ def explore_efficient_frontier(
             },
             breadcrumb=explore_breadcrumb,
         )
+        infeasible_stability = compute_deal_stability(
+            initial_layers=init_layers,
+            frontier_pts=infeasible_pts,
+            resolved_bounds_by_key={},
+            recommended_index=0,
+        )
         return FrontierExplorerResponse(
             mode=req.mode,
             granularity=req.granularity,
@@ -2261,6 +2684,7 @@ def explore_efficient_frontier(
             peak_return_to_tvar_1000_index=0,
             peak_return_to_std_dev_index=0,
             frontier=infeasible_pts,
+            deal_stability=infeasible_stability,
             conflicts=conflicts,
             manifest=manifest,
         )
@@ -2467,6 +2891,16 @@ def explore_efficient_frontier(
     else:
         rec_idx = 0
 
+    resolved_bounds_by_key = {
+        it["layer_key"]: bound for it, bound in zip(items, _resolve_item_bounds(layer_req, items))
+    }
+    deal_stability = compute_deal_stability(
+        initial_layers=init_layers,
+        frontier_pts=frontier_pts,
+        resolved_bounds_by_key=resolved_bounds_by_key,
+        recommended_index=rec_idx,
+    )
+
     compute_ms = round((time.perf_counter() - t0) * 1000.0, 2)
     explore_input_hashes = {"sim_set": yelt.content_hash, "req": canonical_hash(req.model_dump()), **snapshot_hashes}
     explore_breadcrumb = [
@@ -2500,6 +2934,11 @@ def explore_efficient_frontier(
             "recommended_profit_m": frontier_pts[rec_idx].metrics.expected_profit_m,
             "recommended_tvar_250_m": frontier_pts[rec_idx].metrics.tvar_250_m,
             "recommended_return_to_tvar_250": frontier_pts[rec_idx].metrics.return_to_tvar_250,
+            "deal_stability_counts": {
+                "consistent_grow": deal_stability.consistent_grow_count,
+                "consistent_shrink": deal_stability.consistent_shrink_count,
+                "unstable": deal_stability.unstable_count,
+            },
         },
         breadcrumb=explore_breadcrumb,
     )
@@ -2519,6 +2958,7 @@ def explore_efficient_frontier(
         peak_return_to_tvar_1000_index=peak_1000_idx,
         peak_return_to_std_dev_index=peak_sd_idx,
         frontier=frontier_pts,
+        deal_stability=deal_stability,
         conflicts=conflicts,
         manifest=manifest,
     )

@@ -262,6 +262,7 @@ class ContractCreate(CamelModel):
     currency: str = "USD"
     sim_set_id: str = "sim-synth-cat-v1-100k"
     exposure_eclipse_programme_id: str | None = None
+    watched_folder: str | None = None
     region_perils: list[str] = ["US-FL-WS"]
     perils: list[PerilCode] = [PerilCode.WS]
     custom_tags: list[str] = []
@@ -294,6 +295,7 @@ class ContractUpdate(CamelModel):
     renewal_period: str | None = None
     custom_tags: list[str] | None = None
     exposure_eclipse_programme_id: str | None = None
+    watched_folder: str | None = None
     prior_contract_id: str | None = None
     chain_id: str | None = None
     profile: ProgrammeProfile | None = None
@@ -335,6 +337,7 @@ class ContractFull(CamelModel):
     currency: str = "USD"
     sim_set_id: str
     exposure_eclipse_programme_id: str | None = None
+    watched_folder: str | None = None
     region_perils: list[str] = []
     perils: list[PerilCode] = []
     custom_tags: list[str] = []

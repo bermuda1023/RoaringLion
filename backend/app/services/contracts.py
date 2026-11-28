@@ -552,6 +552,7 @@ def _record_to_full(r: ContractRecord) -> ContractFull:
         currency=r.currency,
         sim_set_id=r.sim_set_id,
         exposure_eclipse_programme_id=r.exposure_eclipse_programme_id,
+        watched_folder=getattr(r, "watched_folder", None),
         region_perils=json.loads(r.region_perils_json),
         perils=[PerilCode(p) for p in json.loads(r.perils_json)],
         custom_tags=json.loads(r.custom_tags_json),
@@ -1816,6 +1817,7 @@ class ContractStore:
             currency=normalized_payload.currency,
             sim_set_id=sim_set_id,
             exposure_eclipse_programme_id=normalized_payload.exposure_eclipse_programme_id,
+            watched_folder=normalized_payload.watched_folder,
             region_perils_json=json.dumps(normalized_payload.region_perils),
             perils_json=json.dumps([p.value for p in normalized_payload.perils]),
             custom_tags_json=json.dumps(normalized_payload.custom_tags),
@@ -1992,6 +1994,18 @@ class ContractStore:
     def add_layer(self, programme_id: str, spec: ContractLayerSpec) -> ContractFull | None:
         def edit(graph: GraphSpec, rec: ContractRecord) -> GraphSpec:
             add_layer_to_graph(graph, spec, rec.written_line, rec.signed_line, programme_id=programme_id)
+            return graph
+
+        return self._edit_layers(programme_id, edit)
+
+    def add_layers(self, programme_id: str, specs: list[ContractLayerSpec]) -> ContractFull | None:
+        """Atomically append multiple layers in a single DB transaction (no partial commits on error)."""
+        if not specs:
+            return self.get_contract(programme_id)
+
+        def edit(graph: GraphSpec, rec: ContractRecord) -> GraphSpec:
+            for spec in specs:
+                add_layer_to_graph(graph, spec, rec.written_line, rec.signed_line, programme_id=programme_id)
             return graph
 
         return self._edit_layers(programme_id, edit)

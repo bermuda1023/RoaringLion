@@ -11,10 +11,12 @@ import { PortfolioOptimizer } from './pages/PortfolioOptimizer';
 import { PortfolioReturns } from './pages/PortfolioReturns';
 import { SimSetCatalog } from './pages/SimSetCatalog';
 import { StructuringStudio } from './pages/StructuringStudio';
+import { SubmissionsInbox } from './pages/SubmissionsInbox';
 import type { DeterministicLossRow, ViewOfRisk } from './types/contracts';
 
 type TabKey =
   | 'cms'
+  | 'submissions'
   | 'simsets'
   | 'dag'
   | 'deterministic'
@@ -30,6 +32,7 @@ const NAV_GROUPS: { label: string; items: { key: TabKey; label: string; icon: st
     label: 'Underwriting',
     items: [
       { key: 'cms', label: 'Contracts', icon: 'ledger' },
+      { key: 'submissions', label: 'Submissions', icon: 'inbox' },
       { key: 'dag', label: 'Structuring Studio', icon: 'graph' },
       { key: 'deterministic', label: 'Deterministic', icon: 'list' },
     ],
@@ -58,6 +61,7 @@ const NAV_GROUPS: { label: string; items: { key: TabKey; label: string; icon: st
 
 const PAGE_INFO: Record<TabKey, { title: string; subtitle: string }> = {
   cms: { title: 'Contract Management', subtitle: 'Programme ledger (Treaty, ILW & Retro), dossiers, and renewal history' },
+  submissions: { title: 'Submission Intake', subtitle: 'Drop-in, Email, and Watched Folder intake — draft review before writing to CMS' },
   dag: { title: 'Structuring Studio', subtitle: 'Build layer structures and review loss statistics' },
   deterministic: { title: 'Deterministic Scenarios', subtitle: 'Recovery and erosion statements for named events' },
   portfolio: { title: 'Portfolio Returns', subtitle: 'Live EP curves, return-period analytics, timeline comparisons, and capital allocation' },
@@ -255,6 +259,15 @@ export function App() {
         )}
 
         {tab === 'modelsops' && <CatModelsAndOps />}
+
+        {tab === 'submissions' && (
+          <SubmissionsInbox
+            onOpenProgramme={(progId) => {
+              setSelectedProgId(progId);
+              setTab('dag');
+            }}
+          />
+        )}
 
         {tab === 'dag' && selectedProg && programmesQ.data && (
           <StructuringStudio selectedProg={selectedProg} onSelectProgramme={setSelectedProgId} />

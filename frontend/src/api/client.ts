@@ -71,6 +71,7 @@ export interface ContractFull extends ProgrammeDeal {
   frontingFeePct: number;
   customTags: string[];
   exposureEclipseProgrammeId?: string | null;
+  watchedFolder?: string | null;
   profile: ProgrammeProfile;
   version: number;
   contentHash: string;
