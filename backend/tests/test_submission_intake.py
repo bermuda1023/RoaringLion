@@ -1525,6 +1525,154 @@ def test_watched_folder_rejects_symlink_pointing_outside_root(tmp_path: Path, mo
     client.put("/api/intake/programmes/prog-farmers-us-27/watched-folder", json={"watchedFolder": None})
 
 
+def test_imap_quarantines_poison_yelt_while_ingesting_valid_sibling_pdf(monkeypatch):
+    """Bugbot: Poison YELT on an IMAP message is quarantined per-attachment while valid sibling PDF still becomes a draft."""
+    from email.message import EmailMessage
+    import app.services.intake as intake_mod
+
+    monkeypatch.setenv("ROARING_LION_SUBMISSIONS_EMAIL", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_IMAP_HOST", "imap.roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_USERNAME", "submissions@roaringlion.test")
+    monkeypatch.setenv("ROARING_LION_EMAIL_PASSWORD", "test-pass")
+    monkeypatch.setenv("ROARING_LION_INTAKE_POLL_SECRET", "sibling-secret")
+
+    valid_pdf = _make_minimal_pdf([
+        "Cedent: Sibling Survivor Mutual",
+        "Programme: Sibling Wind XL 2027",
+        "Inception: 2027-01-01",
+        "Region: US-FL-WS",
+        "Layer 1: $12M xs $24M | Premium $2.2M",
+    ])
+    msg = EmailMessage()
+    msg["Message-ID"] = "<imap-poison-plus-pdf@test>"
+    msg["From"] = "broker@example.com"
+    msg["Subject"] = "Poison YELT + Valid PDF"
+    msg.set_content("Attached YELT and slip")
+    msg.add_attachment(
+        b"trial_id,event_id,loss_amount\n5000000,1001,10.0\n",
+        maintype="text",
+        subtype="csv",
+        filename="poison_yelt.csv",
+    )
+    msg.add_attachment(valid_pdf, maintype="application", subtype="pdf", filename="valid_sibling.pdf")
+    raw_msg = msg.as_bytes()
+    seen_flags: set[bytes] = set()
+    fetch_count = {"n": 0}
+
+    class FakeMixedPoisonIMAP:
+        def __init__(self, host: str, port: int, ssl_context=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user: str, password: str):
+            return ("OK", [b"ok"])
+
+        def select(self, mailbox: str):
+            return ("OK", [b"1"])
+
+        def search(self, charset, criterion: str):
+            unseen = [b"1"] if b"1" not in seen_flags else []
+            return ("OK", [b" ".join(unseen)])
+
+        def fetch(self, num: bytes, cmd: str):
+            fetch_count["n"] += 1
+            if "RFC822.SIZE" in cmd:
+                return ("OK", [f"1 (RFC822.SIZE {len(raw_msg)})".encode("ascii")])
+            return ("OK", [(b"1 (BODY[] {100})", raw_msg)])
+
+        def store(self, num: bytes, op: str, flags: str):
+            if "+FLAGS" in op and "Seen" in flags:
+                seen_flags.add(num)
+            return ("OK", [])
+
+    monkeypatch.setattr(intake_mod.imaplib, "IMAP4_SSL", FakeMixedPoisonIMAP)
+
+    # Poll 1: valid_sibling.pdf becomes a draft, poison_yelt.csv is quarantined, message marked \Seen
+    p1 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "sibling-secret"})
+    assert p1.status_code == 200, p1.text
+    drafts = p1.json()["drafts"]
+    assert len(drafts) == 1
+    assert drafts[0]["sourceFilename"] == "valid_sibling.pdf"
+    assert drafts[0]["extracted"]["cedentName"] == "Sibling Survivor Mutual"
+    assert any("poison_yelt.csv" in w for w in drafts[0]["extracted"]["warnings"])
+    assert b"1" in seen_flags
+
+    # Poll 2: message is already \Seen and not reprocessed
+    prev_fetches = fetch_count["n"]
+    p2 = client.post("/api/intake/email/poll", headers={"X-Intake-Poll-Secret": "sibling-secret"})
+    assert p2.status_code == 200
+    assert p2.json()["processedCount"] == 0
+    assert fetch_count["n"] == prev_fetches
+
+    client.post(f"/api/intake/drafts/{drafts[0]['draftId']}/discard")
+
+
+def test_read_regular_file_nofollow_closes_fd_on_fstat_reject_and_no_double_close_on_read_error(tmp_path: Path, monkeypatch):
+    """Bugbot: _read_regular_file_nofollow must close fd on fstat reject and never double-close after fdopen."""
+    import os as _os
+    import stat as _stat
+    import app.services.intake as intake_mod
+
+    f = tmp_path / "sample.txt"
+    f.write_bytes(b"hello")
+
+    # 1. fstat reports size > max_bytes (file grew after lstat) -> os.close(fd) called exactly once
+    closed_fds: list[int] = []
+    orig_close = _os.close
+    orig_fstat = _os.fstat
+
+    def spy_close(fd: int):
+        closed_fds.append(fd)
+        return orig_close(fd)
+
+    class FakeOversizedStat:
+        st_mode = _stat.S_IFREG | 0o644
+        st_size = 999_999
+
+    monkeypatch.setattr(intake_mod.os, "close", spy_close)
+    monkeypatch.setattr(intake_mod.os, "fstat", lambda fd: FakeOversizedStat())
+    assert intake_mod._read_regular_file_nofollow(f, tmp_path, max_bytes=100) is None
+    assert len(closed_fds) == 1
+
+    # 2. Exception during read after os.fdopen takes ownership -> os.close NOT called directly (no double-close)
+    closed_fds.clear()
+    monkeypatch.setattr(intake_mod.os, "fstat", orig_fstat)
+
+    class FailingReader:
+        def __init__(self, real_fh):
+            self._real = real_fh
+            self.closed_count = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.closed_count += 1
+            self._real.close()
+            return False
+
+        def read(self, n: int = -1):
+            raise OSError("Simulated disk read error")
+
+    orig_fdopen = _os.fdopen
+    readers: list[FailingReader] = []
+
+    def spy_fdopen(fd: int, mode: str, closefd: bool = True):
+        r = FailingReader(orig_fdopen(fd, mode, closefd=closefd))
+        readers.append(r)
+        return r
+
+    monkeypatch.setattr(intake_mod.os, "fdopen", spy_fdopen)
+    assert intake_mod._read_regular_file_nofollow(f, tmp_path, max_bytes=100) is None
+    assert len(readers) == 1 and readers[0].closed_count == 1
+    assert closed_fds == []
+
+
 def test_parquet_yelt_reads_actual_trial_count():
     """Bugbot #2: Parquet YELT detection must read actual trial count instead of hardcoding 10,000."""
     import pyarrow as pa

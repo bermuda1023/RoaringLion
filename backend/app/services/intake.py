@@ -306,13 +306,25 @@ def _read_regular_file_nofollow(path: Path, root: Path, max_bytes: int) -> tuple
         fd = os.open(path, flags)
     except OSError:
         return None
+    fh = None
     try:
         fst = os.fstat(fd)
         if not stat.S_ISREG(fst.st_mode) or fst.st_size > max_bytes:
+            os.close(fd)
             return None
+        fh = os.fdopen(fd, "rb", closefd=True)
+    except Exception:
+        if fh is None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        return None
+    # `fh` is now the sole owner of `fd`; `with fh:` closes it exactly once (never double-closed).
+    try:
         chunks: list[bytes] = []
         total = 0
-        with os.fdopen(fd, "rb", closefd=True) as fh:
+        with fh:
             while True:
                 chunk = fh.read(256 * 1024)
                 if not chunk:
@@ -323,10 +335,6 @@ def _read_regular_file_nofollow(path: Path, root: Path, max_bytes: int) -> tuple
                 chunks.append(chunk)
         return b"".join(chunks), fst
     except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
         return None
 def _extract_fetch_payload(data: object) -> bytes | None:
     if not isinstance(data, list):
@@ -920,6 +928,21 @@ class SubmissionIntakeService:
                 .all()
             )
 
+    def _record_quarantined_email_item(self, external_key: str, programme_id: str | None = None) -> None:
+        with get_session() as db:
+            try:
+                db.add(
+                    WatchedIngestionRecord(
+                        door=IntakeDoor.EMAIL.value,
+                        programme_id=programme_id,
+                        external_key=external_key,
+                        draft_id="QUARANTINED",
+                    )
+                )
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+
     def _ingest_email_parts(
         self,
         *,
@@ -930,6 +953,7 @@ class SubmissionIntakeService:
         raw_attachments: list[tuple[int, str, bytes]],
         rejected_attachments: list[str] | None = None,
         has_existing_attachments: bool = False,
+        quarantine_bad_attachments: bool = False,
     ) -> list[SubmissionDraftOut]:
         """Ingest decoded email attachments (or body text) through the unified pipeline."""
         attachment_names = " ".join(fname for _, fname, _ in raw_attachments)
@@ -938,6 +962,7 @@ class SubmissionIntakeService:
         source_ref = f"Email from {sender}: {subject}"
 
         drafts: list[SubmissionDraftOut] = []
+        quarantined_notes: list[str] = []
 
         if raw_attachments:
             # First ingest any modelling attachments so their sim_set_id can attach to sibling PDF/Excel drafts.
@@ -959,15 +984,24 @@ class SubmissionIntakeService:
                 ext = Path(fname).suffix.lower()
                 item_key = f"email:{message_id}:att:{idx}:{fname}" if message_id else None
                 if ext in modelling_exts:
-                    d = self.ingest_file(
-                        raw_bytes=raw,
-                        filename=fname,
-                        door=IntakeDoor.EMAIL,
-                        source_ref=source_ref,
-                        target_programme_id=target_prog_id,
-                        hint_subject=f"{subject}\n{body_text}",
-                        dedup_key=item_key,
-                    )
+                    try:
+                        d = self.ingest_file(
+                            raw_bytes=raw,
+                            filename=fname,
+                            door=IntakeDoor.EMAIL,
+                            source_ref=source_ref,
+                            target_programme_id=target_prog_id,
+                            hint_subject=f"{subject}\n{body_text}",
+                            dedup_key=item_key,
+                        )
+                    except Exception as exc:
+                        if quarantine_bad_attachments and _is_deterministic_content_error(exc):
+                            logger.warning("Quarantining invalid email attachment '%s': %s", fname, exc)
+                            q_key = item_key or f"email:quarantine:{message_id or 'anon'}:{idx}:{fname}"
+                            self._record_quarantined_email_item(q_key, target_prog_id)
+                            quarantined_notes.append(f"{fname} ({exc})")
+                            continue
+                        raise
                     if d.sim_set_id:
                         attached_sim_id = d.sim_set_id
                     modelling_drafts.append(d)
@@ -1004,16 +1038,25 @@ class SubmissionIntakeService:
 
             for idx, fname, raw in doc_items:
                 item_key = f"email:{message_id}:att:{idx}:{fname}" if message_id else None
-                d = self.ingest_file(
-                    raw_bytes=raw,
-                    filename=fname,
-                    door=IntakeDoor.EMAIL,
-                    source_ref=source_ref,
-                    target_programme_id=target_prog_id,
-                    hint_subject=f"{subject}\n{body_text}",
-                    attach_sim_set_id=attached_sim_id,
-                    dedup_key=item_key,
-                )
+                try:
+                    d = self.ingest_file(
+                        raw_bytes=raw,
+                        filename=fname,
+                        door=IntakeDoor.EMAIL,
+                        source_ref=source_ref,
+                        target_programme_id=target_prog_id,
+                        hint_subject=f"{subject}\n{body_text}",
+                        attach_sim_set_id=attached_sim_id,
+                        dedup_key=item_key,
+                    )
+                except Exception as exc:
+                    if quarantine_bad_attachments and _is_deterministic_content_error(exc):
+                        logger.warning("Quarantining invalid email attachment '%s': %s", fname, exc)
+                        q_key = item_key or f"email:quarantine:{message_id or 'anon'}:{idx}:{fname}"
+                        self._record_quarantined_email_item(q_key, target_prog_id)
+                        quarantined_notes.append(f"{fname} ({exc})")
+                        continue
+                    raise
                 drafts.append(d)
 
             if not doc_items:
@@ -1039,15 +1082,27 @@ class SubmissionIntakeService:
             )
             drafts.append(d)
 
-        if rejected_attachments and drafts:
-            note = f"Skipped oversized attachment(s) exceeding {MAX_UPLOAD_MB} MB limit: {', '.join(rejected_attachments)}"
+        extra_warnings: list[str] = []
+        if rejected_attachments:
+            extra_warnings.append(
+                f"Skipped oversized attachment(s) exceeding {MAX_UPLOAD_MB} MB limit: {', '.join(rejected_attachments)}"
+            )
+        if quarantined_notes:
+            extra_warnings.append(
+                f"Quarantined invalid attachment(s): {'; '.join(quarantined_notes)}"
+            )
+        if extra_warnings and drafts:
             with get_session() as db:
                 for d in drafts:
                     rec = db.get(SubmissionDraftRecord, d.draft_id)
                     if rec:
                         ext_data = IntakeExtractedData(**json.loads(rec.extracted_json or "{}"))
-                        if note not in ext_data.warnings:
-                            ext_data.warnings.append(note)
+                        changed = False
+                        for note in extra_warnings:
+                            if note not in ext_data.warnings:
+                                ext_data.warnings.append(note)
+                                changed = True
+                        if changed:
                             rec.extracted_json = ext_data.model_dump_json()
                 db.commit()
             drafts = [self.get_draft(d.draft_id) or d for d in drafts]
@@ -1320,6 +1375,7 @@ class SubmissionIntakeService:
                             raw_attachments=raw_attachments,
                             rejected_attachments=rejected_attachments,
                             has_existing_attachments=already_stored_attachments > 0,
+                            quarantine_bad_attachments=True,
                         )
                 except Exception as exc:
                     if _is_deterministic_content_error(exc):
