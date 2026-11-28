@@ -659,17 +659,7 @@ export function PortfolioOptimizer({
         )}
 
         {forkedBranchMsg && (
-          <div
-            style={{
-              background: 'rgba(34, 197, 94, 0.12)',
-              border: '1px solid rgba(34, 197, 94, 0.4)',
-              color: '#7fe0a9',
-              borderRadius: 6,
-              padding: '8px 10px',
-              fontSize: 12,
-              marginBottom: 12,
-            }}
-          >
+          <div className="success-banner">
             {forkedBranchMsg}
           </div>
         )}
@@ -1079,7 +1069,7 @@ export function PortfolioOptimizer({
 
                         <button
                           className="btn btn-ghost"
-                          style={{ marginLeft: 'auto', color: '#f7a3a1', padding: '3px 8px' }}
+                          style={{ marginLeft: 'auto', color: 'var(--negative)', padding: '3px 8px' }}
                           onClick={() => setConstraints((cs) => cs.filter((x) => x.id !== c.id))}
                         >
                           Remove
@@ -1698,7 +1688,7 @@ export function PortfolioOptimizer({
                     .sort((a, b) => b.coTvar250Pct - a.coTvar250Pct)
                     .map((l) => l.coTvar250Pct)}
                   unit="%"
-                  color="#f43f5e"
+                  color="#e36b66"
                 />
               </div>
 

@@ -209,9 +209,9 @@ export function App() {
 
       <div className="app-main">
         <header className="page-header">
-          <div style={{ minWidth: 0 }}>
-            <div className="page-title">{page.title}</div>
-            <div className="page-subtitle">{page.subtitle}</div>
+          <div className="page-heading">
+            <h1 className="page-title">{page.title}</h1>
+            <p className="page-subtitle">{page.subtitle}</p>
           </div>
           <div className="page-meta">
             {selectedProg && ['dag', 'burnclaims', 'deterministic'].includes(tab) && (

@@ -979,17 +979,7 @@ export function ContractManager({
           {dossierTab === 'profile' && (
             <>
               {savedMsg && (
-                <div
-                  style={{
-                    background: 'rgba(34, 197, 94, 0.12)',
-                    border: '1px solid rgba(34, 197, 94, 0.4)',
-                    color: '#7fe0a9',
-                    borderRadius: 6,
-                    padding: '6px 10px',
-                    fontSize: 12,
-                    marginBottom: 10,
-                  }}
-                >
+                <div className="success-banner">
                   {savedMsg}
                 </div>
               )}

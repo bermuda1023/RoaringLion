@@ -1,4 +1,5 @@
 import * as echarts from 'echarts';
+import { chartSeries, chartTheme } from './chartTheme';
 import { useEffect, useRef } from 'react';
 import {
   AXIS_LABELS,
@@ -97,7 +98,7 @@ export interface FrontierExplorerPoint {
   returnPeriodContributions: ReturnPeriodStackRow[];
 }
 
-const PALETTE = ['#e8a84a', '#5cad7a', '#8a9bb0', '#c4722a', '#7a9e8e', '#f0c57a', '#e0706a', '#9a9082'];
+const PALETTE = chartSeries;
 const PEAK_STAR_SYMBOL =
   'path://M12 2l2.9 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l7.1-1.01L12 2z';
 
@@ -116,16 +117,16 @@ function buildPointTooltip(
   const r1000 = getRatioValue(metrics, 'returnToTvar1000');
   const rSd = getRatioValue(metrics, 'returnToStdDev');
   const peakTag = isPeak
-    ? ` <span style="color:#5cad7a;font-weight:700">★ Peak ${horizonShortLabel}</span>`
+    ? ` <span style="color:${chartTheme.positive};font-weight:700">★ Peak ${horizonShortLabel}</span>`
     : '';
   return [
     `<b>${title}</b>${peakTag}`,
     `${AXIS_LABELS[xKey]}: <b>${formatAxisValue(xKey, xVal)}</b>`,
     `${AXIS_LABELS[yKey]}: <b>${formatAxisValue(yKey, yVal)}</b>`,
-    `<span style="color:#9a9082">Exp Return:</span> <b>${fmtMoneyM(metrics.expectedProfitM, 2)}</b> · <span style="color:#9a9082">ROC:</span> <b>${fmtPct(metrics.meanRocPct, 2)}</b>`,
-    `<span style="color:#9a9082">Ret/TVaR 100 / 250 / 1000:</span> <b>${formatRatioDual(r100)}</b> · <b>${formatRatioDual(r250)}</b> · <b>${formatRatioDual(r1000)}</b>`,
+    `<span style="color:${chartTheme.text}">Exp Return:</span> <b>${fmtMoneyM(metrics.expectedProfitM, 2)}</b> · <span style="color:${chartTheme.text}">ROC:</span> <b>${fmtPct(metrics.meanRocPct, 2)}</b>`,
+    `<span style="color:${chartTheme.text}">Ret/TVaR 100 / 250 / 1000:</span> <b>${formatRatioDual(r100)}</b> · <b>${formatRatioDual(r250)}</b> · <b>${formatRatioDual(r1000)}</b>`,
     ...((metrics.stdDevM ?? 0) > 1e-6
-      ? [`<span style="color:#9a9082">Ret/Std Dev:</span> <b>${formatRatioDual(rSd, true)}</b>`]
+      ? [`<span style="color:${chartTheme.text}">Ret/Std Dev:</span> <b>${formatRatioDual(rSd, true)}</b>`]
       : []),
   ].join('<br/>');
 }
@@ -176,9 +177,9 @@ export function ParetoFrontierChart({
       tooltip: {
         trigger: 'item',
         confine: true,
-        backgroundColor: '#1b1713',
-        borderColor: '#3a3229',
-        textStyle: { color: '#f7f1e6', fontSize: 11.5 },
+        backgroundColor: chartTheme.tooltipBg,
+        borderColor: chartTheme.axis,
+        textStyle: { color: chartTheme.textStrong, fontSize: 11.5 },
         formatter: (params: any) => {
           const d = params?.data;
           if (!d || d.kind === 'tangent') return '';
@@ -201,9 +202,9 @@ export function ParetoFrontierChart({
         type: 'scroll',
         bottom: 0,
         itemGap: 10,
-        pageIconColor: '#9a9082',
-        pageTextStyle: { color: '#9a9082', fontSize: 10 },
-        textStyle: { color: '#9a9082', fontSize: 10.5 },
+        pageIconColor: chartTheme.text,
+        pageTextStyle: { color: chartTheme.text, fontSize: 12 },
+        textStyle: { color: chartTheme.text, fontSize: 12 },
       },
       grid: { left: isNarrow ? 54 : 68, right: 24, top: 24, bottom: 70 },
       xAxis: {
@@ -211,26 +212,26 @@ export function ParetoFrontierChart({
         name: AXIS_LABELS[xKey],
         nameLocation: 'middle',
         nameGap: 24,
-        nameTextStyle: { color: '#9a9082', fontSize: 11 },
+        nameTextStyle: { color: chartTheme.text, fontSize: 11 },
         axisLabel: {
-          color: '#9a9082',
+          color: chartTheme.text,
           fontSize: 10,
           formatter: (val: number) => formatAxisTick(xKey, val),
         },
-        splitLine: { lineStyle: { color: '#2a241e' } },
+        splitLine: { lineStyle: { color: chartTheme.grid } },
         min: tangent ? minPlotX : undefined,
         scale: !tangent,
       },
       yAxis: {
         type: 'value',
         name: isNarrow ? '' : AXIS_LABELS[yKey],
-        nameTextStyle: { color: '#9a9082', fontSize: 11 },
+        nameTextStyle: { color: chartTheme.text, fontSize: 11 },
         axisLabel: {
-          color: '#9a9082',
+          color: chartTheme.text,
           fontSize: 10,
           formatter: (val: number) => formatAxisTick(yKey, val),
         },
-        splitLine: { lineStyle: { color: '#2a241e' } },
+        splitLine: { lineStyle: { color: chartTheme.grid } },
         min: tangent ? minPlotY : undefined,
         scale: !tangent,
       },
@@ -243,11 +244,11 @@ export function ParetoFrontierChart({
                 smooth: false,
                 symbol: 'none',
                 silent: true,
-                lineStyle: { color: '#5cad7a', width: 1.5, type: 'dashed', opacity: 0.85 },
+                lineStyle: { color: chartTheme.positive, width: 1.5, type: 'dashed', opacity: 0.85 },
                 endLabel: {
                   show: !isNarrow,
                   formatter: tangent.label,
-                  color: '#8fd4a8',
+                  color: chartTheme.positiveSoft,
                   fontSize: 10.5,
                   fontWeight: 600,
                   distance: 4,
@@ -263,12 +264,12 @@ export function ParetoFrontierChart({
           smooth: false,
           symbol: 'circle',
           symbolSize: 9,
-          lineStyle: { color: '#e8a84a', width: 2.4 },
-          itemStyle: { color: '#e8a84a', borderColor: '#0c0a08', borderWidth: 1.5 },
+          lineStyle: { color: chartTheme.brass, width: 2.4 },
+          itemStyle: { color: chartTheme.brass, borderColor: chartTheme.ink, borderWidth: 1.5 },
           areaStyle: {
             color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(232, 168, 74, 0.18)' },
-              { offset: 1, color: 'rgba(232, 168, 74, 0.01)' },
+              { offset: 0, color: 'rgba(226, 177, 90, 0.2)' },
+              { offset: 1, color: 'rgba(226, 177, 90, 0.02)' },
             ]),
           },
           data: sorted.map((p) => ({
@@ -285,7 +286,7 @@ export function ParetoFrontierChart({
                 type: 'scatter',
                 symbol: PEAK_STAR_SYMBOL,
                 symbolSize: 18,
-                itemStyle: { color: '#5cad7a', borderColor: '#f7f1e6', borderWidth: 1.5 },
+                itemStyle: { color: chartTheme.positive, borderColor: chartTheme.textStrong, borderWidth: 1.5 },
                 data: [
                   {
                     value: [getAxisPlotValue(peak.metrics, xKey), getAxisPlotValue(peak.metrics, yKey)],
@@ -304,7 +305,7 @@ export function ParetoFrontierChart({
                 type: 'effectScatter',
                 symbolSize: 14,
                 rippleEffect: { scale: 2.5, brushType: 'stroke' },
-                itemStyle: { color: '#f0c57a', borderColor: '#f7f1e6', borderWidth: 2 },
+                itemStyle: { color: chartTheme.brassSoft, borderColor: chartTheme.textStrong, borderWidth: 2 },
                 data: [
                   {
                     value: [getAxisPlotValue(sel.metrics, xKey), getAxisPlotValue(sel.metrics, yKey)],
@@ -321,7 +322,7 @@ export function ParetoFrontierChart({
           type: 'scatter',
           symbol: 'diamond',
           symbolSize: 13,
-          itemStyle: { color: '#e0706a', borderColor: '#f0a8a4', borderWidth: 1.5 },
+          itemStyle: { color: chartTheme.negative, borderColor: '#f0a8a4', borderWidth: 1.5 },
           data: [{ value: [getAxisPlotValue(initial, xKey), getAxisPlotValue(initial, yKey)], kind: 'initial' }],
           z: 9,
         },
@@ -379,21 +380,24 @@ export function PortfolioRadarChart({
       backgroundColor: 'transparent',
       tooltip: {
         confine: true,
-        backgroundColor: '#1b1713',
-        borderColor: '#3a3229',
-        textStyle: { color: '#f7f1e6', fontSize: 11 },
+        backgroundColor: chartTheme.tooltipBg,
+        borderColor: chartTheme.axis,
+        textStyle: { color: chartTheme.textStrong, fontSize: 11 },
       },
       legend: {
+        type: 'scroll',
         bottom: 0,
-        textStyle: { color: '#9a9082', fontSize: 11 },
+        left: 0,
+        right: 8,
+        textStyle: { color: chartTheme.text, fontSize: 12 },
       },
       radar: {
-        radius: '64%',
+        radius: '62%',
         center: ['50%', '46%'],
-        axisName: { color: '#ebe4d8', fontSize: 10 },
-        splitArea: { areaStyle: { color: ['rgba(42,36,30,0.25)', 'rgba(20,17,14,0.25)'] } },
-        splitLine: { lineStyle: { color: '#3a3229' } },
-        axisLine: { lineStyle: { color: '#3a3229' } },
+        axisName: { color: chartTheme.text, fontSize: 12 },
+        splitArea: { areaStyle: { color: ['rgba(18,36,51,0.55)', 'rgba(8,19,28,0.35)'] } },
+        splitLine: { lineStyle: { color: chartTheme.axis } },
+        axisLine: { lineStyle: { color: chartTheme.axis } },
         indicator: [
           { name: 'TVaR 1-in-100', min: -maxAbs, max: maxAbs },
           { name: 'Exp Return', min: -maxAbs, max: maxAbs },
@@ -410,16 +414,16 @@ export function PortfolioRadarChart({
             {
               name: 'Initial Portfolio (0%)',
               value: [0, 0, 0, 0, 0, 0],
-              lineStyle: { color: '#6b6358', width: 1.5, type: 'dashed' },
-              itemStyle: { color: '#6b6358' },
-              areaStyle: { color: 'rgba(107, 99, 88, 0.22)' },
+              lineStyle: { color: chartTheme.slate, width: 1.5, type: 'dashed' },
+              itemStyle: { color: chartTheme.slate },
+              areaStyle: { color: 'rgba(138, 160, 181, 0.22)' },
             },
             {
               name: 'Proposed (% Δ vs Initial)',
               value: pVals,
-              lineStyle: { color: '#e8a84a', width: 2.2 },
-              itemStyle: { color: '#e8a84a' },
-              areaStyle: { color: 'rgba(232, 168, 74, 0.25)' },
+              lineStyle: { color: chartTheme.brass, width: 2.2 },
+              itemStyle: { color: chartTheme.brass },
+              areaStyle: { color: 'rgba(226, 177, 90, 0.25)' },
             },
           ],
         },
@@ -454,27 +458,27 @@ export function ReturnPeriodStackChart({ rows }: { rows: ReturnPeriodStackRow[] 
       tooltip: {
         trigger: 'axis',
         confine: true,
-        backgroundColor: '#1b1713',
-        borderColor: '#3a3229',
-        textStyle: { color: '#f7f1e6', fontSize: 11 },
+        backgroundColor: chartTheme.tooltipBg,
+        borderColor: chartTheme.axis,
+        textStyle: { color: chartTheme.textStrong, fontSize: 11 },
       },
       legend: {
         type: 'scroll',
         bottom: 0,
-        textStyle: { color: '#9a9082', fontSize: 10 },
+        textStyle: { color: chartTheme.text, fontSize: 12 },
       },
       grid: { left: 48, right: 16, top: 20, bottom: 48 },
       xAxis: {
         type: 'category',
         data: xLabels,
-        axisLabel: { color: '#9a9082', fontSize: 10 },
+        axisLabel: { color: chartTheme.text, fontSize: 10 },
       },
       yAxis: {
         type: 'value',
         name: '$M',
-        nameTextStyle: { color: '#9a9082', fontSize: 10 },
-        axisLabel: { color: '#9a9082', fontSize: 10 },
-        splitLine: { lineStyle: { color: '#2a241e' } },
+        nameTextStyle: { color: chartTheme.text, fontSize: 10 },
+        axisLabel: { color: chartTheme.text, fontSize: 10 },
+        splitLine: { lineStyle: { color: chartTheme.grid } },
       },
       series: [
         ...layerNames.map((name, idx) => ({
@@ -493,8 +497,8 @@ export function ReturnPeriodStackChart({ rows }: { rows: ReturnPeriodStackRow[] 
           type: 'line',
           smooth: 0.2,
           showSymbol: false,
-          lineStyle: { color: '#f7f1e6', width: 2, type: 'dashed' },
-          itemStyle: { color: '#f7f1e6' },
+          lineStyle: { color: chartTheme.textStrong, width: 2, type: 'dashed' },
+          itemStyle: { color: chartTheme.textStrong },
           data: rows.map((r) => Number(r.totalLossM.toFixed(2))),
           z: 10,
         },
@@ -537,9 +541,9 @@ export function LayerContributionBarChart({
       tooltip: {
         trigger: 'axis',
         confine: true,
-        backgroundColor: '#1b1713',
-        borderColor: '#3a3229',
-        textStyle: { color: '#f7f1e6', fontSize: 11 },
+        backgroundColor: chartTheme.tooltipBg,
+        borderColor: chartTheme.axis,
+        textStyle: { color: chartTheme.textStrong, fontSize: 11 },
         formatter: (params: any) => {
           const p = params?.[0];
           if (!p) return '';
@@ -551,7 +555,7 @@ export function LayerContributionBarChart({
         type: 'category',
         data: labels,
         axisLabel: {
-          color: '#9a9082',
+          color: chartTheme.text,
           fontSize: 10,
           interval: 0,
           rotate: 16,
@@ -561,18 +565,18 @@ export function LayerContributionBarChart({
       yAxis: {
         type: 'value',
         axisLabel: {
-          color: '#9a9082',
+          color: chartTheme.text,
           fontSize: 10,
           formatter: unit === '%'? '{value}%' : '${value}m',
         },
-        splitLine: { lineStyle: { color: '#2a241e' } },
+        splitLine: { lineStyle: { color: chartTheme.grid } },
       },
       series: [
         {
           type: 'bar',
           barMaxWidth: 36,
           itemStyle: {
-            color: (params: any) => (Number(params.value) < 0 ? '#5cad7a' : color),
+            color: (params: any) => (Number(params.value) < 0 ? chartTheme.positive : color),
             borderRadius: [4, 4, 0, 0],
           },
           data: values,

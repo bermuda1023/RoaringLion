@@ -934,8 +934,8 @@ export function StructuringStudio({
                     );
                   })}
                 <button
-                  className="btn"
-                  style={{ background: '#7f1d1d', marginTop: 6 }}
+                  className="btn btn-danger"
+                  style={{ marginTop: 6 }}
                   onClick={deleteSelectedNode}
                 >
                   Delete Node
@@ -982,8 +982,7 @@ export function StructuringStudio({
                   />
                 </label>
                 <button
-                  className="btn"
-                  style={{ background: '#7f1d1d' }}
+                  className="btn btn-danger"
                   onClick={() => {
                     setDraftGraph((g) => removeEdge(g, selectedEdge.edgeId));
                     setSelectedEdgeId(null);
@@ -1045,7 +1044,7 @@ export function StructuringStudio({
               fitViewOptions={{ padding: 0.12 }}
               proOptions={{ hideAttribution: true }}
             >
-              <Background color="#2a241e" gap={22} />
+              <Background color="#2a4156" gap={22} />
               <Controls />
             </ReactFlow>
           </div>
